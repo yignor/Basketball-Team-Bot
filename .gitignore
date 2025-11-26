@@ -70,3 +70,8 @@ tmp/
 # Test files (keep locally)
 test_*.py
 test_*.json
+
+# Playwright
+.playwright/
+playwright-report/
+test-results/

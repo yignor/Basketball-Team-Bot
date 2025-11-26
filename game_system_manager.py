@@ -234,23 +234,57 @@ class GameSystemManager:
 
     @staticmethod
     def _normalize_name_for_search(name: str) -> str:
-        """Нормализует имя команды для сравнения"""
+        """Нормализует имя команды для сравнения
+        
+        Учитывает дефисы в названиях команд (например, "Военмех-Vintage").
+        Дефисы заменяются на пробелы для более гибкого поиска, но также сохраняется вариант с дефисом.
+        """
         if not isinstance(name, str):
             return ""
-        return re.sub(r"[\s\-_/]", "", name.strip().lower())
+        name = name.strip()
+        # Заменяем множественные пробелы на один
+        name = re.sub(r'\s+', ' ', name)
+        # Для поиска: убираем пробелы, но сохраняем дефисы как разделители
+        # Это позволяет находить "Военмех-Vintage" даже если в тексте "Военмех - Vintage"
+        normalized = re.sub(r'\s+', '', name.lower())
+        return normalized
 
     def _build_name_variants(self, *names: Optional[str]) -> Set[str]:
-        """Формирует набор уникальных вариантов имени команды"""
+        """Формирует набор уникальных вариантов имени команды
+        
+        Учитывает команды с дефисами (например, "Военмех-Vintage"):
+        - Оригинальное название с дефисом
+        - Вариант с пробелом вместо дефиса
+        - Нормализованный вариант без пробелов
+        """
         variants: Set[str] = set()
         for name in names:
             if not name or not isinstance(name, str):
                 continue
             stripped = name.strip()
             if stripped:
+                # Оригинальное название
                 variants.add(stripped)
+                
+                # Если есть дефис, добавляем варианты с пробелом и без разделителя
+                if '-' in stripped or '–' in stripped or '—' in stripped:
+                    # Вариант с пробелом вместо дефиса
+                    variant_with_space = re.sub(r'[-–—]', ' ', stripped)
+                    variants.add(variant_with_space)
+                    variants.add(variant_with_space.strip())
+                
+                # Нормализованный вариант (без пробелов, с дефисами)
                 normalized = self._normalize_name_for_search(stripped)
                 if normalized:
                     variants.add(normalized)
+                    
+                # Вариант без дефисов (для поиска "ВоенмехVintage")
+                variant_no_hyphen = re.sub(r'[-–—]', '', stripped)
+                if variant_no_hyphen != stripped:
+                    variants.add(variant_no_hyphen)
+                    normalized_no_hyphen = self._normalize_name_for_search(variant_no_hyphen)
+                    if normalized_no_hyphen:
+                        variants.add(normalized_no_hyphen)
         return variants
 
     def _find_matching_variant(self, normalized_text: str, variants: Sequence[str]) -> Optional[str]:
@@ -1443,7 +1477,10 @@ class GameSystemManager:
             # Получаем текст ссылки (обычно содержит названия команд)
             link_text = anchor.get_text(strip=True)
             if not link_text:
-                continue
+                # Если текста нет, проверяем title или другие атрибуты
+                link_text = anchor.get('title', '') or anchor.get('aria-label', '')
+                if not link_text:
+                    continue
             
             # Нормализуем текст для поиска
             normalized_text = self._normalize_name_for_search(link_text)
@@ -1452,13 +1489,65 @@ class GameSystemManager:
             own_match = self._find_matching_variant(normalized_text, list(own_variants))
             opponent_match = self._find_matching_variant(normalized_text, list(opponent_variants))
             
+            # Если не нашли обе команды, пробуем более гибкий поиск:
+            # Разбиваем текст ссылки по разделителям и проверяем каждую часть отдельно
+            if not (own_match and opponent_match):
+                # Разделители для парсинга названий команд в тексте ссылки
+                separators = [r'\s*[-–—]\s*', r'\s+против\s+', r'\s+vs\s+', r'\s+и\s+', r'\s+vs\.\s+']
+                
+                for sep_pattern in separators:
+                    parts = re.split(sep_pattern, link_text, flags=re.IGNORECASE)
+                    if len(parts) >= 2:
+                        # Проверяем каждую часть отдельно
+                        for part in parts:
+                            part_normalized = self._normalize_name_for_search(part)
+                            if not own_match:
+                                own_match = self._find_matching_variant(part_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(part_normalized, list(opponent_variants))
+                        
+                        # Также проверяем комбинации соседних частей (для команд с дефисами)
+                        # Например, "Военмех-Vintage" может быть разбито на "Военмех" и "Vintage"
+                        for i in range(len(parts) - 1):
+                            combined = f"{parts[i]}-{parts[i+1]}"
+                            combined_normalized = self._normalize_name_for_search(combined)
+                            if not own_match:
+                                own_match = self._find_matching_variant(combined_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(combined_normalized, list(opponent_variants))
+                            
+                            # Также пробуем без дефиса
+                            combined_no_hyphen = f"{parts[i]}{parts[i+1]}"
+                            combined_no_hyphen_normalized = self._normalize_name_for_search(combined_no_hyphen)
+                            if not own_match:
+                                own_match = self._find_matching_variant(combined_no_hyphen_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(combined_no_hyphen_normalized, list(opponent_variants))
+                        
+                        if own_match and opponent_match:
+                            break
+                
+                # Если все еще не нашли, проверяем родительский элемент (может содержать текст)
+                if not (own_match and opponent_match):
+                    parent = anchor.parent
+                    if parent:
+                        parent_text = parent.get_text(strip=True)
+                        if parent_text and len(parent_text) > len(link_text):
+                            parent_normalized = self._normalize_name_for_search(parent_text)
+                            if not own_match:
+                                own_match = self._find_matching_variant(parent_normalized, list(own_variants))
+                            if not opponent_match:
+                                opponent_match = self._find_matching_variant(parent_normalized, list(opponent_variants))
+            
             if own_match and opponent_match:
                 full_link = href if href.startswith('http') else urljoin(url, href)
                 print(f"✅ Найдена подходящая игра в fallback по тексту ссылки: {full_link}")
                 print(f"   Текст ссылки: {link_text}")
+                print(f"   Наша команда: {own_match}, Соперник: {opponent_match}")
                 return full_link, own_match
         
         # Если не нашли по тексту, пробуем старый способ (проверка содержимого страницы игры)
+        print(f"🔍 Поиск по тексту ссылки не дал результатов, проверяем содержимое страниц игр...")
         for anchor in anchors:
             href = anchor.get('href')
             if not href or ('gameId=' not in href and 'game.html' not in href):

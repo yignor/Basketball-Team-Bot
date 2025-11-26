@@ -7,3 +7,4 @@ telethon>=1.28.0
 gspread>=5.7.0
 google-auth>=2.0.0
 pytz>=2023.3
+playwright>=1.40.0

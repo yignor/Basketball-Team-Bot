@@ -60,7 +60,7 @@ CONFIG_HEADER = [
     "НАСТРОЙКИ (JSON)",
     "ДНИ НЕДЕЛИ",
     "URL FALLBACK",
-    "НАЗВАНИЕ FALLBACK"
+    "КОМАНДА ДЛЯ FALLBACK"
 ]
 CONFIG_SECTION_END_MARKERS = {
     "END",
@@ -249,11 +249,14 @@ class EnhancedDuplicateProtection:
                 header.extend([""] * (desired_length - len(header)))
             updated = False
             for index, expected in enumerate(CONFIG_HEADER):
-                if not header[index]:
+                current_value = header[index] if index < len(header) else ""
+                # Обновляем, если ячейка пустая или значение не соответствует ожидаемому
+                if not current_value or current_value.strip() != expected.strip():
                     header[index] = expected
                     updated = True
             if updated:
                 worksheet.update(f'A1:{chr(ord("A") + len(CONFIG_HEADER) - 1)}1', [header])
+                print(f"✅ Заголовки листа '{CONFIG_WORKSHEET_NAME}' обновлены")
             self._ensure_voting_section_structure(worksheet)
         except Exception as e:
             print(f"⚠️ Не удалось обновить заголовок листа '{CONFIG_WORKSHEET_NAME}': {e}")

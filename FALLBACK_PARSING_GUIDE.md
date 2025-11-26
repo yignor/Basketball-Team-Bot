@@ -95,7 +95,7 @@ for game in games:
 ```
 ТИП: FALLBACK_SOURCE
 URL FALLBACK: http://mb-78.ru/
-НАЗВАНИЕ FALLBACK: mb-78.ru
+КОМАНДА ДЛЯ FALLBACK: mb-78.ru
 ```
 
 Или в коде (временное решение):
