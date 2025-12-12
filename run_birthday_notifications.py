@@ -23,13 +23,22 @@ async def main():
     
     # Проверяем переменные окружения
     bot_token = os.getenv("BOT_TOKEN")
-    chat_id = os.getenv("CHAT_ID")
+    chat_ids_str = os.getenv("CHAT_ID")
+    if not chat_ids_str:
+        chat_ids = []
+    else:
+        # Разделяем по запятой или пробелу
+        chat_ids = []
+        for part in chat_ids_str.replace(',', ' ').split():
+            chat_id = part.strip()
+            if chat_id:
+                chat_ids.append(chat_id)
     google_credentials = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     
     print("🔧 ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ:")
     print(f"BOT_TOKEN: {'✅' if bot_token else '❌'}")
-    print(f"CHAT_ID: {'✅' if chat_id else '❌'}")
+    print(f"CHAT_IDs: {'✅' if chat_ids else '❌'} {len(chat_ids) if chat_ids else 0} чатов")
     print(f"GOOGLE_SHEETS_CREDENTIALS: {'✅' if google_credentials else '❌'}")
     print(f"SPREADSHEET_ID: {'✅' if spreadsheet_id else '❌'}")
     
@@ -52,8 +61,8 @@ async def main():
         print("❌ BOT_TOKEN не настроен")
         return
     
-    if not chat_id:
-        print("❌ CHAT_ID не настроен")
+    if not chat_ids:
+        print("❌ CHAT_ID не настроены")
         return
     
     if not google_credentials:
@@ -65,7 +74,7 @@ async def main():
         return
     
     print(f"✅ BOT_TOKEN: {bot_token[:10]}...")
-    print(f"✅ CHAT_ID: {chat_id}")
+    print(f"✅ CHAT_IDs: {', '.join(chat_ids)}")
     print(f"✅ SPREADSHEET_ID: {spreadsheet_id}")
     
     # Импортируем функцию проверки дней рождения

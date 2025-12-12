@@ -83,11 +83,25 @@ class VotingPollConfig:
 class VotingPollsManager:
     def __init__(self) -> None:
         self.bot: Optional[Bot] = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
-        self.chat_id: Optional[Any] = self._resolve_chat_id(CHAT_ID)
+        self.chat_ids: List[str] = self._get_chat_ids()
         self.automation_topics: Dict[str, Any] = {}
 
+    def _get_chat_ids(self) -> List[str]:
+        """Получает список ID чатов из переменной окружения CHAT_ID"""
+        if not CHAT_ID:
+            return []
+
+        # Разделяем по запятой или пробелу
+        chat_ids = []
+        for part in CHAT_ID.replace(',', ' ').split():
+            chat_id = part.strip()
+            if chat_id:
+                chat_ids.append(chat_id)
+
+        return chat_ids
+
     async def create_due_polls(self) -> bool:
-        if not self.bot or self.chat_id is None:
+        if not self.bot or not self.chat_ids:
             print("❌ BOT_TOKEN / CHAT_ID не настроены – голосования не будут отправлены")
             return False
 
@@ -224,31 +238,39 @@ class VotingPollsManager:
 
         bot_instance = cast(Bot, self.bot)
 
-        send_kwargs: Dict[str, Any] = {
-            "chat_id": self.chat_id,
-            "question": question,
-            "options": options,
-            "is_anonymous": is_anonymous,
-            "allows_multiple_answers": allows_multiple,
-        }
-        if topic_id is not None:
-            send_kwargs["message_thread_id"] = topic_id
-        if open_period is not None:
-            send_kwargs["open_period"] = open_period
-        if close_date is not None:
-            send_kwargs["close_date"] = close_date
+        # Отправляем опрос во все настроенные чаты
+        messages = []
+        for chat_id in self.chat_ids:
+            send_kwargs: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "question": question,
+                "options": options,
+                "is_anonymous": is_anonymous,
+                "allows_multiple_answers": allows_multiple,
+            }
+            if topic_id is not None:
+                send_kwargs["message_thread_id"] = topic_id
+            if open_period is not None:
+                send_kwargs["open_period"] = open_period
+            if close_date is not None:
+                send_kwargs["close_date"] = close_date
 
-        try:
-            message = await bot_instance.send_poll(**send_kwargs)
-        except TelegramError as error:
-            if "Message thread not found" in str(error) and "message_thread_id" in send_kwargs:
-                print("⚠️ Топик не найден, отправляем голосование в основной чат")
-                send_kwargs.pop("message_thread_id", None)
+            try:
                 message = await bot_instance.send_poll(**send_kwargs)
-            else:
-                if sheet_unique_key:
-                    duplicate_protection.update_record_status(sheet_unique_key, "ОШИБКА")
-                raise
+                messages.append(message)
+            except TelegramError as error:
+                if "Message thread not found" in str(error) and "message_thread_id" in send_kwargs:
+                    print(f"⚠️ Топик не найден в чате {chat_id}, отправляем голосование в основной чат")
+                    send_kwargs.pop("message_thread_id", None)
+                    message = await bot_instance.send_poll(**send_kwargs)
+                    messages.append(message)
+                else:
+                    if sheet_unique_key:
+                        duplicate_protection.update_record_status(sheet_unique_key, "ОШИБКА")
+                    raise
+
+        # Используем первое сообщение для совместимости
+        message = messages[0] if messages else None
 
                 if sheet_unique_key:
                     duplicate_protection.update_record_status(sheet_unique_key, "ОТПРАВЛЕН")

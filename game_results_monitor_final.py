@@ -33,6 +33,20 @@ load_environment()
 # Переменные окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+def get_chat_ids() -> List[str]:
+    """Получает список ID чатов из переменной окружения CHAT_ID"""
+    if not CHAT_ID:
+        return []
+
+    # Разделяем по запятой или пробелу
+    chat_ids = []
+    for part in CHAT_ID.replace(',', ' ').split():
+        chat_id = part.strip()
+        if chat_id:
+            chat_ids.append(chat_id)
+
+    return chat_ids
 ANNOUNCEMENTS_TOPIC_ID = os.getenv("ANNOUNCEMENTS_TOPIC_ID")
 
 print(f"🔧 ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ:")
@@ -440,7 +454,8 @@ class GameResultsMonitorFinal:
     
     async def send_game_result(self, game_info: Dict) -> bool:
         """Отправляет результат игры в Telegram"""
-        if not self.bot or not CHAT_ID:
+        chat_ids = get_chat_ids()
+        if not self.bot or not chat_ids:
             print("❌ Бот не инициализирован или CHAT_ID не настроен")
             return False
         

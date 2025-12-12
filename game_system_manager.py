@@ -31,6 +31,26 @@ CHAT_ID = os.getenv("CHAT_ID")
 GAMES_TOPIC_ID = os.getenv("GAMES_TOPIC_ID", "1282")  # Топик для опросов по играм
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"  # Тестовый режим
 
+def get_chat_ids() -> List[str]:
+    """Получает список ID чатов из переменной окружения CHAT_ID
+
+    Поддерживает форматы:
+    - одиночный ID: "123456789"
+    - несколько ID через запятую: "123456789,987654321,111111111"
+    - несколько ID через пробел: "123456789 987654321 111111111"
+    """
+    if not CHAT_ID:
+        return []
+
+    # Разделяем по запятой или пробелу
+    chat_ids = []
+    for part in CHAT_ID.replace(',', ' ').split():
+        chat_id = part.strip()
+        if chat_id:
+            chat_ids.append(chat_id)
+
+    return chat_ids
+
 AUTOMATION_KEY_GAME_POLLS = "GAME_POLLS"
 AUTOMATION_KEY_GAME_ANNOUNCEMENTS = "GAME_ANNOUNCEMENTS"
 AUTOMATION_KEY_GAME_UPDATES = "GAME_UPDATES"
@@ -793,7 +813,8 @@ class GameSystemManager:
         opponent: str,
         form_color: str,
     ) -> None:
-        if not CHAT_ID:
+        chat_ids = get_chat_ids()
+        if not chat_ids:
             print("⚠️ CHAT_ID отсутствует, пропускаем отправку календаря")
             return
 
@@ -821,25 +842,33 @@ class GameSystemManager:
             document = stream
 
         try:
-            send_kwargs: Dict[str, Any] = {
-                "chat_id": self._to_int(CHAT_ID) or CHAT_ID,
-                "document": document,
-                "caption": caption,
-            }
-            message_thread_id: Optional[int] = self.calendar_events_topic_id
-            if message_thread_id is not None:
-                send_kwargs["message_thread_id"] = message_thread_id
+            chat_ids = get_chat_ids()
+            if not chat_ids:
+                print("❌ Не настроены ID чатов (CHAT_ID)")
+                return
 
-            try:
-                await bot.send_document(**send_kwargs)
-            except Exception as primary_error:
-                if message_thread_id is not None and "Message thread not found" in str(primary_error):
-                    print(f"⚠️ Топик {message_thread_id} не найден, отправляем календарь в основной чат")
-                    self.calendar_events_topic_id = None
-                    send_kwargs.pop("message_thread_id", None)
+            message_thread_id: Optional[int] = self.calendar_events_topic_id
+
+            # Отправляем календарь в каждый чат
+            for chat_id in chat_ids:
+                send_kwargs: Dict[str, Any] = {
+                    "chat_id": self._to_int(chat_id) or chat_id,
+                    "document": document,
+                    "caption": caption,
+                }
+                if message_thread_id is not None:
+                    send_kwargs["message_thread_id"] = message_thread_id
+
+                try:
                     await bot.send_document(**send_kwargs)
-                else:
-                    raise primary_error
+                except Exception as primary_error:
+                    if message_thread_id is not None and "Message thread not found" in str(primary_error):
+                        print(f"⚠️ Топик {message_thread_id} не найден в чате {chat_id}, отправляем календарь в основной чат")
+                        self.calendar_events_topic_id = None
+                        send_kwargs.pop("message_thread_id", None)
+                        await bot.send_document(**send_kwargs)
+                    else:
+                        raise primary_error
 
             print(f"📆 Отправлено календарное событие {filename}")
             self._log_game_action("КАЛЕНДАРЬ_ИГРА", game_info, "ICS ОТПРАВЛЁН", filename)
@@ -1280,8 +1309,9 @@ class GameSystemManager:
 
     
     async def create_game_poll(self, game_info: Dict) -> Optional[str]:
-        """Создает опрос для игры в топике 1282 и возвращает текст вопроса"""
-        if not self.bot or not CHAT_ID:
+        """Создает опрос для игры во все настроенные чаты и возвращает текст вопроса"""
+        chat_ids = get_chat_ids()
+        if not self.bot or not chat_ids:
             print("❌ Бот или CHAT_ID не настроены")
             return None
         
@@ -1368,19 +1398,31 @@ class GameSystemManager:
                 "👨‍🏫 Тренер"
             ]
             
-            # Отправляем опрос (с проверкой топика)
+            # Отправляем опрос во все настроенные чаты (с проверкой топика)
             try:
-                send_kwargs: Dict[str, Any] = {
-                    "chat_id": self._to_int(CHAT_ID) or CHAT_ID,
-                    "question": question,
-                    "options": options,
-                    "is_anonymous": self.game_poll_is_anonymous,
-                    "allows_multiple_answers": self.game_poll_allows_multiple,
-                }
-                message_thread_id = self.game_poll_topic_id
-                if message_thread_id is not None:
-                    send_kwargs["message_thread_id"] = message_thread_id
-                poll_message = await bot.send_poll(**send_kwargs)
+                chat_ids = get_chat_ids()
+                if not chat_ids:
+                    print("❌ Не настроены ID чатов (CHAT_ID)")
+                    return None
+
+                # Отправляем опрос в каждый чат
+                poll_messages = []
+                for chat_id in chat_ids:
+                    send_kwargs: Dict[str, Any] = {
+                        "chat_id": self._to_int(chat_id) or chat_id,
+                        "question": question,
+                        "options": options,
+                        "is_anonymous": self.game_poll_is_anonymous,
+                        "allows_multiple_answers": self.game_poll_allows_multiple,
+                    }
+                    message_thread_id = self.game_poll_topic_id
+                    if message_thread_id is not None:
+                        send_kwargs["message_thread_id"] = message_thread_id
+                    poll_message = await bot.send_poll(**send_kwargs)
+                    poll_messages.append(poll_message)
+
+                # Используем первое сообщение для совместимости
+                poll_message = poll_messages[0] if poll_messages else None
             except Exception as e:
                 if "Message thread not found" in str(e):
                     thread_to_reset = send_kwargs.pop("message_thread_id", None)
@@ -1480,7 +1522,7 @@ class GameSystemManager:
                 # Если текста нет, проверяем title или другие атрибуты
                 link_text = anchor.get('title', '') or anchor.get('aria-label', '')
                 if not link_text:
-                    continue
+                continue
             
             # Нормализуем текст для поиска
             normalized_text = self._normalize_name_for_search(link_text)

@@ -18,9 +18,24 @@ class NotificationManager:
     
     def __init__(self):
         self.bot = None
-        self.chat_id = os.getenv('CHAT_ID')
+        self.chat_ids = self._get_chat_ids()
         self.notifications_file = "sent_notifications.json"
         self._init_bot()
+
+    def _get_chat_ids(self) -> List[str]:
+        """Получает список ID чатов из переменной окружения CHAT_ID"""
+        chat_id = os.getenv('CHAT_ID')
+        if not chat_id:
+            return []
+
+        # Разделяем по запятой или пробелу
+        chat_ids = []
+        for part in chat_id.replace(',', ' ').split():
+            cid = part.strip()
+            if cid:
+                chat_ids.append(cid)
+
+        return chat_ids
         
         # Загружаем отправленные уведомления из файла
         self.sent_game_end_notifications: Set[str] = set()
@@ -71,7 +86,7 @@ class NotificationManager:
     
     async def send_game_end_notification(self, game_info: Dict[str, Any], game_url: str):
         """Отправляет уведомление о завершении игры"""
-        if not self.bot or not self.chat_id:
+        if not self.bot or not self.chat_ids:
             logger.error("Бот или CHAT_ID не настроены")
             return
         bot = self.bot
@@ -96,7 +111,8 @@ class NotificationManager:
                 f"Ссылка на статистику: {game_url}"
             )
             
-            await bot.send_message(chat_id=self.chat_id, text=message)  # type: ignore[reportCallIssue]
+            for chat_id in self.chat_ids:
+                await bot.send_message(chat_id=chat_id, text=message)  # type: ignore[reportCallIssue]
             self.sent_game_end_notifications.add(notification_id)
             self._save_sent_notifications()
             logger.info(f"✅ Отправлено уведомление о завершении игры: {score}")
@@ -106,7 +122,7 @@ class NotificationManager:
     
     async def send_game_start_notification(self, game_info: Dict[str, Any], game_url: str):
         """Отправляет уведомление о начале игры"""
-        if not self.bot or not self.chat_id:
+        if not self.bot or not self.chat_ids:
             logger.error("Бот или CHAT_ID не настроены")
             return
         bot = self.bot
@@ -126,7 +142,8 @@ class NotificationManager:
             
             message = f"🏀 Игра {team1} против {team2} начинается в {game_time}!\n\nСсылка на игру: {game_url}"
             
-            await bot.send_message(chat_id=self.chat_id, text=message)  # type: ignore[reportCallIssue]
+            for chat_id in self.chat_ids:
+                await bot.send_message(chat_id=chat_id, text=message)  # type: ignore[reportCallIssue]
             self.sent_game_start_notifications.add(notification_id)
             self._save_sent_notifications()
             logger.info(f"✅ Отправлено уведомление о начале игры: {team1} vs {team2} в {game_time}")
@@ -154,7 +171,7 @@ class NotificationManager:
             logger.info("Уведомление о результате игры уже отправлено")
             return
         
-        if not self.bot or not self.chat_id:
+        if not self.bot or not self.chat_ids:
             logger.error("Бот или CHAT_ID не настроены")
             # Сохраняем состояние даже при отсутствии бота, чтобы избежать повторных попыток
             self.sent_game_result_notifications.add(notification_id)
@@ -214,7 +231,7 @@ class NotificationManager:
     
     async def send_morning_notification(self, games: List[Dict[str, Any]], date: str):
         """Отправляет утреннее уведомление о предстоящих играх"""
-        if not self.bot or not self.chat_id:
+        if not self.bot or not self.chat_ids:
             logger.error("Бот или CHAT_ID не настроены")
             return
         bot = self.bot
@@ -245,7 +262,8 @@ class NotificationManager:
                     message += f"   🔗 Ссылка: {game_url}\n"
                 message += "\n"
             
-            await bot.send_message(chat_id=self.chat_id, text=message)  # type: ignore[reportCallIssue]
+            for chat_id in self.chat_ids:
+                await bot.send_message(chat_id=chat_id, text=message)  # type: ignore[reportCallIssue]
             self.sent_morning_notifications.add(notification_id)
             self._save_sent_notifications()
             logger.info(f"✅ Отправлено утреннее уведомление для {len(games)} игр")

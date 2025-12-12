@@ -1634,9 +1634,9 @@ class FallbackGameMonitor:
                     
                     # Стратегия 5: Для globalleague.ru - ждем загрузки данных в таблице
                     if 'globalleague.ru' in url:
-                        try:
+                    try:
                             # Ждем, пока таблица заполнится данными
-                            await page.wait_for_function(
+                        await page.wait_for_function(
                                 '''
                                 () => {
                                     const tables = document.querySelectorAll('table');
@@ -1648,10 +1648,10 @@ class FallbackGameMonitor:
                                 }
                                 ''',
                                 timeout=10000
-                            )
+                        )
                             print(f"   ✅ Таблица заполнена данными")
-                        except:
-                            pass
+                    except:
+                        pass
                     
                     # Получаем HTML после рендеринга JavaScript
                     content = await page.content()
