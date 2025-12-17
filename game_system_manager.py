@@ -973,27 +973,28 @@ class GameSystemManager:
         message_thread_id: Optional[int] = self.game_updates_topic_id
 
         # Отправляем уведомление во все настроенные чаты
-        for chat_id in chat_ids:
-            send_kwargs: Dict[str, Any] = {
-                "chat_id": self._to_int(chat_id) or chat_id,
-                "text": message,
-            }
-            if message_thread_id is not None:
-                send_kwargs["message_thread_id"] = message_thread_id
+        try:
+            for chat_id in chat_ids:
+                send_kwargs: Dict[str, Any] = {
+                    "chat_id": self._to_int(chat_id) or chat_id,
+                    "text": message,
+                }
+                if message_thread_id is not None:
+                    send_kwargs["message_thread_id"] = message_thread_id
 
-            try:
-                await bot.send_message(**send_kwargs)
-                print(f"✅ Уведомление об изменениях отправлено в чат {chat_id}")
-            except Exception as primary_error:
-                if message_thread_id is not None and "Message thread not found" in str(primary_error):
-                    print(f"⚠️ Топик {message_thread_id} не найден в чате {chat_id}, отправляем обновление в основной чат")
-                    self.game_updates_topic_id = None
-                    send_kwargs.pop("message_thread_id", None)
+                try:
                     await bot.send_message(**send_kwargs)
-                    print(f"✅ Уведомление об изменениях отправлено в чат {chat_id} (без топика)")
-                else:
-                    print(f"❌ Ошибка отправки уведомления в чат {chat_id}: {primary_error}")
-                    raise primary_error
+                    print(f"✅ Уведомление об изменениях отправлено в чат {chat_id}")
+                except Exception as primary_error:
+                    if message_thread_id is not None and "Message thread not found" in str(primary_error):
+                        print(f"⚠️ Топик {message_thread_id} не найден в чате {chat_id}, отправляем обновление в основной чат")
+                        self.game_updates_topic_id = None
+                        send_kwargs.pop("message_thread_id", None)
+                        await bot.send_message(**send_kwargs)
+                        print(f"✅ Уведомление об изменениях отправлено в чат {chat_id} (без топика)")
+                    else:
+                        print(f"❌ Ошибка отправки уведомления в чат {chat_id}: {primary_error}")
+                        raise primary_error
         except Exception as e:
             print(f"⚠️ Ошибка отправки уведомления об изменениях: {e}")
 

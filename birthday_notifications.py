@@ -153,23 +153,22 @@ async def check_birthdays():
                             send_kwargs["message_thread_id"] = birthday_topic_id
                         await current_bot.send_message(**send_kwargs)  # type: ignore[reportCallIssue]
                         print(f"✅ Отправлено уведомление {i} в чат {chat_id}: {message[:50]}...")
-                    
-                    # Добавляем запись в сервисный лист для защиты от дублирования
-                    player = birthday_players[i-1]
-                    surname = player.get('surname', '')
-                    first_name = player.get('name', '')
-                    today = get_moscow_time().strftime('%d.%m.%Y')
-                    
-                    additional_info = f"{surname} {first_name} ({age} {get_years_word(age)})"
-                    duplicate_protection.add_record(
-                        "ДЕНЬ_РОЖДЕНИЯ",
-                        f"birthday_{today}_{surname}_{first_name}",
-                        "ОТПРАВЛЕНО",
-                        additional_info
-                    )
-                    
-                except Exception as e:
-                    print(f"❌ Ошибка отправки уведомления {i}: {e}")
+                    except Exception as e:
+                        print(f"❌ Ошибка отправки уведомления {i} в чат {chat_id}: {e}")
+                
+                # Добавляем запись в сервисный лист для защиты от дублирования (один раз для каждого сообщения)
+                player = birthday_players[i-1]
+                surname = player.get('surname', '')
+                first_name = player.get('name', '')
+                today = get_moscow_time().strftime('%d.%m.%Y')
+                
+                additional_info = f"{surname} {first_name} ({age} {get_years_word(age)})"
+                duplicate_protection.add_record(
+                    "ДЕНЬ_РОЖДЕНИЯ",
+                    f"birthday_{today}_{surname}_{first_name}",
+                    "ОТПРАВЛЕНО",
+                    additional_info
+                )
         
     except Exception as e:
         print(f"❌ Ошибка проверки дней рождения: {e}")
