@@ -113,6 +113,7 @@ AUTOMATION_DEFAULT_ROWS = [
     {"key": "GAME_ANNOUNCEMENTS", "name": "Анонсы игр", "comment": "Сообщения с информацией об игре"},
     {"key": "GAME_POLLS", "name": "Опросы на игры", "comment": "Опрос о готовности на игру"},
     {"key": "GAME_UPDATES", "name": "Уведомления об изменениях", "comment": "Уведомления об изменениях в расписании игр"},
+    {"key": "GAME_RESULTS", "name": "Результаты игр", "comment": "Уведомления о результатах завершенных игр"},
     {"key": "CALENDAR_EVENTS", "name": "Календарные события", "comment": "Отправка календарных событий (.ics файлов)"},
 ]
 LEGACY_VOTING_HEADERS = [
@@ -386,11 +387,17 @@ class EnhancedDuplicateProtection:
                 all_data = worksheet.get_all_values()
                 header_row_index = len(all_data)
             else:
-                worksheet.update(
-                    f"A{header_row_index}:{chr(ord('A') + total_columns - 1)}{header_row_index}",
-                    [padded_header],
-                )
-                all_data[header_row_index - 1] = padded_header
+                # Всегда обновляем заголовок, чтобы убедиться что он соответствует текущей структуре
+                # Проверяем, совпадает ли текущий заголовок с новым
+                current_header = [cell.strip() for cell in all_data[header_row_index - 1][:len(AUTOMATION_SECTION_HEADER)]]
+                if current_header != AUTOMATION_SECTION_HEADER:
+                    # Заголовок устарел, обновляем его
+                    worksheet.update(
+                        f"A{header_row_index}:{chr(ord('A') + len(AUTOMATION_SECTION_HEADER) - 1)}{header_row_index}",
+                        [AUTOMATION_SECTION_HEADER],
+                    )
+                    all_data = worksheet.get_all_values()
+                    all_data[header_row_index - 1] = AUTOMATION_SECTION_HEADER + [""] * (len(all_data[header_row_index - 1]) - len(AUTOMATION_SECTION_HEADER))
 
             existing_entries: Dict[str, Dict[str, str]] = {}
             for row in all_data[header_row_index:]:

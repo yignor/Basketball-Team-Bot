@@ -440,8 +440,20 @@ class GameResultsMonitorFinal:
     
     async def send_game_result(self, game_info: Dict) -> bool:
         """Отправляет результат игры в Telegram"""
-        if not self.bot or not CHAT_ID:
-            print("❌ Бот не инициализирован или CHAT_ID не настроен")
+        if not self.bot:
+            print("❌ Бот не инициализирован")
+            return False
+        
+        # Получаем список чатов для отправки результатов игр
+        from game_system_manager import get_chat_ids_for_automation, AUTOMATION_KEY_GAME_RESULTS
+        from enhanced_duplicate_protection import duplicate_protection
+        
+        automation_topics = duplicate_protection.get_config_ids().get("automation_topics") or {}
+        game_results_entry = automation_topics.get(AUTOMATION_KEY_GAME_RESULTS, {})
+        chat_ids = get_chat_ids_for_automation(AUTOMATION_KEY_GAME_RESULTS, game_results_entry)
+        
+        if not chat_ids:
+            print("❌ Не настроены ID чатов для результатов игр (ни в таблице, ни в Secrets)")
             return False
         
         try:
@@ -519,16 +531,48 @@ class GameResultsMonitorFinal:
                 print(f"❌ Ошибка добавления записи в Google Sheets: {protection_result.get('error')}")
                 # Продолжаем отправку, но логируем ошибку
             
-            # Отправляем сообщение в основной топик (без message_thread_id)
+            # Получаем topic_id для результатов игр
+            game_results_topic_id = None
+            if isinstance(game_results_entry, dict):
+                topic_candidate = game_results_entry.get("topic_id")
+                if topic_candidate is None:
+                    topic_candidate = game_results_entry.get("topic_raw")
+                try:
+                    game_results_topic_id = int(topic_candidate) if topic_candidate is not None else None
+                except (TypeError, ValueError):
+                    game_results_topic_id = None
+            
+            # Отправляем сообщение во все настроенные чаты
             try:
-                # Результаты игр отправляем в основной топик
                 bot_instance = self.bot
-                sent_message = await bot_instance.send_message(
-                    chat_id=int(CHAT_ID),
-                    text=message,
-                    parse_mode='HTML'
-                )
-                print(f"✅ Результат отправлен в основной топик")
+                sent_messages = []
+                
+                for chat_id in chat_ids:
+                    try:
+                        target_chat_id = int(chat_id) if chat_id.isdigit() or (chat_id.startswith('-') and chat_id[1:].isdigit()) else chat_id
+                        send_kwargs: Dict[str, Any] = {
+                            "chat_id": target_chat_id,
+                            "text": message,
+                            "parse_mode": 'HTML'
+                        }
+                        if game_results_topic_id is not None:
+                            send_kwargs["message_thread_id"] = game_results_topic_id
+                        
+                        sent_message = await bot_instance.send_message(**send_kwargs)
+                        sent_messages.append(sent_message)
+                        print(f"✅ Результат отправлен в чат {chat_id}")
+                    except Exception as chat_error:
+                        if "Message thread not found" in str(chat_error) and game_results_topic_id is not None:
+                            print(f"⚠️ Топик {game_results_topic_id} не найден в чате {chat_id}, отправляем в основной чат")
+                            send_kwargs.pop("message_thread_id", None)
+                            sent_message = await bot_instance.send_message(**send_kwargs)
+                            sent_messages.append(sent_message)
+                            print(f"✅ Результат отправлен в чат {chat_id} (без топика)")
+                        else:
+                            print(f"❌ Ошибка отправки результата в чат {chat_id}: {chat_error}")
+                            raise chat_error
+                
+                sent_message = sent_messages[0] if sent_messages else None
                 
                 # Обновляем статус в Google Sheets на "ОТПРАВЛЕНО"
                 if protection_result.get('success') and protection_result.get('unique_key'):
