@@ -78,6 +78,7 @@ python update_automation_config.py
 - ✅ **GAME_POLLS** - Опросы на игры
 - ✅ **GAME_ANNOUNCEMENTS** - Анонсы игр
 - ✅ **GAME_UPDATES** - Уведомления об изменениях
+- ✅ **GAME_RESULTS** - Результаты игр
 - ✅ **CALENDAR_EVENTS** - Календарные события
 - ✅ **BIRTHDAY_NOTIFICATIONS** - Уведомления о днях рождения
 
