@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from datetime_utils import get_moscow_time
 from enhanced_duplicate_protection import duplicate_protection
 from datetime_utils import log_current_time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -97,13 +97,38 @@ async def check_birthdays():
             from telegram import Bot
             current_bot = Bot(token=bot_token)
             
-            chat_id = os.getenv("CHAT_ID")
-            if not chat_id:
-                print("❌ CHAT_ID не настроен")
-                return
-
+            # Получаем список чатов для отправки уведомлений о днях рождения
             automation_topics = duplicate_protection.get_config_ids().get("automation_topics") or {}
             birthday_settings = automation_topics.get("BIRTHDAY_NOTIFICATIONS", {})
+            
+            # Получаем chat_ids используя ту же логику что и в game_system_manager
+            chat_id_from_secrets = os.getenv("CHAT_ID")
+            chat_ids_from_secrets = []
+            if chat_id_from_secrets:
+                for part in chat_id_from_secrets.replace(',', ' ').split():
+                    cid = part.strip()
+                    if cid:
+                        chat_ids_from_secrets.append(cid)
+            
+            chat_ids_from_table = []
+            if isinstance(birthday_settings, dict) and birthday_settings.get("chat_id"):
+                for part in birthday_settings.get("chat_id", "").replace(',', ' ').split():
+                    cid = part.strip()
+                    if cid:
+                        chat_ids_from_table.append(cid)
+            
+            # Объединяем списки, убираем дубликаты
+            all_chat_ids = []
+            seen = set()
+            for chat_id in chat_ids_from_table + chat_ids_from_secrets:
+                if chat_id not in seen:
+                    all_chat_ids.append(chat_id)
+                    seen.add(chat_id)
+            
+            if not all_chat_ids:
+                print("❌ Не настроены ID чатов для уведомлений о днях рождения (ни в таблице, ни в Secrets)")
+                return
+            
             birthday_topic_id = None
             if isinstance(birthday_settings, dict):
                 topic_candidate = birthday_settings.get("topic_id")
@@ -113,20 +138,21 @@ async def check_birthdays():
                     birthday_topic_id = int(topic_candidate) if topic_candidate is not None else None
                 except (TypeError, ValueError):
                     birthday_topic_id = None
-
-            try:
-                target_chat_id: Any = int(chat_id)
-            except (TypeError, ValueError):
-                target_chat_id = chat_id
             
-            # Отправляем каждое сообщение
+            # Отправляем каждое сообщение во все настроенные чаты
             for i, message in enumerate(birthday_messages, 1):
-                try:
-                    send_kwargs: Dict[str, Any] = {"chat_id": target_chat_id, "text": message}
-                    if birthday_topic_id is not None:
-                        send_kwargs["message_thread_id"] = birthday_topic_id
-                    await current_bot.send_message(**send_kwargs)  # type: ignore[reportCallIssue]
-                    print(f"✅ Отправлено уведомление {i}: {message[:50]}...")
+                for chat_id in all_chat_ids:
+                    try:
+                        try:
+                            target_chat_id: Any = int(chat_id)
+                        except (TypeError, ValueError):
+                            target_chat_id = chat_id
+                        
+                        send_kwargs: Dict[str, Any] = {"chat_id": target_chat_id, "text": message}
+                        if birthday_topic_id is not None:
+                            send_kwargs["message_thread_id"] = birthday_topic_id
+                        await current_bot.send_message(**send_kwargs)  # type: ignore[reportCallIssue]
+                        print(f"✅ Отправлено уведомление {i} в чат {chat_id}: {message[:50]}...")
                     
                     # Добавляем запись в сервисный лист для защиты от дублирования
                     player = birthday_players[i-1]

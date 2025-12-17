@@ -102,6 +102,7 @@ VOTING_GUIDE_ROWS = [
 AUTOMATION_SECTION_HEADER = [
     "Автоматическое сообщение",
     "ID топика",
+    "ID чата",
     "Анонимный",
     "Множественный выбор",
     "Комментарий",
@@ -408,12 +409,14 @@ class EnhancedDuplicateProtection:
                 key_upper = mapped_key.upper() if mapped_key else label.upper()
                 display_name = AUTOMATION_KEY_TO_NAME.get(key_upper, label)
                 topic_value = row[1] if len(row) > 1 else ""
-                anon_value = row[2] if len(row) > 2 else ""
-                multiple_value = row[3] if len(row) > 3 else ""
-                comment_value = row[4] if len(row) > 4 else ""
+                chat_id_value = row[2] if len(row) > 2 else ""
+                anon_value = row[3] if len(row) > 3 else ""
+                multiple_value = row[4] if len(row) > 4 else ""
+                comment_value = row[5] if len(row) > 5 else ""
                 existing_entries[key_upper] = {
                     "label": display_name,
                     "topic": topic_value,
+                    "chat_id": chat_id_value,
                     "anon": anon_value,
                     "multiple": multiple_value,
                     "comment": comment_value,
@@ -425,21 +428,24 @@ class EnhancedDuplicateProtection:
                 existing = existing_entries.pop(key_upper, None)
                 label = default["name"]
                 topic_value = ""
+                chat_id_value = ""
                 anon_value = ""
                 multiple_value = ""
                 comment_value = default.get("comment", "")
                 if existing:
                     label = existing.get("label") or label
                     topic_value = existing.get("topic", "")
+                    chat_id_value = existing.get("chat_id", "")
                     anon_value = existing.get("anon", "")
                     multiple_value = existing.get("multiple", "")
                     comment_value = existing.get("comment", "") or comment_value
-                rows_to_write.append([label, topic_value, anon_value, multiple_value, comment_value])
+                rows_to_write.append([label, topic_value, chat_id_value, anon_value, multiple_value, comment_value])
 
             for key_upper, entry in existing_entries.items():
                 rows_to_write.append([
                     entry.get("label") or key_upper,
                     entry.get("topic", ""),
+                    entry.get("chat_id", ""),
                     entry.get("anon", ""),
                     entry.get("multiple", ""),
                     entry.get("comment", ""),
@@ -1425,9 +1431,10 @@ class EnhancedDuplicateProtection:
                     if raw_label.upper() == AUTOMATION_SECTION_END_MARKER:
                         break
                     topic_raw = self._normalize_cell_text(row[1]) if len(row) > 1 else ""
-                    anon_raw = row[2] if len(row) > 2 else ""
-                    multiple_raw = row[3] if len(row) > 3 else ""
-                    comment_raw = self._normalize_cell_text(row[4]) if len(row) > 4 else ""
+                    chat_id_raw = self._normalize_cell_text(row[2]) if len(row) > 2 else ""
+                    anon_raw = row[3] if len(row) > 3 else ""
+                    multiple_raw = row[4] if len(row) > 4 else ""
+                    comment_raw = self._normalize_cell_text(row[5]) if len(row) > 5 else ""
                     mapped_key = AUTOMATION_NAME_TO_KEY.get(raw_label.lower())
                     key_upper = mapped_key.upper() if mapped_key else raw_label.upper()
                     entry: Dict[str, Any] = {}
@@ -1439,6 +1446,9 @@ class EnhancedDuplicateProtection:
                         entry["topic_id"] = topic_id_value
                     elif topic_raw:
                         entry["topic_raw"] = topic_raw
+                    # Сохраняем chat_id из таблицы (может быть пустым, одним ID или несколькими через запятую)
+                    if chat_id_raw:
+                        entry["chat_id"] = chat_id_raw
                     anon_value = self._parse_bool_value(anon_raw)
                     if anon_value is not None:
                         entry["is_anonymous"] = anon_value
