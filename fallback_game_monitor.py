@@ -452,7 +452,7 @@ class FallbackGameMonitor:
                     continue
                 
                 # Проверяем, что это ссылка на игру
-                is_game_link = 'gameId=' in href or 'game.html' in href or '/game/' in href or '/match/' in href
+                is_game_link = 'gameId=' in href or 'game.html' in href or '/game/' in href or '/match/' in href or 'podrobno.php' in href
                 if not is_game_link:
                     continue
                 
@@ -461,18 +461,58 @@ class FallbackGameMonitor:
                 link_text = anchor.get_text(strip=True)
                 normalized_link = self._normalize_name_for_search(link_text)
                 
-                team_match = self._find_matching_variant(normalized_link, team_variants)
+                # Также проверяем родительский элемент (может содержать название команды)
+                parent_text = ""
+                if anchor.parent:
+                    parent_text = anchor.parent.get_text(separator=' ', strip=True)
+                    normalized_parent = self._normalize_name_for_search(parent_text)
+                
+                team_match = self._find_matching_variant(normalized_link, team_variants) or \
+                            self._find_matching_variant(normalized_parent, team_variants)
+                
                 if team_match:
-                    game_info = self._extract_game_info_from_text(link_text, team_name)
-                    if game_info:
-                        full_link = href if href.startswith('http') else urljoin(url, href)
-                        game_info['url'] = full_link
-                        game_info['team_name'] = team_name
-                        # Извлекаем game_id из ссылки, если есть
-                        game_id_match = re.search(r'gameId[=:](\d+)|/game/(\d+)|/match/(\d+)', href)
-                        if game_id_match:
-                            game_info['game_id'] = int(game_id_match.group(1) or game_id_match.group(2) or game_id_match.group(3))
-                        games.append(game_info)
+                    # Проверяем, не найдена ли уже эта игра в таблице (чтобы избежать дубликатов)
+                    # Если в тексте ссылки или родителя нет даты, скорее всего это уже обработано
+                    has_date_in_link = bool(re.search(r'\d{1,2}\.\d{1,2}\.\d{2,4}', link_text + parent_text))
+                    
+                    # Если дата есть в тексте, пробуем извлечь
+                    if has_date_in_link:
+                        # Сначала пробуем извлечь из текста ссылки
+                        game_info = self._extract_game_info_from_text(link_text, team_name)
+                        
+                        # Если не получилось, пробуем из родительского элемента
+                        if not game_info and parent_text:
+                            game_info = self._extract_game_info_from_text(parent_text, team_name)
+                        
+                        # Если все еще не получилось, загружаем страницу игры
+                        if not game_info:
+                            full_link = href if href.startswith('http') else urljoin(url, href)
+                            page_game_info = await self._extract_game_info_from_page(session, full_link, team_name)
+                            if page_game_info:
+                                game_info = page_game_info
+                        
+                        if game_info:
+                            # Проверяем, что дата в будущем (фильтруем прошедшие игры)
+                            try:
+                                from datetime import datetime
+                                game_date = datetime.strptime(game_info['date'], '%d.%m.%Y').date()
+                                today = get_moscow_time().date()
+                                if game_date <= today:
+                                    # Это прошедшая или сегодняшняя игра, пропускаем
+                                    continue
+                            except (ValueError, KeyError):
+                                # Если не удалось распарсить дату, пропускаем
+                                continue
+                            
+                            full_link = href if href.startswith('http') else urljoin(url, href)
+                            game_info['url'] = full_link
+                            game_info['team_name'] = team_name
+                            # Извлекаем game_id из ссылки, если есть
+                            game_id_match = re.search(r'gameId[=:](\d+)|/game/(\d+)|/match/(\d+)|id[=:](\d+)', href)
+                            if game_id_match:
+                                game_info['game_id'] = int(game_id_match.group(1) or game_id_match.group(2) or game_id_match.group(3) or game_id_match.group(4))
+                            games.append(game_info)
+                            print(f"      ✅ Найдена игра по ссылке: {game_info.get('date')} {game_info.get('time')} vs {game_info.get('opponent')}")
             
             # Стратегия 4: Для globalleague.ru - парсим календарь игр из таблиц или списков
             if 'globalleague.ru' in url and len(games) == 0:
@@ -758,6 +798,14 @@ class FallbackGameMonitor:
                         print(f"      📌 Найдена игра с командой '{team_name}' (строка {row_idx}, ячейка {cell_idx}): {cell_text[:100]}...")
                         # Извлекаем информацию об игре из ячейки
                         game_info = self._extract_game_info_from_schedule_row(cell_text, team_name, base_url)
+                        
+                        # Добавляем URL, если есть ссылка в ячейке
+                        if not game_info.get('url'):
+                            link_in_cell = cell.find('a', href=True)
+                            if link_in_cell:
+                                href = link_in_cell.get('href')
+                                if href:
+                                    game_info['url'] = href if href.startswith('http') else urljoin(base_url, href)
                         if game_info:
                             print(f"         ✅ Извлечена игра: {game_info.get('date')} {game_info.get('time')} vs {game_info.get('opponent')}")
                             game_info['team_name'] = team_name
@@ -1315,35 +1363,98 @@ class FallbackGameMonitor:
                 soup = BeautifulSoup(content, 'html.parser')
                 
                 # Пытаемся найти информацию об игре на странице
-                # Это зависит от структуры сайта, здесь базовая реализация
                 text = soup.get_text()
                 
-                # Ищем дату
+                # Ищем дату в формате DD.MM.YYYY или DD.MM.YY
                 date_pattern = r'(\d{1,2})\.(\d{1,2})\.(\d{2,4})'
-                date_match = re.search(date_pattern, text)
-                if not date_match:
+                date_matches = list(re.finditer(date_pattern, text))
+                if not date_matches:
                     return None
                 
+                # Берем первую дату (обычно это дата игры)
+                date_match = date_matches[0]
                 day, month, year = date_match.groups()
                 if len(year) == 2:
                     year = '20' + year
                 date_str = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
                 
-                # Ищем время
+                # Проверяем, что дата в будущем (фильтруем прошедшие игры)
+                try:
+                    from datetime import datetime
+                    game_date = datetime.strptime(date_str, '%d.%m.%Y').date()
+                    today = get_moscow_time().date()
+                    if game_date <= today:
+                        # Это прошедшая или сегодняшняя игра, не извлекаем
+                        return None
+                except ValueError:
+                    return None
+                
+                # Ищем время в формате HH:MM или HH.MM
+                # Ищем время после даты, но не в самой дате
+                date_end_pos = date_match.end()
+                text_after_date = text[date_end_pos:]
+                
                 time_pattern = r'(\d{1,2})[:.](\d{2})'
-                time_match = re.search(time_pattern, text)
-                time_str = time_match.group(0).replace('.', ':') if time_match else "20:00"
+                time_matches = list(re.finditer(time_pattern, text_after_date[:200]))  # Ищем в первых 200 символах после даты
+                time_str = "20:00"  # По умолчанию
+                
+                if time_matches:
+                    # Берем первое время, которое выглядит как время игры
+                    for match in time_matches:
+                        hours_str = match.group(1)
+                        minutes_str = match.group(2)
+                        try:
+                            hours = int(hours_str)
+                            minutes = int(minutes_str)
+                            # Проверяем, что это разумное время для игры (8:00 - 23:59)
+                            # И что это не часть даты (например, не 27.12)
+                            if 8 <= hours <= 23 and 0 <= minutes <= 59:
+                                time_str = f"{hours:02d}:{minutes:02d}"
+                                break
+                        except:
+                            continue
                 
                 # Пытаемся найти название соперника
                 # Ищем названия команд на странице
-                opponent = None
-                # Это можно улучшить, анализируя структуру страницы
+                opponent = 'Соперник'
+                team_variants = list(self._build_name_variants(team_name))
+                
+                # Ищем паттерны типа "Команда1 - Команда2" или "Команда1 против Команда2"
+                game_separators = [r'\s*[-–—]\s*', r'\s+против\s+', r'\s+vs\s+', r'\s+и\s+']
+                for sep_pattern in game_separators:
+                    parts = re.split(sep_pattern, text, flags=re.IGNORECASE)
+                    if len(parts) >= 2:
+                        # Проверяем, есть ли наша команда в одной из частей
+                        for i, part in enumerate(parts):
+                            part_normalized = self._normalize_name_for_search(part)
+                            if self._find_matching_variant(part_normalized, team_variants):
+                                # Нашли нашу команду, берем другую часть как соперника
+                                if i == 0 and len(parts) > 1:
+                                    opponent = parts[1].strip()[:50]  # Ограничиваем длину
+                                elif i > 0:
+                                    opponent = parts[0].strip()[:50]
+                                break
+                        if opponent != 'Соперник':
+                            break
+                
+                # Ищем место/арену
+                venue = ""
+                venue_patterns = [
+                    r'(MarvelHall[^.]*?ул\.?[^.]*?Киевская[^.]*?\d+[а-я]?)',
+                    r'(СШОР[^.]*?[А-Яа-я\w\s\-\.]*?(?:пр\.?|пр-т|ул\.?|улица)?[^.]*?\d+[а-я]?)',
+                    r'(?:Зал|Арена|Стадион|Спорткомплекс|Дворец|Центр)[\s:]+([А-Яа-я\w\s\-]+?)(?:\s|$|,|\.)',
+                ]
+                for pattern in venue_patterns:
+                    venue_match = re.search(pattern, text, re.IGNORECASE)
+                    if venue_match:
+                        venue = venue_match.group(1 if venue_match.groups() else 0).strip()
+                        break
                 
                 return {
                     'date': date_str,
                     'time': time_str,
-                    'opponent': opponent or 'Соперник',
-                    'venue': '',
+                    'opponent': opponent,
+                    'venue': venue,
                 }
         except Exception as e:
             print(f"⚠️ Ошибка извлечения информации со страницы {url}: {e}")
@@ -1366,9 +1477,29 @@ class FallbackGameMonitor:
             date_str = f"{day.zfill(2)}.{month.zfill(2)}.{year}"
             
             # Пытаемся найти время в формате HH:MM или HH.MM
+            # Ищем время после даты, но не в самой дате
+            date_end_pos = date_match.end()
+            text_after_date = text[date_end_pos:]
+            
             time_pattern = r'(\d{1,2})[:.](\d{2})'
-            time_match = re.search(time_pattern, text)
-            time_str = time_match.group(0).replace('.', ':') if time_match else "20:00"
+            time_matches = list(re.finditer(time_pattern, text_after_date[:200]))  # Ищем в первых 200 символах после даты
+            time_str = "20:00"  # По умолчанию
+            
+            if time_matches:
+                # Берем первое время, которое выглядит как время игры
+                for match in time_matches:
+                    hours_str = match.group(1)
+                    minutes_str = match.group(2)
+                    try:
+                        hours = int(hours_str)
+                        minutes = int(minutes_str)
+                        # Проверяем, что это разумное время для игры (8:00 - 23:59)
+                        # И что это не часть даты (например, не 27.12)
+                        if 8 <= hours <= 23 and 0 <= minutes <= 59:
+                            time_str = f"{hours:02d}:{minutes:02d}"
+                            break
+                    except:
+                        continue
             
             # Пытаемся найти название соперника
             # Убираем название нашей команды и дату/время из текста
