@@ -1249,13 +1249,29 @@ class EnhancedDuplicateProtection:
                     alt_name = self._normalize_cell_text(row_extended[3])
                     settings_json_cell = row_extended[4]
                     weekday_cell = row_extended[5]
-                    fallback_url = row_extended[6]
-                    fallback_name = row_extended[7]
+                    fallback_url = row_extended[6] if len(row_extended) > 6 else ""
+                    fallback_name = row_extended[7] if len(row_extended) > 7 else ""
 
                     row_comp_ids = self._parse_ids(comp_id_cell)
                     row_team_ids = self._parse_ids(team_id_cell)
                     config_payload = self._parse_json_config(settings_json_cell)
 
+                    # Определяем fallback конфигурацию по наличию URL (независимо от типа)
+                    # Это позволяет использовать fallback без указания типа FALLBACK в колонке ТИП
+                    if fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://')):
+                        fallback_entry = {
+                            "name": fallback_name.strip() or alt_name,
+                            "url": fallback_url.strip(),
+                            "metadata": config_payload or {},
+                        }
+                        # Добавляем comp_ids и team_ids в metadata для fallback
+                        if row_comp_ids:
+                            fallback_entry["metadata"]["comp_ids"] = row_comp_ids
+                        if row_team_ids:
+                            fallback_entry["metadata"]["team_ids"] = row_team_ids
+                        fallback_sources.append(fallback_entry)
+                        # Продолжаем обработку, чтобы также добавить команды в teams, если есть team_ids
+                    
                     if not normalized_type:
                         if row_team_ids:
                             normalized_type = "CONFIG_TEAM"
@@ -1289,13 +1305,19 @@ class EnhancedDuplicateProtection:
                         }
                         training_polls.append(training_entry)
                     elif normalized_type in {"FALLBACK", "FALLBACK_SOURCE", "FALLBACK_CONFIG"}:
-                        fallback_entry = {
-                            "name": fallback_name or alt_name,
-                            "url": fallback_url,
-                            "metadata": config_payload,
-                        }
-                        if fallback_entry["url"] or fallback_entry["name"]:
-                            fallback_sources.append(fallback_entry)
+                        # Дополнительная проверка для явного типа FALLBACK (на случай, если URL не был распознан выше)
+                        if not (fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://'))):
+                            fallback_entry = {
+                                "name": fallback_name.strip() or alt_name,
+                                "url": fallback_url.strip(),
+                                "metadata": config_payload or {},
+                            }
+                            if row_comp_ids:
+                                fallback_entry["metadata"]["comp_ids"] = row_comp_ids
+                            if row_team_ids:
+                                fallback_entry["metadata"]["team_ids"] = row_team_ids
+                            if fallback_entry["url"] or fallback_entry["name"]:
+                                fallback_sources.append(fallback_entry)
                     else:
                         # Unknown types before the separator are ignored to keep backward compatibility
                         continue

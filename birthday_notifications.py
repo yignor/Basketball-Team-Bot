@@ -149,9 +149,9 @@ async def check_birthdays():
                 
                 # Проверяем, не было ли уже отправлено уведомление для этого игрока сегодня
                 birthday_key = f"birthday_{today}_{surname}_{first_name}"
-                existing_record = duplicate_protection.get_game_record("ДЕНЬ_РОЖДЕНИЯ", birthday_key)
+                duplicate_check = duplicate_protection.check_duplicate("ДЕНЬ_РОЖДЕНИЯ", birthday_key)
                 
-                if existing_record:
+                if duplicate_check.get('exists'):
                     print(f"⏭️ Уведомление о дне рождения для {surname} {first_name} уже отправлено сегодня, пропускаем")
                     continue
                 

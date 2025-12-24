@@ -11,7 +11,14 @@ from typing import Any, Dict, List, Optional, Set
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime_utils import get_moscow_time
-from enhanced_duplicate_protection import duplicate_protection
+from enhanced_duplicate_protection import (
+    duplicate_protection,
+    GAME_DATE_COL,
+    GAME_TIME_COL,
+    TYPE_COL,
+    KEY_COL,
+    ADDITIONAL_DATA_COL,
+)
 from infobasket_smart_parser import InfobasketSmartParser
 from game_system_manager import GameSystemManager, create_game_key
 
@@ -1835,14 +1842,6 @@ class FallbackGameMonitor:
                 except ValueError:
                     print(f"⚠️ Некорректный формат даты: {date}")
             
-            # Проверяем, не создан ли уже опрос для этой игры
-            # Сначала проверяем по game_id, если есть
-            if game_id:
-                existing = duplicate_protection.get_game_record("ОПРОС_ИГРА", str(game_id))
-                if existing:
-                    print(f"⏭️ Опрос для игры {game_id} уже существует")
-                    return
-            
             # Убеждаемся, что opponent не содержит места проведения
             opponent_clean = opponent.strip()
             venue_clean = game_info.get('venue', '').strip()
@@ -1853,10 +1852,117 @@ class FallbackGameMonitor:
                 # Убираем лишние пробелы
                 opponent_clean = re.sub(r'\s+', ' ', opponent_clean).strip()
             
-            # Также проверяем по дате и командам (на случай, если game_id нет)
-            # Используем тот же формат ключа, что и в create_game_key из game_system_manager
-            game_key = None
+            # Проверяем сервисный лист по дате, времени и противнику
+            # Это основная проверка для предотвращения дубликатов
             if date and team_name and opponent_clean:
+                # Нормализуем время для сравнения
+                time_normalized = time.replace('.', ':')
+                
+                # Ищем в сервисном листе записи с такой же датой, временем и противником
+                # Проверяем все записи типа "ОПРОС_ИГРА" и "АНОНС_ИГРА"
+                service_worksheet = duplicate_protection._get_service_worksheet()
+                if service_worksheet:
+                    try:
+                        all_data = service_worksheet.get_all_values()
+                        for row in all_data[1:]:  # Пропускаем заголовок
+                            if len(row) <= max(GAME_DATE_COL, GAME_TIME_COL, TYPE_COL):
+                                continue
+                            
+                            row_type = (row[TYPE_COL] or "").strip().upper()
+                            if row_type not in {"ОПРОС_ИГРА", "АНОНС_ИГРА"}:
+                                continue
+                            
+                            row_date = (row[GAME_DATE_COL] or "").strip()
+                            row_time = (row[GAME_TIME_COL] or "").strip()
+                            
+                            # Нормализуем время из строки для сравнения
+                            if row_time:
+                                row_time_normalized = row_time.replace('.', ':')
+                            else:
+                                row_time_normalized = ""
+                            
+                            # Проверяем совпадение даты и времени
+                            if row_date == date and row_time_normalized == time_normalized:
+                                # Проверяем, что это игра с тем же противником
+                                # Ищем противника в additional_data или в unique_key
+                                row_key = (row[KEY_COL] or "").strip()
+                                row_additional = (row[ADDITIONAL_DATA_COL] or "").strip()
+                                
+                                # Нормализуем названия для сравнения
+                                opponent_normalized = self._normalize_name_for_search(opponent_clean)
+                                
+                                # Проверяем, есть ли противник в ключе или дополнительных данных
+                                key_normalized = self._normalize_name_for_search(row_key)
+                                additional_normalized = self._normalize_name_for_search(row_additional)
+                                
+                                # Ищем варианты названия противника
+                                opponent_variants = list(self._build_name_variants(opponent_clean))
+                                
+                                # Проверяем совпадение противника
+                                # Ищем противника в ключе игры (формат: дата_время_команда1_команда2)
+                                opponent_found = False
+                                
+                                # Проверяем, есть ли противник в ключе игры
+                                # Ключ имеет формат: дата_время_команда1_команда2
+                                if opponent_clean and row_key:
+                                    # Разбиваем ключ на части (разделитель - подчеркивание)
+                                    key_parts = row_key.split('_')
+                                    if len(key_parts) >= 4:
+                                        # Последние две части - это команды
+                                        # Формат: дата_время_команда1_команда2
+                                        # Но команды могут содержать подчеркивания, поэтому берем все после времени
+                                        # Время обычно в формате HH:MM, ищем его позицию
+                                        time_part_idx = None
+                                        for i, part in enumerate(key_parts):
+                                            if ':' in part and len(part) <= 6:  # Время в формате HH:MM
+                                                time_part_idx = i
+                                                break
+                                        
+                                        if time_part_idx is not None and time_part_idx + 2 < len(key_parts):
+                                            # Команды начинаются после времени
+                                            # Объединяем все части после времени как команды
+                                            team_parts = key_parts[time_part_idx + 1:]
+                                            if len(team_parts) >= 2:
+                                                # Последние две части - это команды
+                                                key_team1 = '_'.join(team_parts[:-1]) if len(team_parts) > 2 else team_parts[0]
+                                                key_team2 = team_parts[-1]
+                                                
+                                                # Нормализуем для сравнения
+                                                key_team1_norm = self._normalize_name_for_search(key_team1)
+                                                key_team2_norm = self._normalize_name_for_search(key_team2)
+                                                opponent_norm = self._normalize_name_for_search(opponent_clean)
+                                                
+                                                # Проверяем, совпадает ли противник с одной из команд в ключе
+                                                if (opponent_norm == key_team1_norm or 
+                                                    opponent_norm == key_team2_norm or
+                                                    self._find_matching_variant(key_team1_norm, opponent_variants) or
+                                                    self._find_matching_variant(key_team2_norm, opponent_variants)):
+                                                    opponent_found = True
+                                
+                                # Также проверяем в additional_data
+                                if not opponent_found and row_additional:
+                                    additional_norm = self._normalize_name_for_search(row_additional)
+                                    for variant in opponent_variants:
+                                        variant_norm = self._normalize_name_for_search(variant)
+                                        if (variant_norm in additional_norm or 
+                                            self._find_matching_variant(additional_norm, opponent_variants)):
+                                            opponent_found = True
+                                            break
+                                
+                                if opponent_found:
+                                    print(f"⏭️ Игра {date} {time} против {opponent_clean} уже найдена в сервисном листе (дата, время и противник совпадают), пропускаем создание опроса")
+                                    return
+                    except Exception as e:
+                        print(f"⚠️ Ошибка проверки сервисного листа: {e}")
+                
+                # Также проверяем по game_id, если есть
+                if game_id:
+                    existing = duplicate_protection.get_game_record("ОПРОС_ИГРА", str(game_id))
+                    if existing:
+                        print(f"⏭️ Опрос для игры {game_id} уже существует")
+                        return
+                
+                # Проверяем по ключу игры (дата + время + команды)
                 game_key = self._create_game_key(date, time, team_name, opponent_clean)
                 duplicate_check = duplicate_protection.check_duplicate("ОПРОС_ИГРА", game_key)
                 if duplicate_check.get('exists'):

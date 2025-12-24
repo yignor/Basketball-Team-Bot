@@ -2218,6 +2218,23 @@ class GameSystemManager:
                     sent_announcements += 1
             print(f"✅ Отправлено {sent_announcements} анонсов")
             
+            # ШАГ 4: Fallback мониторинг (если есть конфигурации)
+            if self.fallback_sources:
+                print(f"\n🔍 ШАГ 4: FALLBACK МОНИТОРИНГ")
+                print("-" * 40)
+                try:
+                    from fallback_game_monitor import FallbackGameMonitor
+                    fallback_monitor = FallbackGameMonitor()
+                    await fallback_monitor.run_monitoring()
+                except Exception as e:
+                    print(f"⚠️ Ошибка fallback мониторинга: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"\n🔍 ШАГ 4: FALLBACK МОНИТОРИНГ")
+                print("-" * 40)
+                print("ℹ️ Fallback конфигурации не найдены, пропускаем")
+            
             # Итоги
             print(f"\n📊 ИТОГИ РАБОТЫ:")
             print(f"   📊 Создано опросов: {created_polls}")
