@@ -141,6 +141,22 @@ async def check_birthdays():
             
             # Отправляем каждое сообщение во все настроенные чаты
             for i, message in enumerate(birthday_messages, 1):
+                player = birthday_players[i-1]
+                surname = player.get('surname', '')
+                first_name = player.get('name', '')
+                age = player.get('age', 0)
+                today = get_moscow_time().strftime('%d.%m.%Y')
+                
+                # Проверяем, не было ли уже отправлено уведомление для этого игрока сегодня
+                birthday_key = f"birthday_{today}_{surname}_{first_name}"
+                existing_record = duplicate_protection.get_game_record("ДЕНЬ_РОЖДЕНИЯ", birthday_key)
+                
+                if existing_record:
+                    print(f"⏭️ Уведомление о дне рождения для {surname} {first_name} уже отправлено сегодня, пропускаем")
+                    continue
+                
+                # Отправляем сообщение во все настроенные чаты
+                message_sent = False
                 for chat_id in all_chat_ids:
                     try:
                         try:
@@ -153,22 +169,20 @@ async def check_birthdays():
                             send_kwargs["message_thread_id"] = birthday_topic_id
                         await current_bot.send_message(**send_kwargs)  # type: ignore[reportCallIssue]
                         print(f"✅ Отправлено уведомление {i} в чат {chat_id}: {message[:50]}...")
+                        message_sent = True
                     except Exception as e:
                         print(f"❌ Ошибка отправки уведомления {i} в чат {chat_id}: {e}")
                 
-                # Добавляем запись в сервисный лист для защиты от дублирования (один раз для каждого сообщения)
-                player = birthday_players[i-1]
-                surname = player.get('surname', '')
-                first_name = player.get('name', '')
-                today = get_moscow_time().strftime('%d.%m.%Y')
-                
-                additional_info = f"{surname} {first_name} ({age} {get_years_word(age)})"
-                duplicate_protection.add_record(
-                    "ДЕНЬ_РОЖДЕНИЯ",
-                    f"birthday_{today}_{surname}_{first_name}",
-                    "ОТПРАВЛЕНО",
-                    additional_info
-                )
+                # Добавляем запись в сервисный лист для защиты от дублирования только если сообщение было отправлено
+                if message_sent:
+                    additional_info = f"{surname} {first_name} ({age} {get_years_word(age)})"
+                    duplicate_protection.add_record(
+                        "ДЕНЬ_РОЖДЕНИЯ",
+                        birthday_key,
+                        "ОТПРАВЛЕНО",
+                        additional_info
+                    )
+                    print(f"✅ Запись добавлена в сервисный лист: {birthday_key}")
         
     except Exception as e:
         print(f"❌ Ошибка проверки дней рождения: {e}")
