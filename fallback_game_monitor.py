@@ -202,13 +202,13 @@ class FallbackGameMonitor:
                 if not row or len(row) < 1:
                     continue
                 
-                # Расширяем строку до нужной длины (теперь без колонки ТИП - 7 колонок)
+                # Расширяем строку до нужной длины (с колонкой ТИП - 8 колонок)
                 row_extended = list(row)
-                required_len = 7  # Без колонки ТИП: ИД соревнования, ИД команды, АЛЬТЕРНАТИВНОЕ ИМЯ, НАСТРОЙКИ, ДНИ НЕДЕЛИ, URL FALLBACK, КОМАНДА ДЛЯ FALLBACK
+                required_len = 8  # С колонкой ТИП: ТИП, ИД соревнования, ИД команды, АЛЬТЕРНАТИВНОЕ ИМЯ, НАСТРОЙКИ, ДНИ НЕДЕЛИ, URL FALLBACK, КОМАНДА ДЛЯ FALLBACK
                 if len(row_extended) < required_len:
                     row_extended.extend([""] * (required_len - len(row_extended)))
                 
-                # Проверяем маркеры конца секций в первой колонке (теперь это ИД соревнования)
+                # Проверяем маркеры конца секций в первой колонке (ТИП)
                 first_cell = (row_extended[0] or "").strip().upper()
                 if first_cell in {"END", "END_CONFIG", "CONFIG_END", "END OF CONFIG", "КОНЕЦ", 
                                   "--- END ---", "=== END ==="}:
@@ -220,28 +220,29 @@ class FallbackGameMonitor:
                     continue
                 
                 # Пропускаем заголовки секций
-                if first_cell in {"ID ГОЛОСОВАНИЯ", "--- END VOTING ---"}:
+                if first_cell in {"ID ГОЛОСОВАНИЯ", "--- END VOTING ---", "ТИП"}:
                     continue
                 
-                # Определяем fallback конфигурацию по наличию URL (колонка ТИП удалена)
-                # Структура БЕЗ колонки ТИП:
-                # 0: ИД (СОРЕВНОВАНИЯ / ГОЛОСОВАНИЯ)
-                # 1: ИД КОМАНДЫ / ПОРЯДОК
-                # 2: АЛЬТЕРНАТИВНОЕ ИМЯ / ТЕКСТ
-                # 3: НАСТРОЙКИ (JSON)
-                # 4: ДНИ НЕДЕЛИ
-                # 5: URL FALLBACK
-                # 6: КОМАНДА ДЛЯ FALLBACK
-                fallback_url = row_extended[5] if len(row_extended) > 5 else ""
+                # Определяем fallback конфигурацию по наличию URL
+                # Структура С колонкой ТИП:
+                # 0: ТИП
+                # 1: ИД (СОРЕВНОВАНИЯ / ГОЛОСОВАНИЯ)
+                # 2: ИД КОМАНДЫ / ПОРЯДОК
+                # 3: АЛЬТЕРНАТИВНОЕ ИМЯ / ТЕКСТ
+                # 4: НАСТРОЙКИ (JSON)
+                # 5: ДНИ НЕДЕЛИ
+                # 6: URL FALLBACK
+                # 7: КОМАНДА ДЛЯ FALLBACK
+                fallback_url = row_extended[6] if len(row_extended) > 6 else ""
                 
                 # Если URL валидный (начинается с http), это fallback конфигурация
                 if not fallback_url.strip() or not fallback_url.strip().startswith(('http://', 'https://')):
                     continue  # Нет URL - пропускаем
                 
-                # Получаем данные из строки (учитываем сдвиг из-за удаления колонки ТИП)
-                comp_id_cell = row_extended[0] if len(row_extended) > 0 else ""  # Было 1, стало 0
-                team_id_cell = row_extended[1] if len(row_extended) > 1 else ""  # Было 2, стало 1
-                fallback_name = row_extended[6] if len(row_extended) > 6 else ""  # Было 7, стало 6
+                # Получаем данные из строки
+                comp_id_cell = row_extended[1] if len(row_extended) > 1 else ""  # Колонка 1
+                team_id_cell = row_extended[2] if len(row_extended) > 2 else ""  # Колонка 2
+                fallback_name = row_extended[7] if len(row_extended) > 7 else ""  # Колонка 7
                 
                 # Парсим ID
                 comp_ids = duplicate_protection._parse_ids(comp_id_cell)
