@@ -1400,6 +1400,10 @@ class GameSystemManager:
                     our_team = team2
                     opponent = opponent or team1
             
+            # Если our_team_name передан напрямую (для fallback игр), используем его
+            if not our_team and game_info.get('our_team_name'):
+                our_team = game_info.get('our_team_name')
+            
             if not our_team:
                 our_team = team1
                 opponent = opponent or team2
@@ -1412,6 +1416,9 @@ class GameSystemManager:
                 else:
                     fallback_name = our_team
                 our_team = self._resolve_team_name(our_team_id, fallback_name)
+            elif not our_team and game_info.get('our_team_name'):
+                # Для fallback игр без ID используем переданное имя
+                our_team = game_info.get('our_team_name')
 
             if opponent_team_id is not None:
                 if opponent_team_id == team1_id:
@@ -1421,12 +1428,18 @@ class GameSystemManager:
                 else:
                     fallback_opponent = opponent
                 opponent = self._resolve_team_name(opponent_team_id, fallback_opponent)
+            elif not opponent and game_info.get('opponent_team_name'):
+                # Для fallback игр без ID используем переданное имя соперника
+                opponent = game_info.get('opponent_team_name')
 
             if not opponent:
                 opponent = team2 if our_team == team1 else team1
 
             if not our_team:
                 print(f"❌ Не удалось определить нашу команду в игре")
+                print(f"   game_info keys: {list(game_info.keys())}")
+                print(f"   our_team_name: {game_info.get('our_team_name')}")
+                print(f"   team1: {team1}, team2: {team2}")
                 return None
             
             # Определяем название команды для заголовка
