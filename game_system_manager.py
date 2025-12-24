@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, cast
 from zoneinfo import ZoneInfo
 from datetime_utils import get_moscow_time, is_today, log_current_time
-from enhanced_duplicate_protection import duplicate_protection
+from enhanced_duplicate_protection import duplicate_protection, GAME_DATE_COL, GAME_TIME_COL, TYPE_COL, KEY_COL, ADDITIONAL_DATA_COL
 from info_basket_client import InfoBasketClient
 from infobasket_smart_parser import InfobasketSmartParser
 from comp_names import get_comp_name
@@ -1009,6 +1009,107 @@ class GameSystemManager:
         except Exception as e:
             print(f"⚠️ Не удалось определить дату игры для GameID {game_info.get('game_id')}: {e}")
             return False
+    
+    def _check_duplicate_by_date_time_opponent(self, date: str, time: str, opponent: str) -> bool:
+        """Проверяет, есть ли в сервисном листе игра с такой же датой, временем и противником
+        
+        Используется для предотвращения дубликатов, когда игра была найдена через fallback,
+        а потом появилась в API.
+        """
+        try:
+            # Нормализуем время для сравнения
+            time_normalized = time.replace('.', ':')
+            
+            # Очищаем противника от лишних символов
+            opponent_clean = opponent.strip()
+            
+            # Ищем в сервисном листе записи с такой же датой, временем и противником
+            # Проверяем все записи типа "ОПРОС_ИГРА" и "АНОНС_ИГРА"
+            service_worksheet = duplicate_protection._get_service_worksheet()
+            if not service_worksheet:
+                return False
+            
+            all_data = service_worksheet.get_all_values()
+            for row in all_data[1:]:  # Пропускаем заголовок
+                if len(row) <= max(GAME_DATE_COL, GAME_TIME_COL, TYPE_COL):
+                    continue
+                
+                row_type = (row[TYPE_COL] or "").strip().upper()
+                if row_type not in {"ОПРОС_ИГРА", "АНОНС_ИГРА"}:
+                    continue
+                
+                row_date = (row[GAME_DATE_COL] or "").strip()
+                row_time = (row[GAME_TIME_COL] or "").strip()
+                
+                # Нормализуем время из строки для сравнения
+                if row_time:
+                    row_time_normalized = row_time.replace('.', ':')
+                else:
+                    row_time_normalized = ""
+                
+                # Проверяем совпадение даты и времени
+                if row_date == date and row_time_normalized == time_normalized:
+                    # Проверяем, что это игра с тем же противником
+                    row_key = (row[KEY_COL] or "").strip()
+                    row_additional = (row[ADDITIONAL_DATA_COL] or "").strip()
+                    
+                    # Нормализуем названия для сравнения
+                    opponent_normalized = self._normalize_name_for_search(opponent_clean)
+                    
+                    # Ищем варианты названия противника
+                    opponent_variants = list(self._build_name_variants(opponent_clean))
+                    
+                    # Проверяем совпадение противника
+                    opponent_found = False
+                    
+                    # Проверяем, есть ли противник в ключе игры (формат: дата_время_команда1_команда2)
+                    if opponent_clean and row_key:
+                        # Разбиваем ключ на части (разделитель - подчеркивание)
+                        key_parts = row_key.split('_')
+                        if len(key_parts) >= 4:
+                            # Ищем позицию времени (формат HH:MM)
+                            time_part_idx = None
+                            for i, part in enumerate(key_parts):
+                                if ':' in part and len(part) <= 6:  # Время в формате HH:MM
+                                    time_part_idx = i
+                                    break
+                            
+                            if time_part_idx is not None and time_part_idx + 2 < len(key_parts):
+                                # Команды начинаются после времени
+                                team_parts = key_parts[time_part_idx + 1:]
+                                if len(team_parts) >= 2:
+                                    # Последние две части - это команды
+                                    key_team1 = '_'.join(team_parts[:-1]) if len(team_parts) > 2 else team_parts[0]
+                                    key_team2 = team_parts[-1]
+                                    
+                                    # Нормализуем для сравнения
+                                    key_team1_norm = self._normalize_name_for_search(key_team1)
+                                    key_team2_norm = self._normalize_name_for_search(key_team2)
+                                    
+                                    # Проверяем, совпадает ли противник с одной из команд в ключе
+                                    if (opponent_normalized == key_team1_norm or 
+                                        opponent_normalized == key_team2_norm or
+                                        self._find_matching_variant(key_team1_norm, opponent_variants) or
+                                        self._find_matching_variant(key_team2_norm, opponent_variants)):
+                                        opponent_found = True
+                    
+                    # Также проверяем в additional_data
+                    if not opponent_found and row_additional:
+                        additional_norm = self._normalize_name_for_search(row_additional)
+                        for variant in opponent_variants:
+                            variant_norm = self._normalize_name_for_search(variant)
+                            if (variant_norm in additional_norm or 
+                                self._find_matching_variant(additional_norm, opponent_variants)):
+                                opponent_found = True
+                                break
+                    
+                    if opponent_found:
+                        return True
+            
+            return False
+        except Exception as e:
+            print(f"⚠️ Ошибка проверки сервисного листа по дате/времени/противнику: {e}")
+            return False
 
     async def _process_future_game(self, game_info: Dict[str, Any]) -> bool:
         if not self._is_correct_time_for_polls():
@@ -1049,6 +1150,37 @@ class GameSystemManager:
                 else:
                     print(f"⏭️ Опрос для GameID {game_id} уже есть в сервисном листе")
                 return False
+            
+            # Если по game_id не найдено, проверяем сервисный лист по дате, времени и противнику
+            # Это нужно для случаев, когда игра была найдена через fallback и добавлена в сервисный лист,
+            # а потом появилась в API
+            date = game_info.get('date')
+            time = game_info.get('time', '20:00')
+            
+            # Определяем противника
+            opponent = game_info.get('opponent_team_name')
+            if not opponent:
+                # Если нет opponent_team_name, определяем противника по team1/team2
+                team1 = game_info.get('team1', '')
+                team2 = game_info.get('team2', '')
+                our_team_id = self._to_int(game_info.get('our_team_id'))
+                team1_id = self._to_int(game_info.get('team1_id'))
+                team2_id = self._to_int(game_info.get('team2_id'))
+                
+                if our_team_id is not None:
+                    if our_team_id == team1_id:
+                        opponent = team2
+                    elif our_team_id == team2_id:
+                        opponent = team1
+                elif team1 and team2:
+                    # Если не можем определить по ID, используем первую команду как нашу (по умолчанию)
+                    opponent = team2
+            
+            if date and time and opponent:
+                # Проверяем сервисный лист по дате, времени и противнику
+                if self._check_duplicate_by_date_time_opponent(date, time, opponent):
+                    print(f"⏭️ Игра {date} {time} против {opponent} уже найдена в сервисном листе (дата, время и противник совпадают), пропускаем создание опроса")
+                    return False
 
         question = await self.create_game_poll(game_info)
         if not question:
