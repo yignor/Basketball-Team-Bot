@@ -97,15 +97,34 @@ class VotingPollsManager:
             return False
 
         today = get_moscow_time()
+        print(f"📅 Текущая дата и время: {today.strftime('%d.%m.%Y %H:%M')} (день недели: {today.weekday()})")
+        print(f"📋 Найдено конфигураций голосований: {len(configs)}")
+        
         created_any = False
+        skipped_count = 0
         for config in configs:
-            if not config.should_run_on(today):
+            should_run = config.should_run_on(today)
+            weekday_name = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'][today.weekday()]
+            print(f"   🔍 Голосование '{config.poll_id}': сегодня {weekday_name} (день {today.weekday()}), нужно запускать: {should_run}")
+            if not should_run:
+                skipped_count += 1
+                if config.weekdays:
+                    weekday_names = [['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'][wd] for wd in config.weekdays]
+                    print(f"      ⏭️ Пропущено: сегодня {weekday_name}, нужно {'/'.join(weekday_names)}")
+                else:
+                    print(f"      ⏭️ Пропущено: недели не указаны, но should_run_on вернул False")
                 continue
             try:
                 created = await self._create_poll_for_config(config, today)
                 created_any = created_any or created
             except Exception as error:
                 print(f"❌ Не удалось создать голосование '{config.poll_id}': {error}")
+                import traceback
+                traceback.print_exc()
+        
+        if skipped_count > 0:
+            print(f"ℹ️ Пропущено голосований (не подходящий день недели): {skipped_count}")
+        
         return created_any
 
     def _load_configs(self) -> List[VotingPollConfig]:
