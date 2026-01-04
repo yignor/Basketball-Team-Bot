@@ -486,7 +486,7 @@ class FallbackGameMonitor:
                     # Если дата есть в тексте, пробуем извлечь
                     if has_date_in_link:
                         # Сначала пробуем извлечь из текста ссылки
-                        game_info = self._extract_game_info_from_text(link_text, team_name)
+                    game_info = self._extract_game_info_from_text(link_text, team_name)
                         
                         # Если не получилось, пробуем из родительского элемента
                         if not game_info and parent_text:
@@ -499,7 +499,7 @@ class FallbackGameMonitor:
                             if page_game_info:
                                 game_info = page_game_info
                         
-                        if game_info:
+                    if game_info:
                             # Проверяем, что дата в будущем (фильтруем прошедшие игры)
                             try:
                                 from datetime import datetime
@@ -512,14 +512,14 @@ class FallbackGameMonitor:
                                 # Если не удалось распарсить дату, пропускаем
                                 continue
                             
-                            full_link = href if href.startswith('http') else urljoin(url, href)
-                            game_info['url'] = full_link
-                            game_info['team_name'] = team_name
-                            # Извлекаем game_id из ссылки, если есть
+                        full_link = href if href.startswith('http') else urljoin(url, href)
+                        game_info['url'] = full_link
+                        game_info['team_name'] = team_name
+                        # Извлекаем game_id из ссылки, если есть
                             game_id_match = re.search(r'gameId[=:](\d+)|/game/(\d+)|/match/(\d+)|id[=:](\d+)', href)
-                            if game_id_match:
+                        if game_id_match:
                                 game_info['game_id'] = int(game_id_match.group(1) or game_id_match.group(2) or game_id_match.group(3) or game_id_match.group(4))
-                            games.append(game_info)
+                        games.append(game_info)
                             print(f"      ✅ Найдена игра по ссылке: {game_info.get('date')} {game_info.get('time')} vs {game_info.get('opponent')}")
             
             # Стратегия 4: Для globalleague.ru - парсим календарь игр из таблиц или списков
@@ -1637,12 +1637,55 @@ class FallbackGameMonitor:
         
         # Шаг 2: Если есть URL, ищем игры на сайте
         if url:
-            if not fallback_name:
-                print("⚠️ URL указан, но команда для fallback не указана, пропускаем поиск на сайте")
+            # Определяем список команд для поиска
+            teams_to_search = []
+            
+            if fallback_name:
+                # Если указано несколько команд через запятую, разбиваем
+                fallback_names = [name.strip() for name in fallback_name.split(',') if name.strip()]
+                teams_to_search.extend(fallback_names)
+            
+            # Если команд для поиска нет, но есть team_ids, используем все команды из конфигурации
+            if not teams_to_search and team_ids:
+                print(f"   ℹ️ Команда для fallback не указана, используем все команды из конфигурации")
+                # Получаем названия команд из конфигурации для указанных team_ids
+                for team_id in team_ids:
+                    team_name = self.game_manager._resolve_team_name(team_id)
+                    if team_name:
+                        teams_to_search.append(team_name.strip())
+                # Также проверяем альтернативные имена из конфигурации
+                if self.config_worksheet:
+                    try:
+                        all_data = self.config_worksheet.get_all_values()
+                        for row in all_data[1:]:
+                            if not row or len(row) < 3:
+                                continue
+                            row_type = (row[0] or "").strip().upper()
+                            team_id_cell = row[2] if len(row) > 2 else ""
+                            alt_name = (row[3] or "").strip() if len(row) > 3 else ""
+                            
+                            parsed_ids = duplicate_protection._parse_ids(team_id_cell)
+                            if any(tid in team_ids for tid in parsed_ids) and alt_name:
+                                if alt_name not in teams_to_search:
+                                    teams_to_search.append(alt_name)
+                    except Exception as e:
+                        print(f"   ⚠️ Ошибка чтения альтернативных имен: {e}")
+            
+            if not teams_to_search:
+                print("⚠️ URL указан, но команда для fallback не указана и не найдена в конфигурации, пропускаем поиск на сайте")
             else:
-                print(f"🔍 Поиск игр на сайте {url} для команды '{fallback_name}'")
-                site_games = await self.parse_fallback_page(url, fallback_name)
-                print(f"   ✅ Найдено {len(site_games)} игр на сайте")
+                print(f"🔍 Поиск игр на сайте {url} для команд: {', '.join(teams_to_search)}")
+                # Парсим для каждой команды отдельно и объединяем результаты
+                all_site_games = []
+                for team_name in teams_to_search:
+                    print(f"   🔍 Поиск игр для команды '{team_name}'...")
+                    team_games = await self.parse_fallback_page(url, team_name)
+                    all_site_games.extend(team_games)
+                    print(f"      ✅ Найдено {len(team_games)} игр для команды '{team_name}'")
+                
+                # Удаляем дубликаты
+                site_games = self._remove_duplicate_games(all_site_games)
+                print(f"   ✅ Всего найдено {len(site_games)} уникальных игр на сайте")
         
         # Шаг 3: Обрабатываем игры
         if api_games and site_games:
@@ -1773,9 +1816,9 @@ class FallbackGameMonitor:
                     
                     # Стратегия 5: Для globalleague.ru - ждем загрузки данных в таблице
                     if 'globalleague.ru' in url:
-                        try:
+                    try:
                             # Ждем, пока таблица заполнится данными
-                            await page.wait_for_function(
+                        await page.wait_for_function(
                                 '''
                                 () => {
                                     const tables = document.querySelectorAll('table');
@@ -1787,10 +1830,10 @@ class FallbackGameMonitor:
                                 }
                                 ''',
                                 timeout=10000
-                            )
+                        )
                             print(f"   ✅ Таблица заполнена данными")
-                        except:
-                            pass
+                    except:
+                        pass
                     
                     # Получаем HTML после рендеринга JavaScript
                     content = await page.content()
