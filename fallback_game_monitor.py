@@ -475,52 +475,68 @@ class FallbackGameMonitor:
                     parent_text = anchor.parent.get_text(separator=' ', strip=True)
                     normalized_parent = self._normalize_name_for_search(parent_text)
                 
-                team_match = self._find_matching_variant(normalized_link, team_variants) or \
-                            self._find_matching_variant(normalized_parent, team_variants)
+                team_match = (
+                    self._find_matching_variant(normalized_link, team_variants)
+                    or self._find_matching_variant(normalized_parent, team_variants)
+                )
                 
                 if team_match:
                     # Проверяем, не найдена ли уже эта игра в таблице (чтобы избежать дубликатов)
                     # Если в тексте ссылки или родителя нет даты, скорее всего это уже обработано
                     has_date_in_link = bool(re.search(r'\d{1,2}\.\d{1,2}\.\d{2,4}', link_text + parent_text))
                     
-                    # Если дата есть в тексте, пробуем извлечь
+                    # Пытаемся извлечь информацию об игре
+                    game_info = None
+
+                    # Если дата есть в тексте, пробуем извлечь из текста и родителя
                     if has_date_in_link:
                         # Сначала пробуем извлечь из текста ссылки
-                    game_info = self._extract_game_info_from_text(link_text, team_name)
-                        
+                        game_info = self._extract_game_info_from_text(link_text, team_name)
+
                         # Если не получилось, пробуем из родительского элемента
                         if not game_info and parent_text:
                             game_info = self._extract_game_info_from_text(parent_text, team_name)
-                        
-                        # Если все еще не получилось, загружаем страницу игры
-                        if not game_info:
-                            full_link = href if href.startswith('http') else urljoin(url, href)
-                            page_game_info = await self._extract_game_info_from_page(session, full_link, team_name)
-                            if page_game_info:
-                                game_info = page_game_info
-                        
+
+                    # Если все еще не получилось, загружаем страницу игры
+                    if not game_info:
+                        full_link = href if href.startswith('http') else urljoin(url, href)
+                        page_game_info = await self._extract_game_info_from_page(session, full_link, team_name)
+                        if page_game_info:
+                            game_info = page_game_info
+
                     if game_info:
-                            # Проверяем, что дата в будущем (фильтруем прошедшие игры)
-                            try:
-                                from datetime import datetime
-                                game_date = datetime.strptime(game_info['date'], '%d.%m.%Y').date()
-                                today = get_moscow_time().date()
-                                if game_date <= today:
-                                    # Это прошедшая или сегодняшняя игра, пропускаем
-                                    continue
-                            except (ValueError, KeyError):
-                                # Если не удалось распарсить дату, пропускаем
+                        # Проверяем, что дата в будущем (фильтруем прошедшие игры)
+                        try:
+                            from datetime import datetime
+                            game_date = datetime.strptime(game_info['date'], '%d.%m.%Y').date()
+                            today = get_moscow_time().date()
+                            if game_date <= today:
+                                # Это прошедшая или сегодняшняя игра, пропускаем
                                 continue
-                            
+                        except (ValueError, KeyError):
+                            # Если не удалось распарсить дату, пропускаем
+                            continue
+
                         full_link = href if href.startswith('http') else urljoin(url, href)
                         game_info['url'] = full_link
                         game_info['team_name'] = team_name
                         # Извлекаем game_id из ссылки, если есть
-                            game_id_match = re.search(r'gameId[=:](\d+)|/game/(\d+)|/match/(\d+)|id[=:](\d+)', href)
+                        game_id_match = re.search(
+                            r'gameId[=:](\d+)|/game/(\d+)|/match/(\d+)|id[=:](\d+)',
+                            href,
+                        )
                         if game_id_match:
-                                game_info['game_id'] = int(game_id_match.group(1) or game_id_match.group(2) or game_id_match.group(3) or game_id_match.group(4))
+                            game_info['game_id'] = int(
+                                game_id_match.group(1)
+                                or game_id_match.group(2)
+                                or game_id_match.group(3)
+                                or game_id_match.group(4)
+                            )
                         games.append(game_info)
-                            print(f"      ✅ Найдена игра по ссылке: {game_info.get('date')} {game_info.get('time')} vs {game_info.get('opponent')}")
+                        print(
+                            f"      ✅ Найдена игра по ссылке: {game_info.get('date')} "
+                            f"{game_info.get('time')} vs {game_info.get('opponent')}"
+                        )
             
             # Стратегия 4: Для globalleague.ru - парсим календарь игр из таблиц или списков
             if 'globalleague.ru' in url and len(games) == 0:
@@ -807,15 +823,22 @@ class FallbackGameMonitor:
                         # Извлекаем информацию об игре из ячейки
                         game_info = self._extract_game_info_from_schedule_row(cell_text, team_name, base_url)
                         
-                        # Добавляем URL, если есть ссылка в ячейке
-                        if not game_info.get('url'):
-                            link_in_cell = cell.find('a', href=True)
-                            if link_in_cell:
-                                href = link_in_cell.get('href')
-                                if href:
-                                    game_info['url'] = href if href.startswith('http') else urljoin(base_url, href)
                         if game_info:
-                            print(f"         ✅ Извлечена игра: {game_info.get('date')} {game_info.get('time')} vs {game_info.get('opponent')}")
+                            # Добавляем URL, если есть ссылка в ячейке
+                            if not game_info.get('url'):
+                                link_in_cell = cell.find('a', href=True)
+                                if link_in_cell:
+                                    href = link_in_cell.get('href')
+                                    if href:
+                                        game_info['url'] = (
+                                            href
+                                            if href.startswith('http')
+                                            else urljoin(base_url, href)
+                                        )
+                            print(
+                                f"         ✅ Извлечена игра: {game_info.get('date')} "
+                                f"{game_info.get('time')} vs {game_info.get('opponent')}"
+                            )
                             game_info['team_name'] = team_name
                             games.append(game_info)
                     
@@ -1816,9 +1839,9 @@ class FallbackGameMonitor:
                     
                     # Стратегия 5: Для globalleague.ru - ждем загрузки данных в таблице
                     if 'globalleague.ru' in url:
-                    try:
+                        try:
                             # Ждем, пока таблица заполнится данными
-                        await page.wait_for_function(
+                            await page.wait_for_function(
                                 '''
                                 () => {
                                     const tables = document.querySelectorAll('table');
@@ -1829,11 +1852,11 @@ class FallbackGameMonitor:
                                     return false;
                                 }
                                 ''',
-                                timeout=10000
-                        )
-                            print(f"   ✅ Таблица заполнена данными")
-                    except:
-                        pass
+                                timeout=10000,
+                            )
+                            print("   ✅ Таблица заполнена данными")
+                        except Exception:
+                            pass
                     
                     # Получаем HTML после рендеринга JavaScript
                     content = await page.content()
