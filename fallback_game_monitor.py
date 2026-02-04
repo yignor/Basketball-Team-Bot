@@ -481,6 +481,13 @@ class FallbackGameMonitor:
                 )
                 
                 if team_match:
+                    # Дополнительная защита от путаницы "основная" vs "фарм"-команда:
+                    # если в тексте есть слово "фарм", а в названии нашей команды его нет,
+                    # пропускаем такую игру и даем ее обработать конфигурации для фарм-команды.
+                    team_name_lower = (team_name or "").lower()
+                    text_lower = f"{link_text} {parent_text}".lower()
+                    if 'фарм' in text_lower and 'фарм' not in team_name_lower:
+                        continue
                     # Проверяем, не найдена ли уже эта игра в таблице (чтобы избежать дубликатов)
                     # Если в тексте ссылки или родителя нет даты, скорее всего это уже обработано
                     has_date_in_link = bool(re.search(r'\d{1,2}\.\d{1,2}\.\d{2,4}', link_text + parent_text))
@@ -912,7 +919,10 @@ class FallbackGameMonitor:
                                 if is_participant:
                                     break
                         
-                        if not is_participant:
+                        # Если это фарм-команда, а текущая конфигурация для основной (без слова "фарм") – пропускаем
+                        team_name_lower = (team_name or "").lower()
+                        row_text_lower = row_text.lower()
+                        if not is_participant or ('фарм' in row_text_lower and 'фарм' not in team_name_lower):
                             continue
                         
                         # Проверяем, не обработали ли мы уже эту игру из ячейки
@@ -990,7 +1000,9 @@ class FallbackGameMonitor:
                             break
                 
                 # Если команда не является участником игры, пропускаем
-                if not is_participant:
+                team_name_lower = (team_name or "").lower()
+                text_lower = text.lower()
+                if not is_participant or ('фарм' in text_lower and 'фарм' not in team_name_lower):
                     return games
                 
                 game_info = self._extract_game_info_from_schedule_row(text, team_name, base_url)
