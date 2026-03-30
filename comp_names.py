@@ -10,6 +10,7 @@
 во время рантайма после получения данных Widget/CompIssue/{CompID}.
 """
 
+# Keep-alive note: repository activity marker.
 from typing import Dict, Optional
 
 _COMP_NAMES: Dict[int, str] = {
