@@ -392,10 +392,10 @@ class EnhancedDuplicateProtection:
                 current_header = [cell.strip() for cell in all_data[header_row_index - 1][:len(AUTOMATION_SECTION_HEADER)]]
                 if current_header != AUTOMATION_SECTION_HEADER:
                     # Заголовок устарел, обновляем его
-                    worksheet.update(
+                worksheet.update(
                         f"A{header_row_index}:{chr(ord('A') + len(AUTOMATION_SECTION_HEADER) - 1)}{header_row_index}",
                         [AUTOMATION_SECTION_HEADER],
-                    )
+                )
                     all_data = worksheet.get_all_values()
                     all_data[header_row_index - 1] = AUTOMATION_SECTION_HEADER + [""] * (len(all_data[header_row_index - 1]) - len(AUTOMATION_SECTION_HEADER))
 
@@ -1271,7 +1271,7 @@ class EnhancedDuplicateProtection:
                             fallback_entry["metadata"]["team_ids"] = row_team_ids
                         fallback_sources.append(fallback_entry)
                         # Продолжаем обработку, чтобы также добавить команды в teams, если есть team_ids
-                    
+
                     if not normalized_type:
                         if row_team_ids:
                             normalized_type = "CONFIG_TEAM"
@@ -1307,17 +1307,17 @@ class EnhancedDuplicateProtection:
                     elif normalized_type in {"FALLBACK", "FALLBACK_SOURCE", "FALLBACK_CONFIG"}:
                         # Дополнительная проверка для явного типа FALLBACK (на случай, если URL не был распознан выше)
                         if not (fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://'))):
-                            fallback_entry = {
+                        fallback_entry = {
                                 "name": fallback_name.strip() or alt_name,
                                 "url": fallback_url.strip(),
                                 "metadata": config_payload or {},
-                            }
+                        }
                             if row_comp_ids:
                                 fallback_entry["metadata"]["comp_ids"] = row_comp_ids
                             if row_team_ids:
                                 fallback_entry["metadata"]["team_ids"] = row_team_ids
-                            if fallback_entry["url"] or fallback_entry["name"]:
-                                fallback_sources.append(fallback_entry)
+                        if fallback_entry["url"] or fallback_entry["name"]:
+                            fallback_sources.append(fallback_entry)
                     else:
                         # Unknown types before the separator are ignored to keep backward compatibility
                         continue

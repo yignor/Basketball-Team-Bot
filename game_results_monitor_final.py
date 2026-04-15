@@ -537,7 +537,7 @@ class GameResultsMonitorFinal:
                 topic_candidate = game_results_entry.get("topic_id")
                 if topic_candidate is None:
                     topic_candidate = game_results_entry.get("topic_raw")
-                try:
+            try:
                     game_results_topic_id = int(topic_candidate) if topic_candidate is not None else None
                 except (TypeError, ValueError):
                     game_results_topic_id = None

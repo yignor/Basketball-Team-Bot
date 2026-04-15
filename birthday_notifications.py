@@ -25,21 +25,11 @@ def get_years_word(age: int) -> str:
     else:
         return "лет"
 
-def should_check_birthdays() -> bool:
-    """Проверяет, нужно ли проверять дни рождения (в 09:00-09:59 по Москве)"""
-    # Получаем московское время
-    now = get_moscow_time()
-    return now.hour == 9  # Проверяем весь час с 09:00 до 09:59 по Москве
-
 async def check_birthdays():
     """Проверяет дни рождения и отправляет уведомления"""
     try:
         # Используем централизованное логирование времени
         time_info = log_current_time()
-        
-        if not should_check_birthdays():
-            print("📅 Не время для проверки дней рождения (только в 09:00-09:59)")
-            return
         
         print("🎂 Проверяем дни рождения...")
         
@@ -138,7 +128,7 @@ async def check_birthdays():
                     birthday_topic_id = int(topic_candidate) if topic_candidate is not None else None
                 except (TypeError, ValueError):
                     birthday_topic_id = None
-            
+
             # Отправляем каждое сообщение во все настроенные чаты
             for i, message in enumerate(birthday_messages, 1):
                 player = birthday_players[i-1]
@@ -159,20 +149,20 @@ async def check_birthdays():
                 message_sent = False
                 for chat_id in all_chat_ids:
                     try:
-                        try:
-                            target_chat_id: Any = int(chat_id)
-                        except (TypeError, ValueError):
-                            target_chat_id = chat_id
-                        
-                        send_kwargs: Dict[str, Any] = {"chat_id": target_chat_id, "text": message}
-                        if birthday_topic_id is not None:
-                            send_kwargs["message_thread_id"] = birthday_topic_id
-                        await current_bot.send_message(**send_kwargs)  # type: ignore[reportCallIssue]
+            try:
+                target_chat_id: Any = int(chat_id)
+            except (TypeError, ValueError):
+                target_chat_id = chat_id
+            
+                    send_kwargs: Dict[str, Any] = {"chat_id": target_chat_id, "text": message}
+                    if birthday_topic_id is not None:
+                        send_kwargs["message_thread_id"] = birthday_topic_id
+                    await current_bot.send_message(**send_kwargs)  # type: ignore[reportCallIssue]
                         print(f"✅ Отправлено уведомление {i} в чат {chat_id}: {message[:50]}...")
                         message_sent = True
                     except Exception as e:
                         print(f"❌ Ошибка отправки уведомления {i} в чат {chat_id}: {e}")
-                
+                    
                 # Добавляем запись в сервисный лист для защиты от дублирования только если сообщение было отправлено
                 if message_sent:
                     additional_info = f"{surname} {first_name} ({age} {get_years_word(age)})"
