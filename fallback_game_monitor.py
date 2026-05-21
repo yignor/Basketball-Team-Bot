@@ -7,7 +7,8 @@
 import asyncio
 import aiohttp
 import re
-from typing import Any, Dict, List, Optional, Set
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional, Set, Tuple
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime_utils import get_moscow_time
@@ -29,6 +30,67 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     print("ℹ️ Playwright не установлен. Для парсинга JavaScript-контента установите: pip install playwright && playwright install chromium")
+
+# BasketStat SLPRO (slpro.basketstat.ru) — месяцы в селекторе календаря
+_BASKETSTAT_RU_MONTHS: Tuple[Tuple[str, int], ...] = (
+    ('январ', 1),
+    ('феврал', 2),
+    ('март', 3),
+    ('апрел', 4),
+    ('май', 5),
+    ('мая', 5),
+    ('июн', 6),
+    ('июл', 7),
+    ('август', 8),
+    ('сентябр', 9),
+    ('октябр', 10),
+    ('ноябр', 11),
+    ('декабр', 12),
+)
+
+
+def basketstat_parse_ru_month(month_text: str) -> Optional[int]:
+    """Парсит русское название месяца (Май, май) в номер месяца."""
+    normalized = (month_text or '').strip().lower()
+    if not normalized:
+        return None
+    for prefix, month_num in _BASKETSTAT_RU_MONTHS:
+        if normalized.startswith(prefix):
+            return month_num
+    return None
+
+
+def basketstat_resolve_day_date(
+    day_label: str,
+    month: int,
+    year: int,
+    today: Optional[date] = None,
+) -> Optional[date]:
+    """
+    Преобразует метку дня календаря BasketStat в date.
+    Поддерживает: DD, «Сегодня», «Завтра».
+    """
+    if today is None:
+        today = get_moscow_time().date()
+
+    label = (day_label or '').strip()
+    if not label:
+        return None
+
+    lowered = label.lower()
+    if lowered == 'сегодня':
+        return today
+    if lowered == 'завтра':
+        return today + timedelta(days=1)
+
+    if not label.isdigit():
+        return None
+
+    try:
+        day = int(label)
+        return datetime(year, month, day).date()
+    except ValueError:
+        return None
 
 
 class FallbackGameMonitor:
@@ -360,9 +422,17 @@ class FallbackGameMonitor:
                 return []
             
             soup = BeautifulSoup(content, 'html.parser')
+
+            # BasketStat SLPRO: календарь с day-cell / match (после Playwright)
+            if 'basketstat.ru' in url:
+                basketstat_games = self._parse_basketstat_schedule(
+                    soup, team_variants, team_name, url
+                )
+                if basketstat_games:
+                    return basketstat_games
             
             # Для сайтов с JavaScript-контентом проверяем, есть ли команда в тексте страницы
-            if 'globalleague.ru' in url or 'neva-basket.ru' in url:
+            if 'globalleague.ru' in url or 'neva-basket.ru' in url or 'basketstat.ru' in url:
                 page_text = soup.get_text()
                 normalized_page = self._normalize_name_for_search(page_text)
                 team_found_in_page = self._find_matching_variant(normalized_page, team_variants)
@@ -1791,9 +1861,180 @@ class FallbackGameMonitor:
         else:
             print("⚠️ Игры не найдены ни в API, ни на сайте")
     
+    def _parse_basketstat_schedule(
+        self,
+        soup: BeautifulSoup,
+        team_variants: List[str],
+        team_name: str,
+        base_url: str,
+    ) -> List[Dict[str, Any]]:
+        """Парсит календарь расписания slpro.basketstat.ru (Vue SPA)."""
+        games: List[Dict[str, Any]] = []
+        try:
+            calendar = soup.select_one('.calendar-container')
+            if not calendar:
+                print("   ⚠️ BasketStat: календарь (.calendar-container) не найден")
+                return games
+
+            month_num: Optional[int] = None
+            year_num: Optional[int] = None
+            for text_el in calendar.select('.main_select_selected_text'):
+                text = text_el.get_text(strip=True)
+                if text.isdigit() and len(text) == 4:
+                    year_num = int(text)
+                    continue
+                parsed_month = basketstat_parse_ru_month(text)
+                if parsed_month:
+                    month_num = parsed_month
+
+            if not month_num or not year_num:
+                print(
+                    f"   ⚠️ BasketStat: не удалось определить месяц/год "
+                    f"(month={month_num}, year={year_num})"
+                )
+                return games
+
+            today = get_moscow_time().date()
+            seen_keys: Set[str] = set()
+
+            for day_cell in calendar.select('.day-cell'):
+                classes = day_cell.get('class') or []
+                if 'other-month' in classes:
+                    continue
+
+                day_label = self._basketstat_extract_day_label(day_cell)
+                if not day_label:
+                    continue
+
+                game_date = basketstat_resolve_day_date(
+                    day_label, month_num, year_num, today
+                )
+                if not game_date or game_date <= today:
+                    continue
+
+                date_str = game_date.strftime('%d.%m.%Y')
+
+                for match_el in day_cell.select('a.match, .match'):
+                    match_games = self._parse_basketstat_match_element(
+                        match_el,
+                        team_variants,
+                        team_name,
+                        base_url,
+                        date_str,
+                        seen_keys,
+                    )
+                    games.extend(match_games)
+
+            if games:
+                print(f"   ✅ BasketStat: найдено {len(games)} будущих игр")
+            else:
+                print("   ⚠️ BasketStat: будущие игры для команды не найдены")
+
+        except Exception as e:
+            print(f"   ⚠️ Ошибка парсинга BasketStat: {e}")
+
+        return games
+
+    def _basketstat_extract_day_label(self, day_cell) -> Optional[str]:
+        """Извлекает метку дня из ячейки календаря (число, Сегодня, Завтра)."""
+        for el in day_cell.find_all(recursive=False):
+            text = el.get_text(strip=True)
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in ('сегодня', 'завтра'):
+                return text
+            if text.isdigit() and len(text) <= 2:
+                return text
+
+        parts = day_cell.get_text(' ', strip=True).split()
+        if parts:
+            first = parts[0]
+            if first.lower() in ('сегодня', 'завтра') or (first.isdigit() and len(first) <= 2):
+                return first
+        return None
+
+    def _parse_basketstat_match_element(
+        self,
+        match_el,
+        team_variants: List[str],
+        team_name: str,
+        base_url: str,
+        date_str: str,
+        seen_keys: Set[str],
+    ) -> List[Dict[str, Any]]:
+        games: List[Dict[str, Any]] = []
+        team_names: List[str] = []
+        for name_el in match_el.select('.team-name'):
+            name = name_el.get_text(strip=True)
+            if name and (not team_names or team_names[-1] != name):
+                team_names.append(name)
+
+        if len(team_names) < 2:
+            match_text = match_el.get_text(' ', strip=True)
+            time_el = match_el.select_one('.match-time')
+            time_str = time_el.get_text(strip=True) if time_el else ''
+            if time_str:
+                match_text = match_text.replace(time_str, ' ', 1).strip()
+            parts = [p.strip() for p in re.split(r'\s+', match_text) if p.strip()]
+            if time_str and time_str in parts:
+                parts = [p for p in parts if p != time_str]
+            if len(parts) >= 2:
+                team_names = [parts[0], parts[-1]]
+
+        if len(team_names) < 2:
+            return games
+
+        home_team, away_team = team_names[0], team_names[1]
+        home_norm = self._normalize_name_for_search(home_team)
+        away_norm = self._normalize_name_for_search(away_team)
+
+        our_team_is_home = bool(self._find_matching_variant(home_norm, team_variants))
+        our_team_is_away = bool(self._find_matching_variant(away_norm, team_variants))
+
+        if not our_team_is_home and not our_team_is_away:
+            return games
+
+        opponent = away_team if our_team_is_home else home_team
+
+        time_el = match_el.select_one('.match-time')
+        time_str = '20:00'
+        if time_el:
+            time_match = re.search(r'(\d{1,2}):(\d{2})', time_el.get_text(strip=True))
+            if time_match:
+                hours, minutes = int(time_match.group(1)), int(time_match.group(2))
+                if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                    time_str = f"{hours:02d}:{minutes:02d}"
+
+        href = match_el.get('href') if match_el.name == 'a' else None
+        if not href:
+            link = match_el.find('a', href=True)
+            href = link.get('href') if link else None
+        game_url = urljoin(base_url, href) if href else base_url
+
+        game_key = f"{date_str}|{time_str}|{team_name}|{opponent}"
+        if game_key in seen_keys:
+            return games
+        seen_keys.add(game_key)
+
+        games.append({
+            'date': date_str,
+            'time': time_str,
+            'opponent': opponent,
+            'venue': 'Не указано',
+            'team_name': team_name,
+            'url': game_url,
+            'is_home': our_team_is_home,
+        })
+        print(
+            f"      ✅ BasketStat: {date_str} {time_str} "
+            f"{team_name} vs {opponent}"
+        )
+        return games
+
     def _needs_playwright(self, url: str) -> bool:
         """Определяет, нужен ли Playwright для парсинга этого сайта"""
-        js_sites = ['globalleague.ru', 'neva-basket.ru']
+        js_sites = ['globalleague.ru', 'neva-basket.ru', 'basketstat.ru']
         return any(site in url for site in js_sites)
     
     async def _fetch_with_playwright(self, url: str, timeout: int = 60000) -> Optional[str]:
@@ -1867,6 +2108,34 @@ class FallbackGameMonitor:
                                 timeout=10000,
                             )
                             print("   ✅ Таблица заполнена данными")
+                        except Exception:
+                            pass
+
+                    # Стратегия 6: BasketStat SLPRO — календарь с матчами
+                    if 'basketstat.ru' in url:
+                        try:
+                            await page.wait_for_selector(
+                                '.day-cell .match, .day-cell a.match',
+                                timeout=20000,
+                            )
+                            print("   ✅ Календарь BasketStat загружен")
+                        except Exception:
+                            print("   ⚠️ Календарь BasketStat не дождался, продолжаем...")
+                        try:
+                            await page.wait_for_function(
+                                '''
+                                () => {
+                                    const cells = document.querySelectorAll('.day-cell:not(.other-month)');
+                                    for (const cell of cells) {
+                                        if (cell.querySelector('.match-time, .match, a.match')) {
+                                            return true;
+                                        }
+                                    }
+                                    return document.querySelectorAll('.schedule_row_match').length > 0;
+                                }
+                                ''',
+                                timeout=10000,
+                            )
                         except Exception:
                             pass
                     
