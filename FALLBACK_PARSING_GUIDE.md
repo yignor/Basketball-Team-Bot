@@ -140,6 +140,27 @@ async with aiohttp.ClientSession() as session:
 # 3. Результат: ("http://mb-78.ru/game.html?gameId=973178", "Flash")
 ```
 
+### 8. BasketStat SLPRO (slpro.basketstat.ru)
+
+Страница расписания — Vue SPA; данные подгружаются через JavaScript. Парсер использует Playwright и календарь на странице (`/schedule/{season}/{division}/{stage}/`).
+
+**Google Sheets (лист «Конфиг»):**
+
+```
+ТИП: FALLBACK_SOURCE
+URL FALLBACK: https://slpro.basketstat.ru/schedule/2025-2026/SUMC/2/
+КОМАНДА ДЛЯ FALLBACK: PUP
+```
+
+```
+ТИП: CONFIG_TEAM
+ИД КОМАНДЫ: <id из Infobasket, если есть>
+АЛЬТЕРНАТИВНОЕ ИМЯ: PUP
+НАСТРОЙКИ (JSON): {"aliases": ["PUP", "PullUp"]}
+```
+
+Короткое имя на сайте (PUP, GeNex, ЦБ) должно совпадать с `КОМАНДА ДЛЯ FALLBACK` или алиасами в CONFIG_TEAM. Даты: число дня + месяц/год из селекторов календаря; также поддерживаются «Сегодня» и «Завтра».
+
 ## Итого
 
 - **110852** - это ID соревнования, не команды
