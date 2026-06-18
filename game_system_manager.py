@@ -2376,12 +2376,10 @@ class GameSystemManager:
         except Exception as e:
             print(f"❌ Ошибка выполнения системы: {e}")
 
-# Глобальный экземпляр
-game_system_manager = GameSystemManager()
-
 async def main():
     """Основная функция"""
-    await game_system_manager.run_full_system()
+    manager = GameSystemManager()
+    await manager.run_full_system()
 
 if __name__ == "__main__":
     asyncio.run(main())

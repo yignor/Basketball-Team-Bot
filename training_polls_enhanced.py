@@ -269,9 +269,9 @@ class VotingPollsManager:
                     duplicate_protection.update_record_status(sheet_unique_key, "ОШИБКА")
                 raise
 
-                if sheet_unique_key:
-                    duplicate_protection.update_record_status(sheet_unique_key, "ОТПРАВЛЕН")
-            print(f"✅ Голосование {config.poll_id} отправлено (message_id={message.message_id})")
+        if sheet_unique_key:
+            duplicate_protection.update_record_status(sheet_unique_key, "ОТПРАВЛЕН")
+        print(f"✅ Голосование {config.poll_id} отправлено (message_id={message.message_id})")
         return True
 
     def _build_placeholder_replacements(

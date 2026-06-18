@@ -9,80 +9,29 @@ on:
 jobs:
   cleanup-service-sheet:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
-      
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements-github.txt
-        
-    - name: Create .env file
-      run: |
-        echo "🔧 СОЗДАНИЕ ФАЙЛА .ENV"
-        echo "=================================================="
-        
-        # Создаем пустой .env файл
-        touch .env
-        
-        # Добавляем переменные только если они не пустые
-        if [ ! -z "${{ secrets.BOT_TOKEN }}" ]; then
-          echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" >> .env
-          echo "✅ BOT_TOKEN добавлен в .env"
-        else
-          echo "⚠️ BOT_TOKEN пустой, пропускаем"
-        fi
-        
-        if [ ! -z "${{ secrets.CHAT_ID }}" ]; then
-          echo "CHAT_ID=${{ secrets.CHAT_ID }}" >> .env
-          echo "✅ CHAT_ID добавлен в .env"
-        else
-          echo "⚠️ CHAT_ID пустой, пропускаем"
-        fi
-        
-        if [ ! -z "${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}" ]; then
-          echo "GOOGLE_SHEETS_CREDENTIALS='${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}'" >> .env
-          echo "✅ GOOGLE_SHEETS_CREDENTIALS добавлен в .env"
-        else
-          echo "⚠️ GOOGLE_SHEETS_CREDENTIALS пустой, пропускаем"
-        fi
-        
-        if [ ! -z "${{ secrets.SPREADSHEET_ID }}" ]; then
-          echo "SPREADSHEET_ID=${{ secrets.SPREADSHEET_ID }}" >> .env
-          echo "✅ SPREADSHEET_ID добавлен в .env"
-        else
-          echo "⚠️ SPREADSHEET_ID пустой, пропускаем"
-        fi
-        
-        echo "=================================================="
-        
+
     - name: Run cleanup script
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+        GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
       run: |
         echo "🧹 ЗАПУСК СКРИПТА ОЧИСТКИ СЕРВИСНОГО ЛИСТА"
         echo "=================================================="
-        
-        # Запускаем скрипт очистки
         python cleanup_service_sheet.py
-        
-        echo "=================================================="
-        
-    - name: Cleanup
-      if: always()
-      run: |
-        echo "🧹 ОЧИСТКА ВРЕМЕННЫХ ФАЙЛОВ"
-        echo "=================================================="
-        
-        # Удаляем временные файлы
-        if [ -f ".env" ]; then
-          rm .env
-          echo "✅ .env файл удален"
-        fi
-        
         echo "=================================================="
