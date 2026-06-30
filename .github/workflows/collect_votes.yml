@@ -1,0 +1,40 @@
+name: Collect Training Votes
+
+on:
+  schedule:
+    # Каждый час в :05 (не в :00, чтобы не конфликтовать с Daily Bot)
+    - cron: '5 * * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Причина ручного запуска (опционально)'
+        required: false
+        type: string
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-github.txt
+
+      - name: Collect poll_answer updates
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          echo "📥 Сбор голосов тренировок"
+          python collect_votes.py

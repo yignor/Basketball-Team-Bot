@@ -271,6 +271,27 @@ class VotingPollsManager:
 
         if sheet_unique_key:
             duplicate_protection.update_record_status(sheet_unique_key, "ОТПРАВЛЕН")
+
+        # Регистрируем опрос тренировки — сохраняем Telegram poll.id для сбора голосов
+        tg_poll_id = message.poll.id if message.poll else None
+        if tg_poll_id:
+            training_date_str = today.strftime("%Y-%m-%d")
+            reg_key = f"TPOLL_{config.poll_id}_{training_date_str}"
+            duplicate_protection.add_record(
+                "TRAINING_POLL_REG",
+                reg_key,
+                status="АКТИВЕН",
+                additional_data=json.dumps({
+                    "tg_poll_id": tg_poll_id,
+                    "options": options,
+                    "chat_id": self.chat_id,
+                    "message_id": message.message_id,
+                }, ensure_ascii=False),
+                alt_name=config.poll_id,
+                game_date=training_date_str,
+            )
+            print(f"   📋 Зарегистрирован тренировочный опрос: tg_poll_id={tg_poll_id} [{training_date_str}]")
+
         print(f"✅ Голосование {config.poll_id} отправлено (message_id={message.message_id})")
         return True
 

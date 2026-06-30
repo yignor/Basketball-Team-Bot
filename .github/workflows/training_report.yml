@@ -1,0 +1,64 @@
+name: Training Attendance Report
+
+on:
+  schedule:
+    # 1-го числа каждого месяца в 09:00 МСК (06:00 UTC)
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Режим отчёта'
+        required: true
+        default: 'current_month'
+        type: choice
+        options:
+          - current_month
+          - all_time
+      month:
+        description: 'Конкретный месяц (YYYY-MM, например 2026-06) — только для ручного запуска'
+        required: false
+        type: string
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-github.txt
+
+      - name: Generate attendance report
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          echo "📋 Генерация отчёта посещаемости"
+
+          # Определяем аргументы
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # Ежемесячный запуск — предыдущий месяц
+            PREV_MONTH=$(date -d "last month" +%Y-%m 2>/dev/null || date -v-1m +%Y-%m)
+            echo "Ежемесячный отчёт за: $PREV_MONTH"
+            python training_report.py --month "$PREV_MONTH"
+          elif [ "${{ inputs.mode }}" = "all_time" ]; then
+            echo "Отчёт за всё время"
+            python training_report.py --all
+          elif [ -n "${{ inputs.month }}" ]; then
+            echo "Отчёт за месяц: ${{ inputs.month }}"
+            python training_report.py --month "${{ inputs.month }}"
+          else
+            echo "Отчёт за текущий месяц"
+            python training_report.py
+          fi
