@@ -232,17 +232,33 @@ class SheetBuilder:
         self.rows.append([f"Сводка за месяц · {total_trainings} тренировок"])
 
     def summary_table_header(self):
-        self.rows.append(["Фамилия / Имя", "Ник", "Посетил", "Пропустил", "Всего", "% посещений", "Результаты →"])
+        self.rows.append(["Фамилия / Имя", "Ник", "Посетил", "Пропустил", "Всего", "% посещений"])
 
-    def summary_row(self, full_name: str, nick: str, present: int, absent: int, emojis: str):
+    def summary_row(self, full_name: str, nick: str, present: int, absent: int):
         total = present + absent
         pct   = f"{round(present / total * 100)}%" if total else "—"
-        self.rows.append([full_name, f"@{nick}" if nick else "", str(present), str(absent), str(total), pct, emojis])
+        self.rows.append([full_name, f"@{nick}" if nick else "", str(present), str(absent), str(total), pct])
 
-    def week_header(self, week_start: date, week_end: date):
+    def training_days_line(self, trainings_with_counts: List[Tuple[date, int, int]]):
+        """Строка вида 'По дням: вт 10 июня – 8 · пт 13 июня – 6 · ...'"""
+        parts = []
+        for d, present, absent in trainings_with_counts:
+            day_short = DAYS_RU[d.weekday()]
+            mon_gen   = MONTHS_RU_GEN.get(d.month, "")
+            parts.append(f"{day_short} {d.day} {mon_gen} – {present} чел.")
+        self.rows.append([f"По дням: {' · '.join(parts)}"])
+
+    def week_header(self, week_start: date, week_end: date,
+                    trainings_with_counts: Optional[List[Tuple[date, int, int]]] = None):
         s = f"{week_start.day} {MONTHS_RU_GEN.get(week_start.month, '')}"
         e = f"{week_end.day} {MONTHS_RU_GEN.get(week_end.month, '')} {week_end.year}"
         self.rows.append([f"──── Неделя: {s} – {e} ────"])
+        if trainings_with_counts:
+            parts = []
+            for d, present, absent in trainings_with_counts:
+                day_short = DAYS_RU[d.weekday()]
+                parts.append(f"{day_short} {d.day} – {present} чел.")
+            self.rows.append([f"  {'  ·  '.join(parts)}"])
 
     def training_header(self, d: date, present_count: int, absent_count: int):
         day_name = DAYS_FULL_RU[d.weekday()]
@@ -321,28 +337,30 @@ def build_report(
         for dt_str, _ in month_trainings:
             month_votes_all.extend(by_training[dt_str])
 
-        player_month: Dict[str, Dict] = defaultdict(lambda: {"present": 0, "absent": 0, "emojis": [], "nick": ""})
+        player_month: Dict[str, Dict] = defaultdict(lambda: {"present": 0, "absent": 0, "nick": ""})
         for v in month_votes_all:
             full_name, nick = resolve_player(v, players)
             key = full_name
             player_month[key]["nick"] = nick
             if v["vote_type"] == "PRESENT":
                 player_month[key]["present"] += 1
-                player_month[key]["emojis"].append("✅")
             elif v["vote_type"] == "ABSENT":
                 player_month[key]["absent"] += 1
-                player_month[key]["emojis"].append("❌")
 
+        # Per-training day counts for this month (sorted oldest→newest for readability)
+        month_day_counts: List[Tuple[date, int, int]] = []
+        for dt_str, d in sorted(month_trainings, key=lambda x: x[1]):
+            tvotes = by_training[dt_str]
+            p_cnt  = sum(1 for v in tvotes if v["vote_type"] == "PRESENT")
+            a_cnt  = sum(1 for v in tvotes if v["vote_type"] == "ABSENT")
+            month_day_counts.append((d, p_cnt, a_cnt))
+
+        sb.training_days_line(month_day_counts)
+        sb.blank()
         sb.summary_table_header()
         # Sort by attendance desc
         for pname, pdata in sorted(player_month.items(), key=lambda x: -x[1]["present"]):
-            sb.summary_row(
-                pname,
-                pdata["nick"],
-                pdata["present"],
-                pdata["absent"],
-                " ".join(pdata["emojis"]),
-            )
+            sb.summary_row(pname, pdata["nick"], pdata["present"], pdata["absent"])
 
         sb.blank(2)
         summary_sections.append(sb.rows)
@@ -359,7 +377,14 @@ def build_report(
             weeks[wk].append((dt_str, d))
 
         for (wk_start, wk_end), wk_trainings in sorted(weeks.items(), reverse=True):
-            db.week_header(wk_start, wk_end)
+            # Build per-day counts for this week (chronological for the header line)
+            wk_day_counts: List[Tuple[date, int, int]] = []
+            for dt_str_w, d_w in sorted(wk_trainings):
+                p_w = sum(1 for v in by_training[dt_str_w] if v["vote_type"] == "PRESENT")
+                a_w = sum(1 for v in by_training[dt_str_w] if v["vote_type"] == "ABSENT")
+                wk_day_counts.append((d_w, p_w, a_w))
+
+            db.week_header(wk_start, wk_end, wk_day_counts)
             db.blank()
 
             for dt_str, d in sorted(wk_trainings, reverse=True):
