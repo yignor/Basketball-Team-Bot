@@ -1,0 +1,49 @@
+name: Player Statistics
+
+on:
+  workflow_dispatch:
+    inputs:
+      player_name:
+        description: 'Имя игрока как в Infobasket (например: "Иванов Иван")'
+        required: true
+        type: string
+      chat_id:
+        description: 'Telegram chat_id для отправки (по умолчанию — из секрета CHAT_ID)'
+        required: false
+        type: string
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-github.txt
+
+      - name: Generate player statistics
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id || secrets.CHAT_ID }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: |
+          echo "📊 Статистика игрока: ${{ inputs.player_name }}"
+          python player_stats.py "${{ inputs.player_name }}"
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: player-stats-${{ github.run_number }}
+          path: stats_*.html
+          if-no-files-found: warn
