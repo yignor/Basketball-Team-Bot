@@ -1,11 +1,16 @@
-name: Player Statistics
+name: Team Statistics
 
 on:
   workflow_dispatch:
     inputs:
-      person_id:
-        description: 'PersonID в Infobasket (ваш ID: 400566)'
+      team_ids:
+        description: 'TeamID команд через пробел (Flash=32855 PULL UP=36502 фарм=42347)'
         required: true
+        default: '32855 36502 42347'
+        type: string
+      person_id:
+        description: 'PersonID игрока для контекста (400566 = Шараев)'
+        required: false
         default: '400566'
         type: string
       chat_id:
@@ -31,20 +36,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-github.txt
 
-      - name: Generate player statistics
+      - name: Generate team statistics
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id || secrets.CHAT_ID }}
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
         run: |
-          echo "📊 Статистика игрока personId=${{ inputs.person_id }}"
-          python player_stats.py --person-id ${{ inputs.person_id }}
+          # Convert space-separated team_ids to --team-ids args
+          TEAM_ARGS=$(echo "${{ inputs.team_ids }}" | tr ' ' '\n' | sed 's/^//' | tr '\n' ' ')
+          echo "🏆 Аналитика команд: ${{ inputs.team_ids }}"
+          PERSON_ARG=""
+          if [ -n "${{ inputs.person_id }}" ]; then
+            PERSON_ARG="--person-id ${{ inputs.person_id }}"
+          fi
+          python team_stats.py --team-ids $TEAM_ARGS $PERSON_ARG
 
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: player-stats-${{ github.run_number }}
-          path: stats_player_*.html
+          name: team-stats-${{ github.run_number }}
+          path: team_stats_*.html
           if-no-files-found: warn
