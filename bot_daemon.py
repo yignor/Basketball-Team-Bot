@@ -151,7 +151,14 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         log.error(f"Ошибка при формировании админ-панели: {e}")
         text = "⚠️ Не удалось получить статистику, подробности в логах демона."
 
-    await update.message.reply_text(text)
+    for attempt in range(3):
+        try:
+            await update.message.reply_text(text)
+            return
+        except Exception as e:
+            log.warning(f"Не удалось отправить ответ /admin (попытка {attempt + 1}/3): {e}")
+            await asyncio.sleep(2)
+    log.error("Не удалось отправить ответ /admin после 3 попыток")
 
 
 async def on_startup(app: Application) -> None:
@@ -171,9 +178,16 @@ def main() -> None:
         log.error("BOT_TOKEN не задан в .env")
         sys.exit(1)
 
+    # Трафик бота идёт через VPN-туннель с обфускацией (обход блокировки Telegram
+    # провайдером), что добавляет джиттер задержки — дефолтные таймауты httpx
+    # (5 сек) иногда не успевают, поднимаем их с запасом.
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .connect_timeout(20)
+        .read_timeout(20)
+        .write_timeout(20)
+        .pool_timeout(20)
         .post_init(on_startup)
         .post_shutdown(on_shutdown)
         .build()
