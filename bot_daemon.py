@@ -33,6 +33,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# httpx/httpcore логируют полный URL запроса на уровне INFO, а URL Telegram API
+# содержит BOT_TOKEN — поднимаем порог, чтобы токен не попадал в логи/журнал.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 # Импортируем логику из collect_votes (переиспользуем без изменений)
 from collect_votes import (
