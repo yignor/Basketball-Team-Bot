@@ -4,6 +4,7 @@
 .env.backup
 .env.*
 *.env
+!deploy/.env.example
 
 # Google credentials (sensitive data)
 google_credentials.json
@@ -75,3 +76,6 @@ test_*.json
 .playwright/
 playwright-report/
 test-results/
+
+# Generated report files (created locally by player_stats.py / team_stats.py)
+*.html

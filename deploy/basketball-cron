@@ -9,6 +9,9 @@ LOG=/var/log/basketball-bot
 # Daily Bot: игры, опросы, анонсы — 09:05 МСК (06:05 UTC)
 5 6 * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
 
+# Опросы по тренировкам (создание/актуализация) — 09:05 МСК (06:05 UTC)
+5 6 * * * botuser cd $BOT_DIR && $VENV training_polls_enhanced.py >> $LOG/training_polls.log 2>&1
+
 # Мониторинг результатов игр — каждые 30 минут
 */30 * * * * botuser cd $BOT_DIR && $VENV run_game_results_monitor_final.py >> $LOG/game_results.log 2>&1
 
@@ -17,6 +20,9 @@ LOG=/var/log/basketball-bot
 
 # Очистка сервисного листа — 05:00 МСК (02:00 UTC)
 0 2 * * * botuser cd $BOT_DIR && $VENV cleanup_service_sheet.py >> $LOG/cleanup.log 2>&1
+
+# Fallback-мониторинг расписания игр — 11:00, 17:00, 23:00 МСК (08:00, 14:00, 20:00 UTC)
+0 8,14,20 * * * botuser cd $BOT_DIR && $VENV fallback_game_monitor.py >> $LOG/fallback_monitor.log 2>&1
 
 # ── Еженедельные задачи ──────────────────────────────────────────────────────
 

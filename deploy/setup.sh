@@ -55,6 +55,11 @@ sudo -u "$BOT_USER" "$BOT_DIR/venv/bin/pip" install --upgrade pip -q
 sudo -u "$BOT_USER" "$BOT_DIR/venv/bin/pip" install -r "$BOT_DIR/requirements-github.txt" -q
 info "Зависимости установлены"
 
+info "Установка Playwright (Chromium) для fallback-мониторинга..."
+sudo -u "$BOT_USER" "$BOT_DIR/venv/bin/python" -m playwright install chromium
+"$BOT_DIR/venv/bin/python" -m playwright install-deps chromium
+info "Playwright установлен"
+
 # ── 5. Папка логов ───────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
 chown "$BOT_USER:$BOT_USER" "$LOG_DIR"
