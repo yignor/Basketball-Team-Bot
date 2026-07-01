@@ -1,0 +1,24 @@
+[Unit]
+Description=Basketball Bot Daemon (long-polling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/basketball-bot
+ExecStart=/opt/basketball-bot/venv/bin/python bot_daemon.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Переменные окружения из файла
+EnvironmentFile=/opt/basketball-bot/.env
+
+# Лимиты
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
