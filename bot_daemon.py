@@ -15,13 +15,14 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, PollAnswerHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, PollAnswerHandler, ContextTypes
 
 load_dotenv()
 
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
+ADMIN_USER_ID     = os.getenv("ADMIN_USER_ID", "")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,7 @@ from collect_votes import (
     ATTEND_SHEET,
     ATTEND_HEADER,
 )
+import admin_panel
 
 # Кэш зарегистрированных опросов (обновляем раз в 5 минут)
 _poll_cache: dict = {}
@@ -134,6 +136,24 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         log.error(f"Ошибка при сохранении голоса: {e}")
 
 
+async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    # Только личка с админом. Если ADMIN_USER_ID не настроен — команда не работает нигде.
+    if not user or not chat or chat.type != "private":
+        return
+    if not ADMIN_USER_ID or str(user.id) != ADMIN_USER_ID:
+        return
+
+    try:
+        text = admin_panel.build_dashboard(_get_spreadsheet())
+    except Exception as e:
+        log.error(f"Ошибка при формировании админ-панели: {e}")
+        text = "⚠️ Не удалось получить статистику, подробности в логах демона."
+
+    await update.message.reply_text(text)
+
+
 async def on_startup(app: Application) -> None:
     log.info("=" * 50)
     log.info("Бот запущен (long-polling режим)")
@@ -160,10 +180,11 @@ def main() -> None:
     )
 
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_handler(CommandHandler("admin", handle_admin))
 
     log.info("Запуск polling...")
     app.run_polling(
-        allowed_updates=["poll_answer"],
+        allowed_updates=["poll_answer", "message"],
         drop_pending_updates=False,
     )
 
