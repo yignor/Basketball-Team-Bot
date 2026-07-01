@@ -13,8 +13,10 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Переменные окружения из файла
-EnvironmentFile=/opt/basketball-bot/.env
+# Переменные окружения читает сам bot_daemon.py через python-dotenv (load_dotenv()).
+# EnvironmentFile= здесь НЕ используется намеренно: systemd по-своему парсит кавычки
+# и \n внутри значений, что ломает JSON в GOOGLE_SHEETS_CREDENTIALS (PEM-ключ
+# получается повреждённым). python-dotenv парсит тот же файл корректно.
 
 # Лимиты
 TimeoutStopSec=30
