@@ -1074,7 +1074,58 @@ class EnhancedDuplicateProtection:
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
+
+    def delete_todays_records(self, data_type: str) -> Dict[str, Any]:
+        """Удаляет записи указанного типа с сегодняшней датой.
+
+        Используется только для ручного "запустить повторно" из админ-меню:
+        скрипт сам защищён от дублей через check_duplicate/add_record, и
+        простой повторный запуск ничего не сделает, пока сегодняшняя запись
+        не будет убрана из сервисного листа."""
+        worksheet = self._get_service_worksheet()
+        if not worksheet:
+            return {'success': False, 'error': 'Лист не найден'}
+
+        try:
+            all_data = worksheet.get_all_values()
+            today = get_moscow_time().date()
+            rows_to_delete: List[int] = []
+
+            for row_index, row in enumerate(all_data[1:], start=2):
+                if len(row) <= max(DATE_COL, TYPE_COL):
+                    continue
+
+                row_type = row[TYPE_COL].upper() if len(row) > TYPE_COL else ''
+                if row_type != data_type.upper():
+                    continue
+
+                date_value = row[DATE_COL]
+                if not date_value:
+                    continue
+
+                try:
+                    from datetime import datetime as dt
+                    record_date = dt.strptime(date_value, '%d.%m.%Y %H:%M').date()
+                except ValueError:
+                    continue
+
+                if record_date == today:
+                    rows_to_delete.append(row_index)
+
+            for row_index in reversed(rows_to_delete):
+                worksheet.delete_rows(row_index)
+
+            print(f"✅ Удалено {len(rows_to_delete)} сегодняшних записей типа {data_type} (повторный запуск)")
+
+            return {
+                'success': True,
+                'deleted_count': len(rows_to_delete),
+                'data_type': data_type,
+            }
+
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
     def get_statistics(self) -> Dict[str, Any]:
         """Получает статистику по всем типам записей"""
         worksheet = self._get_service_worksheet()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Админ-панель бота: статистика по игрокам/голосованиям и короткий лог
-последних автоматических действий (опросы, анонсы, результаты, дни рождения).
+Экраны админ-меню бота: рендеринг текста для отдельных разделов
+("Список пользователей" → "По таблице", "Лог действий" → "Лог бота").
 
 Данные читаются из локального SQLite-кэша (sheets_cache.py), который сам
 периодически синхронизируется с Google Sheets — см. bot_daemon.py. Здесь
@@ -21,7 +21,7 @@ PENDING_STATUSES = sheets_cache.PENDING_STATUSES
 STALE_THRESHOLD_SECONDS = 600
 
 
-def _staleness_banner() -> list:
+def staleness_banner() -> list:
     status = sheets_cache.get_sync_status()
     warnings = []
     for table in ("players", "attendance", "service_log"):
@@ -39,37 +39,37 @@ def _staleness_banner() -> list:
     return warnings
 
 
-def build_dashboard() -> str:
+def render_users_table() -> str:
+    """Список пользователей → По таблице (из кэша листов Игроки/Посещаемость)."""
     players = sheets_cache.get_players_stats()
     attendance = sheets_cache.get_attendance_stats()
-    automation = sheets_cache.get_service_activity_stats()
-    recent = sheets_cache.get_recent_service_events()
 
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    lines = [f"📊 Админ-панель — {now}", ""]
+    lines = [f"👥 Пользователи по таблице — {datetime.now().strftime('%d.%m.%Y %H:%M')}", ""]
+    lines.extend(staleness_banner())
 
-    lines.extend(_staleness_banner())
-
-    lines.append("👥 Игроки")
+    lines.append("Игроки")
     lines.append(f"• Всего в базе: {players['total']}")
     lines.append(f"• С привязанным Telegram ID: {players['linked']}")
     lines.append("")
 
-    lines.append("🗳 Голосования по тренировкам")
+    lines.append("Голосования по тренировкам")
     lines.append(f"• Уникальных пользователей: {attendance['unique_users']}")
     lines.append(f"• Активны за 30 дней: {attendance['unique_30d']}")
     lines.append(f"• Всего голосов: {attendance['total_votes']}")
-    lines.append("")
 
-    if automation:
-        lines.append("📋 Автоматизация (всего записей)")
-        for data_type, s in automation.items():
-            lines.append(f"• {data_type}: {s['total']} (активно {s['active']}, готово {s['done']})")
-        lines.append("")
+    return "\n".join(lines)
 
-    lines.append("🕐 Последние события:")
-    if recent:
-        for row in recent:
+
+def render_bot_log(since_days: int = 1) -> str:
+    """Лог действий → Лог бота: события за сегодня и since_days назад."""
+    events = sheets_cache.get_recent_service_events(since_days=since_days)
+
+    period = "сегодня" if since_days == 0 else f"последние {since_days + 1} дн."
+    lines = [f"📋 Лог бота ({period}) — {datetime.now().strftime('%d.%m.%Y %H:%M')}", ""]
+    lines.extend(staleness_banner())
+
+    if events:
+        for row in events:
             status = row["status"]
             emoji = "🟡" if status in PENDING_STATUSES else "✅"
             try:
@@ -79,6 +79,6 @@ def build_dashboard() -> str:
                 when = row["logged_at"] or "?"
             lines.append(f"{emoji} {row['data_type']} — {status or '?'} ({when})")
     else:
-        lines.append("нет данных")
+        lines.append("Событий за этот период нет")
 
     return "\n".join(lines)

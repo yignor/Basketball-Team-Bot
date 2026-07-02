@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Постоянно работающий демон бота.
-Обрабатывает голоса в опросах в реальном времени (вместо hourly GitHub Actions).
+Обрабатывает голоса в опросах в реальном времени (вместо hourly GitHub Actions)
+и интерактивное админ-меню (/admin) с inline-кнопками.
 Запускается как systemd-сервис и работает непрерывно.
 """
 
@@ -13,17 +14,25 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, PollAnswerHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    PollAnswerHandler,
+)
 
 load_dotenv()
 
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
-ADMIN_USER_ID     = os.getenv("ADMIN_USER_ID", "")
+ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +64,9 @@ from collect_votes import (
 )
 import admin_panel
 import sheets_cache
+from enhanced_duplicate_protection import duplicate_protection
+
+REPO_DIR = Path(__file__).parent
 
 # Кэш зарегистрированных опросов (обновляем раз в 5 минут)
 _poll_cache: dict = {}
@@ -153,31 +165,264 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         log.error(f"Ошибка при сохранении голоса: {e}")
 
 
+# ─────────────────────────── Админ-меню ───────────────────────────────────
+
+def _is_admin(user) -> bool:
+    return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
+
+
+# Конфигурация кнопок "Запуск оповещений". "daily" (Оповещения на сегодня)
+# обрабатывается отдельно ниже — это последовательный запуск первых трёх.
+LAUNCH_ACTIONS = {
+    "birthday": {
+        "label": "🎂 ДР",
+        "script": "run_birthday_notifications.py",
+        "args": [],
+        "data_types": ["ДЕНЬ_РОЖДЕНИЯ"],
+    },
+    "training_polls": {
+        "label": "📋 Опросы тренировок",
+        "script": "training_polls_enhanced.py",
+        "args": [],
+        "data_types": ["ОПРОС_ГОЛОСОВАНИЕ"],
+    },
+    "game_polls": {
+        "label": "🏀 Опросы игры",
+        "script": "run_game_system.py",
+        "args": ["--only", "polls"],
+        "data_types": ["ОПРОС_ИГРА"],
+    },
+    "game_announce": {
+        "label": "📢 Анонс игры",
+        "script": "run_game_system.py",
+        "args": ["--only", "announcements"],
+        "data_types": ["АНОНС_ИГРА"],
+    },
+}
+DAILY_DATA_TYPES = ["ДЕНЬ_РОЖДЕНИЯ", "ОПРОС_ГОЛОСОВАНИЕ", "ОПРОС_ИГРА", "АНОНС_ИГРА"]
+DAILY_SCRIPTS = [
+    ("run_birthday_notifications.py", []),
+    ("training_polls_enhanced.py", []),
+    ("run_game_system.py", []),
+]
+
+
+def _main_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
+        [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
+        [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
+        [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
+    ])
+
+
+def _back_button(target: str = "admin:menu:main") -> List[InlineKeyboardButton]:
+    return [InlineKeyboardButton("⬅️ Назад", callback_data=target)]
+
+
+def _launch_menu_markup() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📅 Оповещения на сегодня", callback_data="admin:run:daily")]]
+    for key, cfg in LAUNCH_ACTIONS.items():
+        rows.append([InlineKeyboardButton(cfg["label"], callback_data=f"admin:run:{key}")])
+    rows.append(_back_button())
+    return InlineKeyboardMarkup(rows)
+
+
+def _log_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Лог бота", callback_data="admin:log:bot")],
+        _back_button(),
+    ])
+
+
+def _users_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 По таблице", callback_data="admin:users:table")],
+        _back_button(),
+    ])
+
+
+def _reports_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏋️ Тренировки", callback_data="admin:menu:reports:training")],
+        _back_button(),
+    ])
+
+
+def _reports_training_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("За неделю", callback_data="admin:report:training:week")],
+        [InlineKeyboardButton("За месяц", callback_data="admin:report:training:month")],
+        _back_button("admin:menu:reports"),
+    ])
+
+
+async def _run_script(script_name: str, args: List[str]) -> Tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(REPO_DIR / script_name), *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=str(REPO_DIR),
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+
+def _check_already_run_today(data_types: List[str]) -> Optional[str]:
+    """Прямая проверка по Сервисному листу (не через 5-минутный кэш —
+    сразу после реального запуска кэш ещё не мог обновиться)."""
+    today_str = datetime.now().strftime("%d.%m.%Y")
+    for dt_ in data_types:
+        for record in duplicate_protection.get_records_by_type(dt_):
+            if record.get("date", "").startswith(today_str):
+                return record["date"]
+    return None
+
+
+async def _handle_launch_action(query, action: str, force: bool) -> None:
+    if action == "daily":
+        data_types = DAILY_DATA_TYPES
+        scripts = DAILY_SCRIPTS
+        label = "Оповещения на сегодня"
+    else:
+        cfg = LAUNCH_ACTIONS.get(action)
+        if not cfg:
+            return
+        data_types = cfg["data_types"]
+        scripts = [(cfg["script"], cfg["args"])]
+        label = cfg["label"]
+
+    if not force:
+        already_at = _check_already_run_today(data_types)
+        if already_at:
+            await query.edit_message_text(
+                f"⚠️ {label}: уже запускалось сегодня ({already_at})\n\nЗапустить повторно?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Всё равно запустить", callback_data=f"admin:run:{action}:force")],
+                    [InlineKeyboardButton("Отмена", callback_data="admin:menu:launch")],
+                ]),
+            )
+            return
+    else:
+        for dt_ in data_types:
+            duplicate_protection.delete_todays_records(dt_)
+
+    await query.edit_message_text(f"⏳ Запускаю: {label}...")
+
+    ok = True
+    result_lines = []
+    for script, args in scripts:
+        try:
+            code, _stdout, stderr = await _run_script(script, args)
+        except Exception as e:
+            code, stderr = 1, str(e)
+        if code == 0:
+            result_lines.append(f"✅ {script}")
+        else:
+            ok = False
+            result_lines.append(f"❌ {script}: {stderr.strip().splitlines()[-1] if stderr.strip() else 'ошибка, см. логи демона'}")
+            log.error(f"Скрипт {script} завершился с ошибкой (код {code}): {stderr[-2000:]}")
+
+    header = "✅" if ok else "⚠️"
+    text = f"{header} {label} — готово\n\n" + "\n".join(result_lines)
+    await query.edit_message_text(text, reply_markup=_launch_menu_markup())
+
+
+async def _handle_report_action(query, kind: str, period: str) -> None:
+    if kind != "training":
+        return
+    await query.edit_message_text(f"⏳ Формирую отчёт (тренировки, {period})...")
+    args = ["--week"] if period == "week" else ["--month", datetime.now().strftime("%Y-%m")]
+    try:
+        code, _stdout, stderr = await _run_script("training_report.py", args)
+    except Exception as e:
+        code, stderr = 1, str(e)
+    if code == 0:
+        text = "✅ Отчёт обновлён в таблице (лист «Тренировки»)."
+    else:
+        text = f"❌ Не удалось сформировать отчёт: {stderr.strip().splitlines()[-1] if stderr.strip() else 'см. логи демона'}"
+        log.error(f"training_report.py завершился с ошибкой (код {code}): {stderr[-2000:]}")
+    await query.edit_message_text(text, reply_markup=_reports_training_menu_markup())
+
+
+async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not _is_admin(user):
+        if query:
+            await query.answer()
+        return
+
+    await query.answer()
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != "admin":
+        return
+
+    try:
+        if parts[1] == "menu":
+            screen = parts[2] if len(parts) > 2 else "main"
+            if screen == "main":
+                await query.edit_message_text("📊 Админ-панель", reply_markup=_main_menu_markup())
+            elif screen == "launch":
+                await query.edit_message_text("🚀 Запуск оповещений\nВыберите действие:", reply_markup=_launch_menu_markup())
+            elif screen == "users":
+                await query.edit_message_text("👥 Список пользователей", reply_markup=_users_menu_markup())
+            elif screen == "log":
+                await query.edit_message_text("📋 Лог действий", reply_markup=_log_menu_markup())
+            elif screen == "reports":
+                if len(parts) > 3 and parts[3] == "training":
+                    await query.edit_message_text("📊 Отчёты → Тренировки", reply_markup=_reports_training_menu_markup())
+                else:
+                    await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
+
+        elif parts[1] == "run":
+            action = parts[2]
+            force = len(parts) > 3 and parts[3] == "force"
+            await _handle_launch_action(query, action, force)
+
+        elif parts[1] == "users":
+            mode = parts[2]
+            if mode == "table":
+                _refresh_db_cache()
+                await query.edit_message_text(admin_panel.render_users_table(), reply_markup=_users_menu_markup())
+
+        elif parts[1] == "log":
+            mode = parts[2]
+            if mode == "bot":
+                _refresh_db_cache()
+                await query.edit_message_text(admin_panel.render_bot_log(since_days=1), reply_markup=_log_menu_markup())
+
+        elif parts[1] == "report":
+            kind, period = parts[2], parts[3]
+            await _handle_report_action(query, kind, period)
+
+    except Exception as e:
+        log.error(f"Ошибка в админ-меню (callback_data={data!r}): {e}")
+        try:
+            await query.edit_message_text("⚠️ Произошла ошибка, подробности в логах демона.", reply_markup=_main_menu_markup())
+        except Exception:
+            pass
+
+
 async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
-    # Только личка с админом. Если ADMIN_USER_ID не настроен — команда не работает нигде.
+    # Только личка с админом. Если ADMIN_USER_IDS не настроен — команда не работает нигде.
     if not user or not chat or chat.type != "private":
         return
-    if not ADMIN_USER_ID or str(user.id) != ADMIN_USER_ID:
+    if not _is_admin(user):
         return
 
     _refresh_db_cache()
 
-    try:
-        text = admin_panel.build_dashboard()
-    except Exception as e:
-        log.error(f"Ошибка при формировании админ-панели: {e}")
-        text = "⚠️ Не удалось получить статистику, подробности в логах демона."
-
     for attempt in range(3):
         try:
-            await update.message.reply_text(text)
+            await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
             return
         except Exception as e:
-            log.warning(f"Не удалось отправить ответ /admin (попытка {attempt + 1}/3): {e}")
+            log.warning(f"Не удалось отправить главное меню /admin (попытка {attempt + 1}/3): {e}")
             await asyncio.sleep(2)
-    log.error("Не удалось отправить ответ /admin после 3 попыток")
+    log.error("Не удалось отправить главное меню /admin после 3 попыток")
 
 
 async def on_startup(app: Application) -> None:
@@ -198,6 +443,8 @@ def main() -> None:
     if not BOT_TOKEN:
         log.error("BOT_TOKEN не задан в .env")
         sys.exit(1)
+    if not ADMIN_USER_IDS:
+        log.warning("ADMIN_USER_IDS не задан — команда /admin будет недоступна никому")
 
     # Трафик бота идёт через VPN-туннель с обфускацией (обход блокировки Telegram
     # провайдером), что добавляет джиттер задержки — дефолтные таймауты httpx
@@ -216,10 +463,11 @@ def main() -> None:
 
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_handler(CommandHandler("admin", handle_admin))
+    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     log.info("Запуск polling...")
     app.run_polling(
-        allowed_updates=["poll_answer", "message"],
+        allowed_updates=["poll_answer", "message", "callback_query"],
         drop_pending_updates=False,
     )
 

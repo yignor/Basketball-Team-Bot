@@ -344,18 +344,30 @@ def get_service_activity_stats() -> Dict[str, Dict[str, int]]:
     return stats
 
 
-def get_recent_service_events(limit: int = 8) -> List[sqlite3.Row]:
+def get_recent_service_events(limit: int = 8, since_days: Optional[int] = None) -> List[sqlite3.Row]:
+    """limit — обычный лимит по количеству; since_days — вместо/вместе с
+    limit можно попросить все события за последние N дней (для "Лог бота",
+    например since_days=1 — сегодня и вчера)."""
     init_db()
+    where = ""
+    params: tuple = ()
+    if since_days is not None:
+        where = """
+            WHERE substr(logged_at, 7, 4) || '-' || substr(logged_at, 4, 2) || '-' || substr(logged_at, 1, 2)
+                  >= date('now', ?)
+        """
+        params = (f"-{since_days} days",)
     with _connection() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT data_type, status, logged_at FROM service_log
+            {where}
             ORDER BY
                 substr(logged_at, 7, 4) || substr(logged_at, 4, 2) || substr(logged_at, 1, 2) ||
                 substr(logged_at, 12, 2) || substr(logged_at, 15, 2) DESC
             LIMIT ?
             """,
-            (limit,),
+            (*params, limit if since_days is None else 200),
         ).fetchall()
     return rows
 

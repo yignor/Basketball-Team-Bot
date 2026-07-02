@@ -2249,8 +2249,14 @@ class GameSystemManager:
     
 
     
-    async def run_full_system(self):
-        """Запускает полную систему: парсинг → опросы → анонсы"""
+    async def run_full_system(self, only: Optional[str] = None):
+        """Запускает полную систему: парсинг → опросы → анонсы.
+
+        only: None — как раньше (всё по порядку); 'polls' — только шаг
+        создания опросов; 'announcements' — только шаг создания анонсов.
+        Используется админ-меню для точечного запуска одного действия,
+        не трогая остальные (cron продолжает вызывать без only).
+        """
         try:
             print("🚀 ЗАПУСК ПОЛНОЙ СИСТЕМЫ УПРАВЛЕНИЯ ИГРАМИ")
             print("=" * 60)
@@ -2312,60 +2318,68 @@ class GameSystemManager:
             print(f"✅ Найдено {total_games} игр (будущие: {len(future_games)}, сегодня: {len(today_games)})")
             
             # ШАГ 2: Создание опросов
-            print(f"\n📊 ШАГ 2: СОЗДАНИЕ ОПРОСОВ")
-            print("-" * 40)
-            
-            # Очищаем кэш перед обработкой новых игр
-            self._duplicate_check_cache.clear()
-            
-            # Удаляем дубликаты из списка игр (по game_id)
-            seen_game_ids = set()
-            unique_future_games = []
-            for game in future_games:
-                game_id = game.get('game_id')
-                if game_id and game_id not in seen_game_ids:
-                    seen_game_ids.add(game_id)
-                    unique_future_games.append(game)
-                elif not game_id:
-                    # Игры без game_id тоже добавляем (на случай fallback)
-                    unique_future_games.append(game)
-            
-            if len(future_games) != len(unique_future_games):
-                print(f"⚠️ Найдено {len(future_games) - len(unique_future_games)} дубликатов в списке игр, удалены")
-            
             created_polls = 0
-            for game in unique_future_games:
-                print(f"\n🏀 Проверка игры (будущая): {game.get('team1', '')} vs {game.get('team2', '')}")
-                if await self._process_future_game(game):
-                    created_polls += 1
-            print(f"✅ Создано {created_polls} опросов")
-            
-            # ШАГ 3: Создание анонсов
-            print(f"\n📢 ШАГ 3: СОЗДАНИЕ АНОНСОВ")
-            print("-" * 40)
-            sent_announcements = 0
-            for game in today_games:
-                print(f"\n🏀 Проверка игры (сегодня): {game.get('team1', '')} vs {game.get('team2', '')}")
-                if await self._process_today_game(game):
-                    sent_announcements += 1
-            print(f"✅ Отправлено {sent_announcements} анонсов")
-            
-            # ШАГ 4: Fallback мониторинг (если есть конфигурации)
-            if self.fallback_sources:
-                print(f"\n🔍 ШАГ 4: FALLBACK МОНИТОРИНГ")
+            if only in (None, "polls"):
+                print(f"\n📊 ШАГ 2: СОЗДАНИЕ ОПРОСОВ")
                 print("-" * 40)
-                try:
-                    from fallback_game_monitor import FallbackGameMonitor
-                    fallback_monitor = FallbackGameMonitor()
-                    await fallback_monitor.run_monitoring()
-                except Exception as e:
-                    print(f"⚠️ Ошибка fallback мониторинга: {e}")
-                    import traceback
-                    traceback.print_exc()
+
+                # Очищаем кэш перед обработкой новых игр
+                self._duplicate_check_cache.clear()
+
+                # Удаляем дубликаты из списка игр (по game_id)
+                seen_game_ids = set()
+                unique_future_games = []
+                for game in future_games:
+                    game_id = game.get('game_id')
+                    if game_id and game_id not in seen_game_ids:
+                        seen_game_ids.add(game_id)
+                        unique_future_games.append(game)
+                    elif not game_id:
+                        # Игры без game_id тоже добавляем (на случай fallback)
+                        unique_future_games.append(game)
+
+                if len(future_games) != len(unique_future_games):
+                    print(f"⚠️ Найдено {len(future_games) - len(unique_future_games)} дубликатов в списке игр, удалены")
+
+                for game in unique_future_games:
+                    print(f"\n🏀 Проверка игры (будущая): {game.get('team1', '')} vs {game.get('team2', '')}")
+                    if await self._process_future_game(game):
+                        created_polls += 1
+                print(f"✅ Создано {created_polls} опросов")
             else:
-                print(f"\n🔍 ШАГ 4: FALLBACK МОНИТОРИНГ")
+                print(f"\n📊 ШАГ 2: СОЗДАНИЕ ОПРОСОВ — пропущено (only={only})")
+
+            # ШАГ 3: Создание анонсов
+            sent_announcements = 0
+            if only in (None, "announcements"):
+                print(f"\n📢 ШАГ 3: СОЗДАНИЕ АНОНСОВ")
                 print("-" * 40)
-                print("ℹ️ Fallback конфигурации не найдены, пропускаем")
+                for game in today_games:
+                    print(f"\n🏀 Проверка игры (сегодня): {game.get('team1', '')} vs {game.get('team2', '')}")
+                    if await self._process_today_game(game):
+                        sent_announcements += 1
+                print(f"✅ Отправлено {sent_announcements} анонсов")
+            else:
+                print(f"\n📢 ШАГ 3: СОЗДАНИЕ АНОНСОВ — пропущено (only={only})")
+
+            # ШАГ 4: Fallback мониторинг — только при полном прогоне (cron),
+            # т.к. это поиск игр из резервных источников, а не опросы/анонсы
+            if only is None:
+                if self.fallback_sources:
+                    print(f"\n🔍 ШАГ 4: FALLBACK МОНИТОРИНГ")
+                    print("-" * 40)
+                    try:
+                        from fallback_game_monitor import FallbackGameMonitor
+                        fallback_monitor = FallbackGameMonitor()
+                        await fallback_monitor.run_monitoring()
+                    except Exception as e:
+                        print(f"⚠️ Ошибка fallback мониторинга: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"\n🔍 ШАГ 4: FALLBACK МОНИТОРИНГ")
+                    print("-" * 40)
+                    print("ℹ️ Fallback конфигурации не найдены, пропускаем")
             
             # Итоги
             print(f"\n📊 ИТОГИ РАБОТЫ:")

@@ -290,6 +290,7 @@ def build_report(
     votes: List[Dict],
     players: Dict[str, Dict],
     filter_months: Optional[List[Tuple[int, int]]] = None,
+    filter_week: Optional[Tuple[date, date]] = None,
 ) -> List[List[str]]:
     """
     Строит список строк для листа Тренировки.
@@ -309,6 +310,14 @@ def build_report(
         training_dates_all = [
             (s, d) for s, d in training_dates_all
             if (d.year, d.month) in {(y, m) for y, m in filter_months}
+        ]
+
+    # Filter by a single week (Monday..Sunday inclusive) if requested
+    if filter_week:
+        week_start, week_end = filter_week
+        training_dates_all = [
+            (s, d) for s, d in training_dates_all
+            if week_start <= d <= week_end
         ]
 
     if not training_dates_all:
@@ -483,7 +492,10 @@ def apply_formatting(ws, all_rows: List[List[str]]) -> None:
 
 # ─────────────────────────── Entry point ─────────────────────────────────────
 
-def main(target_months: Optional[List[Tuple[int, int]]] = None) -> None:
+def main(
+    target_months: Optional[List[Tuple[int, int]]] = None,
+    target_week: Optional[Tuple[date, date]] = None,
+) -> None:
     print(f"\n📋  Генерация отчёта посещаемости")
     print("=" * 50)
 
@@ -498,7 +510,7 @@ def main(target_months: Optional[List[Tuple[int, int]]] = None) -> None:
         print("ℹ️  Нет данных для отчёта.")
         return
 
-    all_rows = build_report(votes, players, filter_months=target_months)
+    all_rows = build_report(votes, players, filter_months=target_months, filter_week=target_week)
 
     report_ws = _get_or_create(spreadsheet, REPORT_SHEET)
 
@@ -552,10 +564,24 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Отчёт посещаемости тренировок")
     ap.add_argument("--all",   action="store_true", help="Все доступные данные")
     ap.add_argument("--month", type=str,            help="Конкретный месяц: YYYY-MM")
+    ap.add_argument("--week",  type=str, nargs="?", const="current", default=None,
+                     help="Текущая неделя (без значения) или конкретная: YYYY-WW")
     args = ap.parse_args()
 
     months: Optional[List[Tuple[int, int]]] = None
-    if args.month:
+    week: Optional[Tuple[date, date]] = None
+
+    if args.week:
+        if args.week == "current":
+            week = week_range(date.today())
+        else:
+            try:
+                y, w = map(int, args.week.split("-"))
+                week = week_range(date.fromisocalendar(y, w, 1))
+            except ValueError:
+                print("❌ Формат --week: YYYY-WW (например 2026-27)")
+                exit(1)
+    elif args.month:
         try:
             y, m = map(int, args.month.split("-"))
             months = [(y, m)]
@@ -566,4 +592,4 @@ if __name__ == "__main__":
         today = date.today()
         months = [(today.year, today.month)]
 
-    main(target_months=months)
+    main(target_months=months, target_week=week)
