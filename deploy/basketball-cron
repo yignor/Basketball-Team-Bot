@@ -29,6 +29,9 @@ LOG=/var/log/basketball-bot
 # Статистика игрока (Шараев, ID 400566) — воскресенье 10:00 МСК (07:00 UTC)
 0 7 * * 0 botuser cd $BOT_DIR && $VENV player_stats.py --person-id 400566 >> $LOG/player_stats.log 2>&1
 
+# Отчёт посещаемости тренировок за неделю — воскресенье 09:00 МСК (06:00 UTC)
+0 6 * * 0 botuser cd $BOT_DIR && $VENV training_report.py --week >> $LOG/training_report.log 2>&1
+
 # ── Ежемесячные задачи ───────────────────────────────────────────────────────
 
 # Отчёт посещаемости тренировок — 1-е число месяца 09:00 МСК (06:00 UTC)
