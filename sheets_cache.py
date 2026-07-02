@@ -18,7 +18,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 DB_PATH = Path(__file__).parent / "data" / "bot.db"
 
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS attendance (
     revote_count     INTEGER NOT NULL DEFAULT 0,
     row_index        INTEGER NOT NULL,
     synced_at        TEXT NOT NULL,
+    dirty            INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tg_poll_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_attendance_training_date ON attendance(training_date);
@@ -120,18 +121,93 @@ CREATE TABLE IF NOT EXISTS errors (
     message       TEXT NOT NULL,
     logged_at     TEXT NOT NULL
 );
+
+-- ── Локально-первичные данные (SERVICE_RECORDS_LOCAL_PRIMARY) ──────────────
+-- В отличие от players/attendance/service_log (чистые зеркала для чтения),
+-- эта таблица — основной рабочий слой для EnhancedDuplicateProtection,
+-- когда флаг включён: пишут ~10 cron-скриптов и демон, читают тоже они.
+-- Google Sheets становится периодическим экспортом (push_service_records),
+-- не источником истины на каждый вызов. См. дизайн в плане:
+-- уникальные индексы + INSERT ... ON CONFLICT DO NOTHING/DO UPDATE делают
+-- проверку-и-запись одной атомарной операцией — гонка между процессами
+-- невозможна структурно, а не "потому что мы аккуратно написали код".
+
+CREATE TABLE IF NOT EXISTS service_records (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    data_type         TEXT NOT NULL,
+    unique_key        TEXT NOT NULL,
+    logged_at         TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'АКТИВЕН',
+    additional_data   TEXT NOT NULL DEFAULT '',
+    link              TEXT NOT NULL DEFAULT '',
+    comp_id           TEXT NOT NULL DEFAULT '',
+    team_id           TEXT NOT NULL DEFAULT '',
+    alt_name          TEXT NOT NULL DEFAULT '',
+    settings          TEXT NOT NULL DEFAULT '',
+    game_id           TEXT NOT NULL DEFAULT '',
+    game_date         TEXT NOT NULL DEFAULT '',
+    game_time         TEXT NOT NULL DEFAULT '',
+    arena             TEXT NOT NULL DEFAULT '',
+    team_a_id         TEXT NOT NULL DEFAULT '',
+    team_b_id         TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    sheet_row_hint    INTEGER,
+    dirty             INTEGER NOT NULL DEFAULT 1,
+    deleted           INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_records_type_key
+    ON service_records(data_type, unique_key) WHERE deleted = 0;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_records_type_gameid
+    ON service_records(data_type, game_id) WHERE deleted = 0 AND game_id != '';
+CREATE INDEX IF NOT EXISTS idx_service_records_dirty ON service_records(dirty) WHERE dirty = 1;
+CREATE INDEX IF NOT EXISTS idx_service_records_type ON service_records(data_type) WHERE deleted = 0;
+
+-- "Конфиг" — люди правят руками, поэтому только pull (та же схема, что
+-- players/attendance): сырые колонки, парсинг остаётся в
+-- enhanced_duplicate_protection.py как есть.
+CREATE TABLE IF NOT EXISTS config_rows (
+    row_index   INTEGER PRIMARY KEY,
+    col_a       TEXT NOT NULL DEFAULT '',
+    col_b       TEXT NOT NULL DEFAULT '',
+    col_c       TEXT NOT NULL DEFAULT '',
+    col_d       TEXT NOT NULL DEFAULT '',
+    col_e       TEXT NOT NULL DEFAULT '',
+    col_f       TEXT NOT NULL DEFAULT '',
+    col_g       TEXT NOT NULL DEFAULT '',
+    col_h       TEXT NOT NULL DEFAULT '',
+    synced_at   TEXT NOT NULL
+);
 """
+
+# Порядок колонок в листе "Сервисный" — должен совпадать с SERVICE_HEADER
+# в enhanced_duplicate_protection.py (индексы TYPE_COL..TEAM_B_ID_COL).
+SERVICE_SHEET_COLUMNS = [
+    "data_type", "logged_at", "unique_key", "status", "additional_data", "link",
+    "comp_id", "team_id", "alt_name", "settings", "game_id", "game_date",
+    "game_time", "arena", "team_a_id", "team_b_id",
+]
+CONFIG_SHEET_NAME = "Конфиг"
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+now_iso = _now_iso  # публичный алиас для enhanced_duplicate_protection.py
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = sqlite3.connect(DB_PATH, timeout=8.0)
     conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    # 8с (было 5с) — теперь пишут не только периодический sync демона, но и
+    # ~10 cron-скриптов при включённом SERVICE_RECORDS_LOCAL_PRIMARY.
+    conn.execute("PRAGMA busy_timeout = 8000")
+    # NORMAL безопасен в WAL-режиме (не теряет закоммиченные транзакции при
+    # обычном падении процесса, только при потере питания) и не платит за
+    # fsync на каждый commit — сервер не эфемерный контейнер.
+    conn.execute("PRAGMA synchronous = NORMAL")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -145,11 +221,27 @@ def _connection() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# Публичный алиас — используется enhanced_duplicate_protection.py для
+# атомарных операций над service_records (ON CONFLICT ...), которым нужен
+# прямой доступ к соединению, а не готовая обёртка-функция.
+get_connection = _connection
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str, default: str) -> None:
+    """CREATE TABLE IF NOT EXISTS не добавляет колонки в уже существующую
+    таблицу — нужна ручная миграция для баз, созданных до появления
+    колонки (например data/bot.db на сервере с Phase 1)."""
+    cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype} DEFAULT {default}")
+
+
 def init_db() -> None:
     """Идемпотентно создаёт схему. Безопасно вызывать при каждом старте
     демона и в любом месте, откуда читают кэш."""
     with _connection() as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "attendance", "dirty", "INTEGER NOT NULL", "0")
         conn.commit()
 
 
@@ -296,14 +388,103 @@ def sync_service_log(spreadsheet) -> None:
             raise
 
 
+def sync_config(spreadsheet) -> None:
+    """Зеркалит лист 'Конфиг' целиком, сырыми колонками — сама разбор
+    логика (несколько секций с маркерами) остаётся в
+    enhanced_duplicate_protection.py и не меняется."""
+    init_db()
+    with _connection() as conn:
+        try:
+            ws = spreadsheet.worksheet(CONFIG_SHEET_NAME)
+            all_rows = ws.get_all_values()[1:]  # skip header
+            now = _now_iso()
+            rows = []
+            for idx, row in enumerate(all_rows, start=2):
+                row = row + [""] * (8 - len(row))
+                rows.append((idx, *row[:8], now))
+            conn.execute("BEGIN")
+            conn.execute("DELETE FROM config_rows")
+            conn.executemany(
+                """
+                INSERT INTO config_rows
+                (row_index, col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+            _mark_sync_result(conn, "config_rows", len(rows), None)
+        except Exception as e:
+            conn.rollback()
+            _mark_sync_result(conn, "config_rows", 0, str(e))
+            raise
+
+
+def get_config_rows() -> List[List[str]]:
+    """Возвращает сырые строки листа 'Конфиг' из локального зеркала —
+    пустой список, если синхронизация ещё ни разу не проходила (вызывающий
+    код должен в этом случае сам сделать fallback на живой Sheets-запрос)."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h FROM config_rows ORDER BY row_index"
+        ).fetchall()
+    return [list(r) for r in rows]
+
+
+def bootstrap_service_records(spreadsheet) -> Dict[str, Any]:
+    """Разовая (но идемпотентная — безопасно перезапускать) заливка ВСЕХ
+    строк/колонок листа 'Сервисный' (не только ACTIVITY_TYPES, в отличие
+    от sync_service_log) в service_records, перед включением
+    SERVICE_RECORDS_LOCAL_PRIMARY. INSERT ... ON CONFLICT DO NOTHING —
+    повторный запуск не затирает то, что уже успело появиться локально."""
+    init_db()
+    ws = spreadsheet.worksheet(SERVICE_SHEET_NAME)
+    all_rows = ws.get_all_values()[1:]  # skip header
+    now = _now_iso()
+    inserted = 0
+    with _connection() as conn:
+        conn.execute("BEGIN")
+        for idx, row in enumerate(all_rows, start=2):
+            if not row or not row[0]:
+                continue
+            data_type = row[0].strip()
+            row = row + [""] * (16 - len(row))
+            unique_key = row[2].strip()
+            if not unique_key:
+                continue
+            cur = conn.execute(
+                """
+                INSERT INTO service_records
+                (data_type, unique_key, logged_at, status, additional_data, link,
+                 comp_id, team_id, alt_name, settings, game_id, game_date, game_time, arena,
+                 team_a_id, team_b_id, created_at, updated_at, sheet_row_hint, dirty)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(data_type, unique_key) WHERE deleted = 0 DO NOTHING
+                """,
+                (data_type, unique_key, row[1], row[3], row[4], row[5], row[6], row[7],
+                 row[8], row[9], row[10], row[11], row[12], row[13], row[14], row[15],
+                 now, now, idx),
+            )
+            inserted += cur.rowcount
+        conn.commit()
+    return {"sheet_rows": len(all_rows), "inserted": inserted}
+
+
 def sync_all(spreadsheet) -> Dict[str, Any]:
-    """Синхронизирует все три таблицы независимо — ошибка в одной не
-    должна мешать остальным."""
+    """Синхронизирует таблицы независимо — ошибка в одной не должна мешать
+    остальным.
+
+    "attendance" сюда намеренно не входит: голоса теперь локально-первичные
+    (пишет upsert_vote_local в реальном времени), периодический pull из
+    Sheets затирал бы ещё не выгруженные (dirty=1) локальные изменения.
+    sync_attendance() остаётся доступной отдельно — для разового
+    bootstrap существующих голосов при первом включении."""
     summary: Dict[str, Any] = {}
     for name, fn in (
         ("players", sync_players),
-        ("attendance", sync_attendance),
         ("service_log", sync_service_log),
+        ("config_rows", sync_config),
     ):
         try:
             fn(spreadsheet)
@@ -530,3 +711,182 @@ def get_user_action_log(offset: int = 0, limit: int = 10) -> Dict[str, Any]:
     combined.sort(key=lambda item: _parse_ts(item["ts"]), reverse=True)
     total = len(combined)
     return {"rows": combined[offset:offset + limit], "total": total, "offset": offset, "limit": limit}
+
+
+# ── Push: локальные изменения → Google Sheets ───────────────────────────────
+# Обратное направление относительно всего остального модуля. Политика при
+# конфликте: локальные данные всегда побеждают — это бот-генерируемые
+# записи (не редактируются людьми), в отличие от players/config_rows,
+# которые остаются pull-only в обратную сторону.
+
+_SERVICE_END_COL = chr(ord('A') + len(SERVICE_SHEET_COLUMNS) - 1)
+
+
+def push_service_records(spreadsheet, batch_size: int = 200) -> Dict[str, Any]:
+    """Выгружает накопленные dirty=1 записи в лист 'Сервисный'.
+
+    Ищет существующую строку по unique_key через ws.find() (а не по
+    запомненному номеру строки) — надёжнее при параллельных
+    удалениях/сдвигах строк, ценой одного API-вызова на запись. Push не на
+    горячем пути (раз в 6 часов или по кнопке), так что это приемлемо."""
+    init_db()
+    ws = spreadsheet.worksheet(SERVICE_SHEET_NAME)
+
+    with _connection() as conn:
+        dirty_rows = conn.execute(
+            "SELECT * FROM service_records WHERE dirty = 1 ORDER BY id LIMIT ?",
+            (batch_size,),
+        ).fetchall()
+
+    if not dirty_rows:
+        return {"pushed": 0, "inserted": 0, "updated": 0, "deleted": 0}
+
+    inserted = updated = deleted = 0
+    to_append: List[List[str]] = []
+    to_append_ids: List[int] = []
+    pushed_ids: List[int] = []
+
+    for r in dirty_rows:
+        try:
+            cell = ws.find(r["unique_key"], in_column=3)
+        except Exception:
+            cell = None
+
+        if r["deleted"]:
+            if cell:
+                try:
+                    ws.delete_rows(cell.row)
+                    deleted += 1
+                except Exception:
+                    continue  # не помечаем dirty=0 — попробуем в следующий push
+            pushed_ids.append(r["id"])
+            continue
+
+        values = [str(r[col]) for col in SERVICE_SHEET_COLUMNS]
+        if cell:
+            try:
+                ws.update(f"A{cell.row}:{_SERVICE_END_COL}{cell.row}", [values])
+                updated += 1
+                pushed_ids.append(r["id"])
+            except Exception:
+                continue
+        else:
+            to_append.append(values)
+            to_append_ids.append(r["id"])
+
+    if to_append:
+        try:
+            ws.append_rows(to_append, value_input_option="USER_ENTERED")
+            inserted += len(to_append)
+            pushed_ids.extend(to_append_ids)
+        except Exception:
+            pass  # не помечаем dirty=0 — попробуем весь append в следующий push
+
+    if pushed_ids:
+        with _connection() as conn:
+            conn.executemany("UPDATE service_records SET dirty = 0 WHERE id = ?", [(i,) for i in pushed_ids])
+            conn.commit()
+
+    return {"pushed": len(pushed_ids), "inserted": inserted, "updated": updated, "deleted": deleted}
+
+
+# ── Голоса за тренировки — локально-первичные (пишет только демон) ─────────
+
+def upsert_vote_local(
+    tg_poll_id: str, user_id: str, username: str, first_name: str, last_name: str,
+    vote_text: str, vote_type: str, training_date: str, config_poll_id: str,
+) -> str:
+    """Атомарный upsert по (tg_poll_id, user_id) — заменяет прямую запись в
+    Sheets на горячем пути bot_daemon.py:handle_poll_answer. Возвращает
+    'new'/'updated'/'skipped' (тот же контракт, что и старый upsert_vote в
+    collect_votes.py, для единообразия логов)."""
+    init_db()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with _connection() as conn:
+        existing = conn.execute(
+            "SELECT revote_count FROM attendance WHERE tg_poll_id = ? AND user_id = ?",
+            (tg_poll_id, user_id),
+        ).fetchone()
+
+        if vote_type == "REMOVED" and not existing:
+            return "skipped"  # ретракт голоса, которого мы ещё не видели
+
+        revotes = (existing["revote_count"] + 1) if existing else 0
+        conn.execute(
+            """
+            INSERT INTO attendance
+            (tg_poll_id, user_id, username, first_name, last_name, vote_text, vote_type,
+             training_date, config_poll_id, updated_at, revote_count, row_index, synced_at, dirty)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1)
+            ON CONFLICT(tg_poll_id, user_id) DO UPDATE SET
+                username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name,
+                vote_text=excluded.vote_text, vote_type=excluded.vote_type,
+                training_date=excluded.training_date, config_poll_id=excluded.config_poll_id,
+                updated_at=excluded.updated_at, revote_count=excluded.revote_count, dirty=1
+            """,
+            (tg_poll_id, user_id, username, first_name, last_name, vote_text, vote_type,
+             training_date, config_poll_id, now, revotes, _now_iso()),
+        )
+        conn.commit()
+    return "updated" if existing else "new"
+
+
+def push_attendance(spreadsheet, batch_size: int = 500) -> Dict[str, Any]:
+    """Выгружает накопленные dirty=1 голоса в лист 'Посещаемость'. Один
+    объёмный get_all_values() строит индекс существующих строк по
+    (tg_poll_id, user_id) вместо ws.find() на каждую запись — голосов за
+    сезон может быть заметно больше, чем строк в 'Сервисный'."""
+    init_db()
+    with _connection() as conn:
+        dirty_rows = conn.execute(
+            "SELECT * FROM attendance WHERE dirty = 1 LIMIT ?", (batch_size,)
+        ).fetchall()
+    if not dirty_rows:
+        return {"pushed": 0, "inserted": 0, "updated": 0}
+
+    ws = spreadsheet.worksheet(ATTEND_SHEET_NAME)
+    all_values = ws.get_all_values()
+    index: Dict[Tuple[str, str], int] = {}
+    for i, row in enumerate(all_values[1:], start=2):
+        if len(row) >= 2:
+            index[(row[0], row[1])] = i
+
+    updates: List[Tuple[int, List[str]]] = []
+    to_append: List[List[str]] = []
+    pushed_keys: List[Tuple[str, str]] = []
+
+    for r in dirty_rows:
+        key = (r["tg_poll_id"], r["user_id"])
+        values = [r["tg_poll_id"], r["user_id"], r["username"], r["first_name"], r["last_name"],
+                  r["vote_text"], r["vote_type"], r["training_date"], r["config_poll_id"],
+                  r["updated_at"], str(r["revote_count"])]
+        if key in index:
+            updates.append((index[key], values))
+        else:
+            to_append.append(values)
+        pushed_keys.append(key)
+
+    updated = inserted = 0
+    for row_num, values in updates:
+        try:
+            ws.update(f"A{row_num}:K{row_num}", [values])
+            updated += 1
+        except Exception:
+            pushed_keys = [k for k in pushed_keys if k != (values[0], values[1])]
+    if to_append:
+        try:
+            ws.append_rows(to_append, value_input_option="USER_ENTERED")
+            inserted += len(to_append)
+        except Exception:
+            append_keys = {(v[0], v[1]) for v in to_append}
+            pushed_keys = [k for k in pushed_keys if k not in append_keys]
+
+    if pushed_keys:
+        with _connection() as conn:
+            conn.executemany(
+                "UPDATE attendance SET dirty = 0 WHERE tg_poll_id = ? AND user_id = ?",
+                pushed_keys,
+            )
+            conn.commit()
+
+    return {"pushed": len(pushed_keys), "inserted": inserted, "updated": updated}

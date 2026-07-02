@@ -159,6 +159,12 @@ GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"  # Тестовый режим
 
+# Поэтапный переход дедуп-лога ("Сервисный") на локальную SQLite как основной
+# слой вместо живых обращений к Sheets на каждый вызов — см. план миграции.
+# По умолчанию выключено (старое поведение без изменений); включаем по
+# одному скрипту, начиная с наименее рискованных.
+SERVICE_RECORDS_LOCAL_PRIMARY = os.getenv("SERVICE_RECORDS_LOCAL_PRIMARY", "false").lower() == "true"
+
 # Настройки Google Sheets
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -604,6 +610,8 @@ class EnhancedDuplicateProtection:
     
     def check_duplicate(self, data_type: str, identifier: str, **kwargs) -> Dict[str, Any]:
         """Проверяет существование дубликата с обработкой ошибок 429"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._check_duplicate_local(data_type, identifier, **kwargs)
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return {'exists': False, 'error': 'Лист не найден'}
@@ -647,7 +655,19 @@ class EnhancedDuplicateProtection:
         except Exception as e:
             print(f"⚠️ Ошибка проверки дубликата: {e}")
             return {'exists': False, 'error': str(e)}
-    
+
+    def _check_duplicate_local(self, data_type: str, identifier: str, **kwargs) -> Dict[str, Any]:
+        import sheets_cache
+        unique_key = self._create_unique_key(data_type, identifier, **kwargs)
+        with sheets_cache.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM service_records WHERE data_type = ? AND unique_key = ? AND deleted = 0",
+                (data_type.upper(), unique_key),
+            ).fetchone()
+        if row:
+            return {'exists': True, 'row': row['id'], 'data': dict(row), 'unique_key': unique_key}
+        return {'exists': False, 'unique_key': unique_key}
+
     def add_record(
         self,
         data_type: str,
@@ -668,10 +688,16 @@ class EnhancedDuplicateProtection:
         **kwargs,
     ) -> Dict[str, Any]:
         """Добавляет новую запись в сервисный лист"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._add_record_local(
+                data_type, identifier, status, additional_data, game_link,
+                comp_id, team_id, alt_name, settings, game_id, game_date,
+                game_time, arena, team_a_id, team_b_id, **kwargs,
+            )
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return {'success': False, 'error': 'Лист не найден'}
-        
+
         try:
             # Проверяем дубликат
             duplicate_check = self.check_duplicate(data_type, identifier, **kwargs)
@@ -725,7 +751,62 @@ class EnhancedDuplicateProtection:
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
+
+    def _add_record_local(
+        self, data_type: str, identifier: str, status: str, additional_data: str,
+        game_link: str, comp_id: Optional[int], team_id: Optional[int], alt_name: str,
+        settings: str, game_id: Optional[int], game_date: str, game_time: str, arena: str,
+        team_a_id: Optional[int], team_b_id: Optional[int], **kwargs,
+    ) -> Dict[str, Any]:
+        """Атомарная запись через уникальный индекс (data_type, unique_key):
+        INSERT ... ON CONFLICT DO NOTHING делает проверку-и-запись одной
+        операцией — гонка между процессами невозможна структурно."""
+        import sheets_cache
+        unique_key = self._create_unique_key(data_type, identifier, **kwargs)
+        now = self._get_current_datetime()
+        now_iso = sheets_cache.now_iso()
+        try:
+            with sheets_cache.get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO service_records
+                    (data_type, unique_key, logged_at, status, additional_data, link,
+                     comp_id, team_id, alt_name, settings, game_id, game_date, game_time, arena,
+                     team_a_id, team_b_id, created_at, updated_at, dirty)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(data_type, unique_key) WHERE deleted = 0 DO NOTHING
+                    """,
+                    (
+                        data_type.upper(), unique_key, now, status, additional_data, game_link,
+                        str(comp_id) if comp_id is not None else "",
+                        str(team_id) if team_id is not None else "",
+                        alt_name, settings,
+                        str(game_id) if game_id is not None else "",
+                        game_date, game_time, arena,
+                        str(team_a_id) if team_a_id is not None else "",
+                        str(team_b_id) if team_b_id is not None else "",
+                        now_iso, now_iso,
+                    ),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    existing = conn.execute(
+                        "SELECT * FROM service_records WHERE data_type = ? AND unique_key = ? AND deleted = 0",
+                        (data_type.upper(), unique_key),
+                    ).fetchone()
+                    return {
+                        'success': False,
+                        'error': 'Дубликат уже существует',
+                        'duplicate_info': {'exists': True, 'data': dict(existing) if existing else None},
+                    }
+                conn.commit()
+                new_id = cur.lastrowid
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        print(f"✅ Запись добавлена (локально): {data_type} - {identifier}")
+        return {'success': True, 'unique_key': unique_key, 'row': new_id}
+
     def find_game_link_for_today(self, team1: str, team2: str) -> Optional[str]:
         """Ищет ссылку на игру для сегодняшней даты"""
         worksheet = self._get_service_worksheet()
@@ -834,10 +915,12 @@ class EnhancedDuplicateProtection:
     
     def get_records_by_type(self, data_type: str) -> List[Dict[str, Any]]:
         """Получает все записи определенного типа"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._get_records_by_type_local(data_type)
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return []
-        
+
         try:
             all_data = worksheet.get_all_values()
             records = []
@@ -869,7 +952,24 @@ class EnhancedDuplicateProtection:
         except Exception as e:
             print(f"❌ Ошибка получения записей: {e}")
             return []
-    
+
+    def _get_records_by_type_local(self, data_type: str) -> List[Dict[str, Any]]:
+        import sheets_cache
+        with sheets_cache.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM service_records WHERE data_type = ? AND deleted = 0 ORDER BY id",
+                (data_type.upper(),),
+            ).fetchall()
+        return [{
+            'row': r['id'], 'type': r['data_type'], 'date': r['logged_at'], 'unique_key': r['unique_key'],
+            'status': r['status'], 'additional_data': r['additional_data'], 'link': r['link'],
+            'comp_id': r['comp_id'], 'team_id': r['team_id'], 'alt_name': r['alt_name'],
+            'settings': r['settings'], 'game_id': r['game_id'], 'game_date': r['game_date'],
+            'game_time': r['game_time'], 'arena': r['arena'], 'team_a_id': r['team_a_id'],
+            'team_b_id': r['team_b_id'],
+        } for r in rows]
+
+
     def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 2.0):
         """Повторяет вызов функции с экспоненциальной задержкой при ошибках 429"""
         import time
@@ -903,10 +1003,12 @@ class EnhancedDuplicateProtection:
     
     def get_game_record(self, data_type: str, game_id: Any) -> Optional[Dict[str, Any]]:
         """Возвращает запись об игре по GameID с обработкой ошибок 429"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._get_game_record_local(data_type, game_id)
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return None
-        
+
         def _fetch_record():
             game_id_str = str(game_id)
             all_data = worksheet.get_all_values()
@@ -942,7 +1044,28 @@ class EnhancedDuplicateProtection:
         except Exception as e:
             print(f"⚠️ Ошибка поиска записи игры: {e}")
             return None
-    
+
+    def _get_game_record_local(self, data_type: str, game_id: Any) -> Optional[Dict[str, Any]]:
+        import sheets_cache
+        game_id_str = str(game_id)
+        with sheets_cache.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM service_records WHERE data_type = ? AND game_id = ? AND deleted = 0",
+                (data_type.upper(), game_id_str),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            'row': row['id'], 'type': row['data_type'], 'date': row['logged_at'],
+            'unique_key': row['unique_key'], 'status': row['status'],
+            'additional_data': row['additional_data'], 'link': row['link'],
+            'comp_id': row['comp_id'], 'team_id': row['team_id'], 'alt_name': row['alt_name'],
+            'settings': row['settings'], 'game_id': row['game_id'], 'game_date': row['game_date'],
+            'game_time': row['game_time'], 'arena': row['arena'],
+            'team_a_id': row['team_a_id'], 'team_b_id': row['team_b_id'],
+        }
+
+
     def upsert_game_record(
         self,
         data_type: str,
@@ -963,10 +1086,16 @@ class EnhancedDuplicateProtection:
         **kwargs,
     ) -> Dict[str, Any]:
         """Создает или обновляет запись об игре"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._upsert_game_record_local(
+                data_type, identifier, status, additional_data, game_link,
+                comp_id, team_id, alt_name, settings, game_id, game_date,
+                game_time, arena, team_a_id, team_b_id, **kwargs,
+            )
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return {'success': False, 'error': 'Лист не найден'}
-        
+
         try:
             game_id_str = str(game_id) if game_id is not None else ""
             existing = self.get_game_record(data_type, game_id_str) if game_id_str else None
@@ -1020,7 +1149,74 @@ class EnhancedDuplicateProtection:
             return result
         except Exception as e:
             return {'success': False, 'error': str(e)}
-    
+
+    def _upsert_game_record_local(
+        self, data_type: str, identifier: str, status: str, additional_data: str,
+        game_link: str, comp_id: Optional[int], team_id: Optional[int], alt_name: str,
+        settings: str, game_id: Any, game_date: str, game_time: str, arena: str,
+        team_a_id: Optional[int], team_b_id: Optional[int], **kwargs,
+    ) -> Dict[str, Any]:
+        """Атомарный upsert через уникальный индекс (data_type, game_id):
+        INSERT ... ON CONFLICT DO UPDATE — 'узнать существующую запись и
+        решить insert-или-update' больше не два отдельных похода в БД."""
+        import sheets_cache
+        game_id_str = str(game_id) if game_id is not None else ""
+        if not game_id_str:
+            # Без game_id уникальность по (data_type, game_id) не работает —
+            # ведём себя как add_record по unique_key.
+            result = self.add_record(
+                data_type=data_type, identifier=identifier, status=status,
+                additional_data=additional_data, game_link=game_link,
+                comp_id=comp_id, team_id=team_id, alt_name=alt_name, settings=settings,
+                game_id=game_id, game_date=game_date, game_time=game_time, arena=arena,
+                team_a_id=team_a_id, team_b_id=team_b_id, **kwargs,
+            )
+            result['action'] = 'inserted' if result.get('success') else 'error'
+            return result
+
+        unique_key = self._create_unique_key(data_type, identifier, **kwargs)
+        now = self._get_current_datetime()
+        now_iso = sheets_cache.now_iso()
+        try:
+            with sheets_cache.get_connection() as conn:
+                existing = conn.execute(
+                    "SELECT id FROM service_records WHERE data_type = ? AND game_id = ? AND deleted = 0",
+                    (data_type.upper(), game_id_str),
+                ).fetchone()
+                conn.execute(
+                    """
+                    INSERT INTO service_records
+                    (data_type, unique_key, logged_at, status, additional_data, link,
+                     comp_id, team_id, alt_name, settings, game_id, game_date, game_time, arena,
+                     team_a_id, team_b_id, created_at, updated_at, dirty)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(data_type, game_id) WHERE deleted = 0 AND game_id != ''
+                    DO UPDATE SET
+                        status=excluded.status, additional_data=excluded.additional_data,
+                        link=excluded.link, alt_name=excluded.alt_name, settings=excluded.settings,
+                        game_date=excluded.game_date, game_time=excluded.game_time, arena=excluded.arena,
+                        team_a_id=excluded.team_a_id, team_b_id=excluded.team_b_id,
+                        updated_at=excluded.updated_at, dirty=1
+                    """,
+                    (
+                        data_type.upper(), unique_key, now, status, additional_data, game_link,
+                        str(comp_id) if comp_id is not None else "",
+                        str(team_id) if team_id is not None else "",
+                        alt_name, settings, game_id_str, game_date, game_time, arena,
+                        str(team_a_id) if team_a_id is not None else "",
+                        str(team_b_id) if team_b_id is not None else "",
+                        now_iso, now_iso,
+                    ),
+                )
+                conn.commit()
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        action = 'updated' if existing else 'inserted'
+        verb = "Обновлена" if action == 'updated' else "Добавлена"
+        print(f"{'🔄' if action == 'updated' else '✅'} {verb} запись (локально) {data_type} для GameID {game_id_str}")
+        return {'success': True, 'action': action}
+
     def get_active_records(self, data_type: str) -> List[Dict[str, Any]]:
         """Получает активные записи определенного типа"""
         all_records = self.get_records_by_type(data_type)
@@ -1028,10 +1224,12 @@ class EnhancedDuplicateProtection:
     
     def cleanup_old_records(self, data_type: str, days_old: int = 30) -> Dict[str, Any]:
         """Очищает старые записи определенного типа"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._cleanup_old_records_local(data_type, days_old)
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return {'success': False, 'error': 'Лист не найден'}
-        
+
         try:
             all_data = worksheet.get_all_values()
             current_datetime = get_moscow_time()
@@ -1075,6 +1273,37 @@ class EnhancedDuplicateProtection:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    def _cleanup_old_records_local(self, data_type: str, days_old: int = 30) -> Dict[str, Any]:
+        import sheets_cache
+        from datetime import datetime as dt
+        current_datetime = get_moscow_time()
+        try:
+            with sheets_cache.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, logged_at FROM service_records WHERE data_type = ? AND deleted = 0",
+                    (data_type.upper(),),
+                ).fetchall()
+                to_delete = []
+                for row in rows:
+                    try:
+                        record_date = dt.strptime(row['logged_at'], '%d.%m.%Y %H:%M').replace(tzinfo=current_datetime.tzinfo)
+                    except ValueError:
+                        continue
+                    if (current_datetime - record_date).days > days_old:
+                        to_delete.append(row['id'])
+                if to_delete:
+                    now_iso = sheets_cache.now_iso()
+                    conn.executemany(
+                        "UPDATE service_records SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?",
+                        [(now_iso, i) for i in to_delete],
+                    )
+                    conn.commit()
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        print(f"✅ Очищено {len(to_delete)} старых записей типа {data_type} (локально)")
+        return {'success': True, 'cleaned_count': len(to_delete), 'data_type': data_type}
+
     def delete_todays_records(self, data_type: str) -> Dict[str, Any]:
         """Удаляет записи указанного типа с сегодняшней датой.
 
@@ -1082,6 +1311,8 @@ class EnhancedDuplicateProtection:
         скрипт сам защищён от дублей через check_duplicate/add_record, и
         простой повторный запуск ничего не сделает, пока сегодняшняя запись
         не будет убрана из сервисного листа."""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._delete_todays_records_local(data_type)
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return {'success': False, 'error': 'Лист не найден'}
@@ -1126,6 +1357,37 @@ class EnhancedDuplicateProtection:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    def _delete_todays_records_local(self, data_type: str) -> Dict[str, Any]:
+        import sheets_cache
+        from datetime import datetime as dt
+        today = get_moscow_time().date()
+        try:
+            with sheets_cache.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, logged_at FROM service_records WHERE data_type = ? AND deleted = 0",
+                    (data_type.upper(),),
+                ).fetchall()
+                to_delete = []
+                for row in rows:
+                    try:
+                        record_date = dt.strptime(row['logged_at'], '%d.%m.%Y %H:%M').date()
+                    except ValueError:
+                        continue
+                    if record_date == today:
+                        to_delete.append(row['id'])
+                if to_delete:
+                    now_iso = sheets_cache.now_iso()
+                    conn.executemany(
+                        "UPDATE service_records SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?",
+                        [(now_iso, i) for i in to_delete],
+                    )
+                    conn.commit()
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        print(f"✅ Удалено {len(to_delete)} сегодняшних записей типа {data_type} (повторный запуск, локально)")
+        return {'success': True, 'deleted_count': len(to_delete), 'data_type': data_type}
+
     def get_statistics(self) -> Dict[str, Any]:
         """Получает статистику по всем типам записей"""
         worksheet = self._get_service_worksheet()
@@ -1161,10 +1423,12 @@ class EnhancedDuplicateProtection:
 
     def cleanup_expired_records(self, max_age_days: int = 30) -> Dict[str, Any]:
         """Удаляет все записи старше указанного количества дней"""
+        if SERVICE_RECORDS_LOCAL_PRIMARY:
+            return self._cleanup_expired_records_local(max_age_days)
         worksheet = self._get_service_worksheet()
         if not worksheet:
             return {'success': False, 'error': 'Лист не найден'}
-        
+
         try:
             all_data = worksheet.get_all_values()
             if not all_data:
@@ -1207,6 +1471,38 @@ class EnhancedDuplicateProtection:
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
+    def _cleanup_expired_records_local(self, max_age_days: int = 30) -> Dict[str, Any]:
+        import sheets_cache
+        from datetime import datetime as dt
+        current_datetime = get_moscow_time()
+        try:
+            with sheets_cache.get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, data_type, logged_at FROM service_records WHERE deleted = 0"
+                ).fetchall()
+                to_delete = []
+                details = []
+                for row in rows:
+                    try:
+                        record_date = dt.strptime(row['logged_at'], '%d.%m.%Y %H:%M').replace(tzinfo=current_datetime.tzinfo)
+                    except ValueError:
+                        continue
+                    if (current_datetime - record_date).days > max_age_days:
+                        to_delete.append(row['id'])
+                        details.append((row['id'], row['data_type']))
+                if to_delete:
+                    now_iso = sheets_cache.now_iso()
+                    conn.executemany(
+                        "UPDATE service_records SET deleted = 1, dirty = 1, updated_at = ? WHERE id = ?",
+                        [(now_iso, i) for i in to_delete],
+                    )
+                    conn.commit()
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+        print(f"✅ Очищено {len(to_delete)} записей старше {max_age_days} дней (локально)")
+        return {'success': True, 'cleaned_count': len(to_delete), 'details': details}
+
     @staticmethod
     def _parse_ids(cell_value: str) -> List[int]:
         """Парсит числовые ID из значения ячейки"""
@@ -1246,8 +1542,23 @@ class EnhancedDuplicateProtection:
         print(f"⚠️ Лист '{CONFIG_WORKSHEET_NAME}' пуст — читаем настройки из 'Сервисного' (временный режим)")
         return self._read_config_from_service_sheet()
 
+    def _get_config_rows(self) -> List[List[str]]:
+        """Строки листа 'Конфиг': сначала локальное зеркало (обновляется
+        демоном раз в 5 минут вместе с players/attendance), при пустом —
+        живой запрос к Sheets. Не завязано на SERVICE_RECORDS_LOCAL_PRIMARY —
+        чистый pull-кэш без рисков для дедупликации, применяется всегда."""
+        try:
+            import sheets_cache
+            rows = sheets_cache.get_config_rows()
+            if rows:
+                return [CONFIG_HEADER] + rows
+        except Exception:
+            pass
+        if self.config_worksheet:
+            return self.config_worksheet.get_all_values()
+        return []
+
     def _read_config_from_config_sheet(self) -> Dict[str, Any]:
-        worksheet = self.config_worksheet
         payload = {
             'comp_ids': set(),
             'team_ids': set(),
@@ -1257,11 +1568,9 @@ class EnhancedDuplicateProtection:
             'voting_polls': [],
             'automation_topics': {},
         }
-        if not worksheet:
-            return {'has_data': False, 'payload': payload}
 
         try:
-            all_data = worksheet.get_all_values()
+            all_data = self._get_config_rows()
             if not all_data or len(all_data) <= 1:
                 return {'has_data': False, 'payload': payload}
 

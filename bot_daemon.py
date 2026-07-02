@@ -59,12 +59,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-# Импортируем логику из collect_votes (переиспользуем без изменений)
+# Импортируем логику из collect_votes (переиспользуем без изменений).
+# upsert_vote (прямая запись в Sheets) больше не используется здесь — голоса
+# локально-первичные, см. sheets_cache.upsert_vote_local.
 from collect_votes import (
     _init_sheets,
     load_training_polls,
     classify_vote,
-    upsert_vote,
     _get_service_ws,
     _get_or_create_sheet,
     _ensure_attend_header,
@@ -132,6 +133,38 @@ def _refresh_db_cache() -> None:
         log.warning(f"Не удалось обновить SQLite-кэш: {e}")
 
 
+PUSH_INTERVAL_SECONDS = 6 * 60 * 60  # 6 часов — периодическая выгрузка в Sheets
+_last_push_time: float = 0.0
+
+
+def _push_local_changes() -> dict:
+    """Выгружает накопленные локальные изменения (service_records +
+    attendance, оба dirty=1) в Sheets. Используется и периодическим
+    циклом демона, и кнопкой '🔄 Синхронизация' в /admin."""
+    sp = _get_spreadsheet()
+    result = {}
+    try:
+        result["service_records"] = sheets_cache.push_service_records(sp)
+    except Exception as e:
+        log.warning(f"Не удалось выгрузить service_records: {e}")
+        result["service_records"] = {"error": str(e)}
+    try:
+        result["attendance"] = sheets_cache.push_attendance(sp)
+    except Exception as e:
+        log.warning(f"Не удалось выгрузить attendance: {e}")
+        result["attendance"] = {"error": str(e)}
+    return result
+
+
+def _periodic_push_local_changes() -> None:
+    global _last_push_time
+    now = time.time()
+    if now - _last_push_time < PUSH_INTERVAL_SECONDS:
+        return
+    _push_local_changes()
+    _last_push_time = now
+
+
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     poll_answer = update.poll_answer
     if not poll_answer:
@@ -139,6 +172,7 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     _refresh_poll_cache()
     _refresh_db_cache()
+    _periodic_push_local_changes()
 
     tg_poll_id = str(poll_answer.poll_id)
     if tg_poll_id not in _poll_cache:
@@ -164,9 +198,9 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         vote_type = classify_vote(chosen[0] if chosen else "")
 
     try:
-        _, attend_ws = _get_worksheets()
-        upsert_vote(
-            attend_ws,
+        # Голоса — локально-первичные (пишем в SQLite сразу, выгрузка в
+        # Sheets отдельно, периодически/по кнопке — см. push_attendance).
+        sheets_cache.upsert_vote_local(
             tg_poll_id, user_id, username, first_name, last_name,
             vote_text, vote_type, training_date, config_poll_id,
         )
@@ -224,6 +258,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_admin(user):
         return
     _refresh_db_cache()
+    _periodic_push_local_changes()
     await _send_main_menu(update, with_keyboard=True)
 
 
@@ -269,6 +304,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
+        [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
 
 
@@ -560,6 +596,26 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             kind, period = parts[2], parts[3]
             await _handle_report_action(query, kind, period)
 
+        elif parts[1] == "sync":
+            await query.edit_message_text("⏳ Синхронизация...")
+            push_result = _push_local_changes()
+            try:
+                pull_result = sheets_cache.sync_all(_get_spreadsheet())
+            except Exception as e:
+                pull_result = {"error": str(e)}
+            sr = push_result.get("service_records", {})
+            at = push_result.get("attendance", {})
+            lines = [
+                "✅ Синхронизация завершена",
+                "",
+                f"Выгружено в Sheets: события {sr.get('pushed', 0)} "
+                f"(добавлено {sr.get('inserted', 0)}, обновлено {sr.get('updated', 0)}, "
+                f"удалено {sr.get('deleted', 0)}), голоса {at.get('pushed', 0)} "
+                f"(добавлено {at.get('inserted', 0)}, обновлено {at.get('updated', 0)})",
+                f"Забрано из Sheets: {pull_result}",
+            ]
+            await query.edit_message_text("\n".join(lines), reply_markup=_main_menu_markup())
+
     except Exception as e:
         log.error(f"Ошибка в админ-меню (callback_data={data!r}): {e}")
         sheets_cache.report_error("admin_menu", f"{data!r}: {e}", _get_spreadsheet())
@@ -578,6 +634,7 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_admin(user):
         return
     _refresh_db_cache()
+    _periodic_push_local_changes()
     await _send_main_menu(update)
 
 
@@ -590,6 +647,7 @@ async def handle_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not _is_admin(user):
         return
     _refresh_db_cache()
+    _periodic_push_local_changes()
     await _send_main_menu(update)
 
 
@@ -601,6 +659,7 @@ async def on_startup(app: Application) -> None:
     sheets_cache.init_db()
     _refresh_poll_cache()
     _refresh_db_cache()
+    _periodic_push_local_changes()
     try:
         await app.bot.set_my_commands([
             BotCommand("admin", "Админ-панель"),
