@@ -25,6 +25,8 @@ DB_PATH = Path(__file__).parent / "data" / "bot.db"
 PLAYERS_SHEET_NAME = "Игроки"
 ATTEND_SHEET_NAME = "Посещаемость"
 SERVICE_SHEET_NAME = "Сервисный"
+BOT_USERS_SHEET_NAME = "Пользователи бота"
+ERRORS_SHEET_NAME = "Ошибки"
 
 ACTIVITY_TYPES = [
     "ОПРОС_ГОЛОСОВАНИЕ",
@@ -99,6 +101,24 @@ CREATE TABLE IF NOT EXISTS sync_meta (
     last_attempt_at   TEXT NOT NULL,
     last_error        TEXT,
     row_count         INTEGER NOT NULL DEFAULT 0
+);
+
+-- Эти две таблицы, в отличие от остальных, НЕ зеркала Sheets — бот сам
+-- пишет сюда (и дублирует в соответствующие листы, чтобы было видно в
+-- таблице). SQLite здесь для мгновенного показа в /admin.
+
+CREATE TABLE IF NOT EXISTS bot_users (
+    telegram_id   TEXT PRIMARY KEY,
+    username      TEXT NOT NULL DEFAULT '',
+    first_name    TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS errors (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source        TEXT NOT NULL,
+    message       TEXT NOT NULL,
+    logged_at     TEXT NOT NULL
 );
 """
 
@@ -305,6 +325,21 @@ def get_players_stats() -> Dict[str, int]:
     return {"total": total, "linked": linked}
 
 
+def get_players_page(offset: int = 0, limit: int = 8) -> Dict[str, Any]:
+    """Постраничный список игроков (для показа в /admin по 5-10 за раз)."""
+    init_db()
+    with _connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+        rows = conn.execute(
+            """
+            SELECT surname, name, nickname, telegram_id, status
+            FROM players ORDER BY row_index LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return {"rows": rows, "total": total, "offset": offset, "limit": limit}
+
+
 def get_attendance_stats() -> Dict[str, int]:
     init_db()
     with _connection() as conn:
@@ -377,3 +412,121 @@ def get_sync_status() -> Dict[str, Dict[str, Any]]:
     with _connection() as conn:
         rows = conn.execute("SELECT * FROM sync_meta").fetchall()
     return {row["table_name"]: dict(row) for row in rows}
+
+
+# ── Пользователи бота ("В боте") и лог ошибок ───────────────────────────────
+# В отличие от остального модуля, эти функции сами являются источником
+# истины для SQLite (не просто кэш) и при наличии spreadsheet дублируют
+# запись в соответствующий лист Google Sheets — по желанию пользователя
+# видеть всё в таблицах. Ошибка записи в Sheets никогда не должна ронять
+# вызывающий код (это часто сам обработчик ошибок).
+
+def _get_or_create_ws(spreadsheet, title: str, header: List[str]):
+    import gspread
+    try:
+        ws = spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(header))
+        ws.update("A1", [header])
+    return ws
+
+
+def record_bot_user(spreadsheet, telegram_id: str, username: str, first_name: str) -> bool:
+    """Возвращает True, если пользователь новый (первый /start)."""
+    init_db()
+    with _connection() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM bot_users WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+        if existing:
+            return False
+        now = _now_iso()
+        conn.execute(
+            "INSERT INTO bot_users (telegram_id, username, first_name, first_seen_at) VALUES (?, ?, ?, ?)",
+            (telegram_id, username, first_name, now),
+        )
+        conn.commit()
+    if spreadsheet is not None:
+        try:
+            ws = _get_or_create_ws(spreadsheet, BOT_USERS_SHEET_NAME, ["Telegram ID", "Username", "Имя", "Первый /start"])
+            ws.append_row([telegram_id, username, first_name, datetime.now().strftime("%d.%m.%Y %H:%M")])
+        except Exception:
+            pass
+    return True
+
+
+def get_bot_users_page(offset: int = 0, limit: int = 8) -> Dict[str, Any]:
+    init_db()
+    with _connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM bot_users").fetchone()[0]
+        rows = conn.execute(
+            "SELECT telegram_id, username, first_name, first_seen_at FROM bot_users ORDER BY first_seen_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return {"rows": rows, "total": total, "offset": offset, "limit": limit}
+
+
+def report_error(source: str, message: str, spreadsheet=None) -> None:
+    """Логирует ошибку в SQLite (для быстрого показа в /admin) и, если
+    передан spreadsheet, дублирует в лист "Ошибки". Сама никогда не
+    бросает исключение — безопасно вызывать из любого except-блока."""
+    now = _now_iso()
+    message = message[:2000]
+    try:
+        init_db()
+        with _connection() as conn:
+            conn.execute(
+                "INSERT INTO errors (source, message, logged_at) VALUES (?, ?, ?)",
+                (source, message, now),
+            )
+            conn.commit()
+    except Exception:
+        pass
+    if spreadsheet is not None:
+        try:
+            ws = _get_or_create_ws(spreadsheet, ERRORS_SHEET_NAME, ["Источник", "Сообщение", "Когда"])
+            ws.append_row([source, message, datetime.now().strftime("%d.%m.%Y %H:%M")])
+        except Exception:
+            pass
+
+
+def get_errors_page(offset: int = 0, limit: int = 8) -> Dict[str, Any]:
+    init_db()
+    with _connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM errors").fetchone()[0]
+        rows = conn.execute(
+            "SELECT source, message, logged_at FROM errors ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return {"rows": rows, "total": total, "offset": offset, "limit": limit}
+
+
+def get_user_action_log(offset: int = 0, limit: int = 10) -> Dict[str, Any]:
+    """Объединённый лог действий пользователей: /start + голоса за
+    тренировки, отсортированные по времени (новые сверху)."""
+    init_db()
+    with _connection() as conn:
+        starts = conn.execute(
+            "SELECT 'СТАРТ' as kind, telegram_id as user_id, username, first_name, '' as detail, first_seen_at as ts FROM bot_users"
+        ).fetchall()
+        votes = conn.execute(
+            "SELECT 'ГОЛОС' as kind, user_id, username, first_name, vote_text as detail, updated_at as ts FROM attendance"
+        ).fetchall()
+
+    def _parse_ts(ts: str):
+        # Оба формата приводим к наивному datetime — сервер работает в UTC,
+        # так что оба варианта фактически в одной шкале, а сравнивать
+        # tz-aware и tz-naive datetime напрямую нельзя.
+        try:
+            return datetime.fromisoformat(ts).replace(tzinfo=None)
+        except ValueError:
+            pass
+        try:
+            return datetime.strptime(ts, "%d.%m.%Y %H:%M")
+        except ValueError:
+            return datetime.min
+
+    combined = [dict(r) for r in starts] + [dict(r) for r in votes]
+    combined.sort(key=lambda item: _parse_ts(item["ts"]), reverse=True)
+    total = len(combined)
+    return {"rows": combined[offset:offset + limit], "total": total, "offset": offset, "limit": limit}

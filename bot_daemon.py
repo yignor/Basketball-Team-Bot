@@ -172,6 +172,7 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as e:
         log.error(f"Ошибка при сохранении голоса: {e}")
+        sheets_cache.report_error("handle_poll_answer", str(e), _get_spreadsheet())
 
 
 # ─────────────────────────── Админ-меню ───────────────────────────────────
@@ -212,6 +213,14 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat = update.effective_chat
     if not user or not chat or chat.type != "private":
         return
+
+    # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
+    # админа. Нужно для "Список пользователей → В боте".
+    try:
+        sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
+    except Exception as e:
+        log.warning(f"Не удалось записать пользователя бота: {e}")
+
     if not _is_admin(user):
         return
     _refresh_db_cache()
@@ -278,15 +287,92 @@ def _launch_menu_markup() -> InlineKeyboardMarkup:
 def _log_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🤖 Лог бота", callback_data="admin:log:bot")],
+        [InlineKeyboardButton("👤 Лог пользователей", callback_data="admin:log:users:0")],
+        [InlineKeyboardButton("⚠️ Ошибки", callback_data="admin:log:errors:0")],
         _back_button(),
     ])
 
 
 def _users_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 По таблице", callback_data="admin:users:table")],
+        [InlineKeyboardButton("📊 По таблице", callback_data="admin:users:table:0")],
+        [InlineKeyboardButton("🤖 В боте", callback_data="admin:users:bot:0")],
         _back_button(),
     ])
+
+
+PAGE_SIZE = 8
+
+
+def _pagination_row(base: str, offset: int, limit: int, total: int) -> List[InlineKeyboardButton]:
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"{base}:{max(0, offset - limit)}"))
+    if offset + limit < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"{base}:{offset + limit}"))
+    return nav
+
+
+def _render_players_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_players_page(offset=offset, limit=PAGE_SIZE)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"👥 Игроки по таблице ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        name = f"{r['surname']} {r['name']}".strip()
+        nick = f" (@{r['nickname']})" if r["nickname"] else ""
+        tg = "✅ TG" if r["telegram_id"] else "— без TG"
+        lines.append(f"• {name}{nick} — {tg}")
+    if not data["rows"]:
+        lines.append("Пусто")
+    rows = [_pagination_row("admin:users:table", offset, PAGE_SIZE, data["total"])]
+    rows.append(_back_button("admin:menu:users"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_bot_users_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_bot_users_page(offset=offset, limit=PAGE_SIZE)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"🤖 Пользователи в боте ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        uname = f"@{r['username']}" if r["username"] else "(без username)"
+        try:
+            when = datetime.fromisoformat(r["first_seen_at"]).astimezone().strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            when = r["first_seen_at"]
+        lines.append(f"• {r['first_name']} {uname} — первый /start {when}")
+    if not data["rows"]:
+        lines.append("Пока никто не запускал бота через /start")
+    rows = [_pagination_row("admin:users:bot", offset, PAGE_SIZE, data["total"])]
+    rows.append(_back_button("admin:menu:users"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_user_log_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_user_action_log(offset=offset, limit=10)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"👤 Лог пользователей ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        who = f"@{r['username']}" if r["username"] else (r["first_name"] or r["user_id"])
+        detail = f" — {r['detail']}" if r["detail"] else ""
+        lines.append(f"• [{r['kind']}] {who}{detail} ({r['ts']})")
+    if not data["rows"]:
+        lines.append("Событий пока нет")
+    rows = [_pagination_row("admin:log:users", offset, 10, data["total"])]
+    rows.append(_back_button("admin:menu:log"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_errors_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_errors_page(offset=offset, limit=PAGE_SIZE)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"⚠️ Ошибки ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        lines.append(f"• [{r['source']}] {r['message'][:200]} ({r['logged_at']})")
+    if not data["rows"]:
+        lines.append("Ошибок не зафиксировано")
+    rows = [_pagination_row("admin:log:errors", offset, PAGE_SIZE, data["total"])]
+    rows.append(_back_button("admin:menu:log"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
 
 
 def _reports_menu_markup() -> InlineKeyboardMarkup:
@@ -312,6 +398,21 @@ async def _run_script(script_name: str, args: List[str]) -> Tuple[int, str, str]
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+
+def _summarize_output(stdout: str, max_lines: int = 12) -> str:
+    """Скрипты печатают много построчной отладки (например, каждого
+    проверяемого игрока) — оставляем только содержательные строки
+    (со статус-эмодзи), чтобы в Telegram было видно, что реально
+    произошло, а не просто 'готово'."""
+    noisy_prefixes = ("🔍", "   ", "--", "=")
+    meaningful = [
+        line.strip() for line in stdout.splitlines()
+        if line.strip() and not line.strip().startswith(noisy_prefixes)
+    ]
+    if not meaningful:
+        return "(скрипт не вывел статусных строк, см. полный лог в journalctl)"
+    return "\n".join(meaningful[-max_lines:])
 
 
 def _check_already_run_today(data_types: List[str]) -> Optional[str]:
@@ -359,18 +460,21 @@ async def _handle_launch_action(query, action: str, force: bool) -> None:
     result_lines = []
     for script, args in scripts:
         try:
-            code, _stdout, stderr = await _run_script(script, args)
+            code, out, stderr = await _run_script(script, args)
         except Exception as e:
-            code, stderr = 1, str(e)
+            code, out, stderr = 1, "", str(e)
         if code == 0:
-            result_lines.append(f"✅ {script}")
+            result_lines.append(f"✅ {script}\n{_summarize_output(out)}")
         else:
             ok = False
             result_lines.append(f"❌ {script}: {stderr.strip().splitlines()[-1] if stderr.strip() else 'ошибка, см. логи демона'}")
             log.error(f"Скрипт {script} завершился с ошибкой (код {code}): {stderr[-2000:]}")
+            sheets_cache.report_error(script, stderr[-2000:] or f"exit code {code}", _get_spreadsheet())
 
     header = "✅" if ok else "⚠️"
-    text = f"{header} {label} — готово\n\n" + "\n".join(result_lines)
+    text = f"{header} {label} — готово\n\n" + "\n\n".join(result_lines)
+    if len(text) > 3800:  # запас от лимита Telegram в 4096 символов
+        text = text[:3800] + "\n…(обрезано)"
     await query.edit_message_text(text, reply_markup=_launch_menu_markup())
 
 
@@ -388,6 +492,7 @@ async def _handle_report_action(query, kind: str, period: str) -> None:
     else:
         text = f"❌ Не удалось сформировать отчёт: {stderr.strip().splitlines()[-1] if stderr.strip() else 'см. логи демона'}"
         log.error(f"training_report.py завершился с ошибкой (код {code}): {stderr[-2000:]}")
+        sheets_cache.report_error("training_report.py", stderr[-2000:] or f"exit code {code}", _get_spreadsheet())
     await query.edit_message_text(text, reply_markup=_reports_training_menu_markup())
 
 
@@ -429,15 +534,27 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif parts[1] == "users":
             mode = parts[2]
+            offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
             if mode == "table":
                 _refresh_db_cache()
-                await query.edit_message_text(admin_panel.render_users_table(), reply_markup=_users_menu_markup())
+                text, markup = _render_players_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif mode == "bot":
+                text, markup = _render_bot_users_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "log":
             mode = parts[2]
+            offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
             if mode == "bot":
                 _refresh_db_cache()
                 await query.edit_message_text(admin_panel.render_bot_log(since_days=1), reply_markup=_log_menu_markup())
+            elif mode == "users":
+                text, markup = _render_user_log_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif mode == "errors":
+                text, markup = _render_errors_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
@@ -445,6 +562,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     except Exception as e:
         log.error(f"Ошибка в админ-меню (callback_data={data!r}): {e}")
+        sheets_cache.report_error("admin_menu", f"{data!r}: {e}", _get_spreadsheet())
         try:
             await query.edit_message_text("⚠️ Произошла ошибка, подробности в логах демона.", reply_markup=_main_menu_markup())
         except Exception:
