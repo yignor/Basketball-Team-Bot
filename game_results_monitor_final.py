@@ -6,6 +6,7 @@ Production версия для ежедневного запуска
 """
 
 import asyncio
+import fcntl
 import os
 import json
 import re
@@ -700,10 +701,33 @@ class GameResultsMonitorFinal:
         else:
             print("\n⚠️ Результаты не отправлены (возможно, уже были отправлены ранее)")
 
+LOCK_FILE_PATH = "/tmp/game_results_monitor.lock"
+
+
 async def main():
-    """Основная функция"""
-    monitor = GameResultsMonitorFinal()
-    await monitor.run_game_results_monitor()
+    """Основная функция.
+
+    Этот скрипт теперь запускается и старым 30-минутным cron, и новым
+    адаптивным вотчером результатов (game_watcher.py) — оба могут
+    попытаться проверить/отправить результат одной и той же игры почти
+    одновременно. Атомарная защита от дублей в service_records защищает
+    только запись в БД, но не сам факт отправки сообщения в Telegram
+    (между check_duplicate и add_record есть окно) — поэтому здесь
+    дополнительно неблокирующая файловая блокировка: если кто-то уже
+    выполняет проверку, просто пропускаем этот запуск (следующий тик/крон
+    повторит попытку)."""
+    lock_file = open(LOCK_FILE_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("⏭️ Другой процесс уже проверяет результаты игр (cron/вотчер пересеклись) — пропускаю этот запуск")
+        return
+    try:
+        monitor = GameResultsMonitorFinal()
+        await monitor.run_game_results_monitor()
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

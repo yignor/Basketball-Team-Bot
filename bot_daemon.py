@@ -14,7 +14,6 @@ import signal
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -74,9 +73,9 @@ from collect_votes import (
 )
 import admin_panel
 import sheets_cache
+import script_runner
+import game_watcher
 from enhanced_duplicate_protection import duplicate_protection
-
-REPO_DIR = Path(__file__).parent
 
 # Кэш зарегистрированных опросов (обновляем раз в 5 минут)
 _poll_cache: dict = {}
@@ -426,31 +425,6 @@ def _reports_training_menu_markup() -> InlineKeyboardMarkup:
     ])
 
 
-async def _run_script(script_name: str, args: List[str]) -> Tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, str(REPO_DIR / script_name), *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        cwd=str(REPO_DIR),
-    )
-    stdout, stderr = await proc.communicate()
-    return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
-
-
-def _summarize_output(stdout: str, max_lines: int = 12) -> str:
-    """Скрипты печатают много построчной отладки (например, каждого
-    проверяемого игрока) — оставляем только содержательные строки
-    (со статус-эмодзи), чтобы в Telegram было видно, что реально
-    произошло, а не просто 'готово'."""
-    noisy_prefixes = ("🔍", "   ", "--", "=")
-    meaningful = [
-        line.strip() for line in stdout.splitlines()
-        if line.strip() and not line.strip().startswith(noisy_prefixes)
-    ]
-    if not meaningful:
-        return "(скрипт не вывел статусных строк, см. полный лог в journalctl)"
-    return "\n".join(meaningful[-max_lines:])
-
-
 def _check_already_run_today(data_types: List[str]) -> Optional[str]:
     """Прямая проверка по Сервисному листу (не через 5-минутный кэш —
     сразу после реального запуска кэш ещё не мог обновиться)."""
@@ -496,11 +470,11 @@ async def _handle_launch_action(query, action: str, force: bool) -> None:
     result_lines = []
     for script, args in scripts:
         try:
-            code, out, stderr = await _run_script(script, args)
+            code, out, stderr = await script_runner.run_script(script, args)
         except Exception as e:
             code, out, stderr = 1, "", str(e)
         if code == 0:
-            result_lines.append(f"✅ {script}\n{_summarize_output(out)}")
+            result_lines.append(f"✅ {script}\n{script_runner.summarize_output(out)}")
         else:
             ok = False
             result_lines.append(f"❌ {script}: {stderr.strip().splitlines()[-1] if stderr.strip() else 'ошибка, см. логи демона'}")
@@ -520,7 +494,7 @@ async def _handle_report_action(query, kind: str, period: str) -> None:
     await query.edit_message_text(f"⏳ Формирую отчёт (тренировки, {period})...")
     args = ["--week"] if period == "week" else ["--month", datetime.now().strftime("%Y-%m")]
     try:
-        code, _stdout, stderr = await _run_script("training_report.py", args)
+        code, _stdout, stderr = await script_runner.run_script("training_report.py", args)
     except Exception as e:
         code, stderr = 1, str(e)
     if code == 0:
@@ -651,6 +625,33 @@ async def handle_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _send_main_menu(update)
 
 
+BACKGROUND_TICK_SECONDS = 30
+_background_task = None
+
+
+async def _background_loop() -> None:
+    """Единственный независимый таймер демона. Раньше _refresh_poll_cache/
+    _refresh_db_cache/_periodic_push_local_changes срабатывали только
+    попутно с входящим трафиком Telegram — во время матча без активности
+    в чате это могло надолго задерживать и их, и (что важнее) вотчер
+    результатов игр, которому нужно тикать независимо от чата."""
+    log.info(f"Фоновый цикл запущен (тик каждые {BACKGROUND_TICK_SECONDS}с)")
+    while True:
+        try:
+            await asyncio.sleep(BACKGROUND_TICK_SECONDS)
+            _refresh_poll_cache()
+            _refresh_db_cache()
+            _periodic_push_local_changes()
+            await game_watcher.tick()
+        except asyncio.CancelledError:
+            log.info("Фоновый цикл остановлен")
+            raise
+        except Exception as e:
+            # Один плохой тик не должен убивать демон и останавливать вотчер навсегда.
+            log.error(f"Ошибка в фоновом цикле: {e}")
+            sheets_cache.report_error("background_loop", str(e), _get_spreadsheet())
+
+
 async def on_startup(app: Application) -> None:
     log.info("=" * 50)
     log.info("Бот запущен (long-polling режим)")
@@ -668,8 +669,18 @@ async def on_startup(app: Application) -> None:
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
 
+    global _background_task
+    _background_task = asyncio.create_task(_background_loop())
+
 
 async def on_shutdown(app: Application) -> None:
+    global _background_task
+    if _background_task:
+        _background_task.cancel()
+        try:
+            await _background_task
+        except asyncio.CancelledError:
+            pass
     log.info("Бот остановлен.")
 
 
