@@ -11,6 +11,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -53,6 +54,7 @@ from collect_votes import (
     ATTEND_HEADER,
 )
 import admin_panel
+import sheets_cache
 
 # Кэш зарегистрированных опросов (обновляем раз в 5 минут)
 _poll_cache: dict = {}
@@ -60,6 +62,9 @@ _poll_cache_time: float = 0.0
 _spreadsheet = None
 _attend_ws   = None
 _service_ws  = None
+
+# Локальный SQLite-кэш листов Sheets для /admin (обновляем раз в 5 минут)
+_db_sync_time: float = 0.0
 
 
 def _get_spreadsheet():
@@ -82,7 +87,6 @@ def _get_worksheets():
 
 def _refresh_poll_cache() -> None:
     global _poll_cache, _poll_cache_time
-    import time
     now = time.time()
     if now - _poll_cache_time < 300:  # 5 минут
         return
@@ -95,12 +99,25 @@ def _refresh_poll_cache() -> None:
         log.warning(f"Не удалось обновить кэш опросов: {e}")
 
 
+def _refresh_db_cache() -> None:
+    global _db_sync_time
+    now = time.time()
+    if now - _db_sync_time < 300:  # 5 минут, тот же интервал что и poll cache
+        return
+    try:
+        sheets_cache.sync_all(_get_spreadsheet())
+        _db_sync_time = now
+    except Exception as e:
+        log.warning(f"Не удалось обновить SQLite-кэш: {e}")
+
+
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     poll_answer = update.poll_answer
     if not poll_answer:
         return
 
     _refresh_poll_cache()
+    _refresh_db_cache()
 
     tg_poll_id = str(poll_answer.poll_id)
     if tg_poll_id not in _poll_cache:
@@ -145,8 +162,10 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not ADMIN_USER_ID or str(user.id) != ADMIN_USER_ID:
         return
 
+    _refresh_db_cache()
+
     try:
-        text = admin_panel.build_dashboard(_get_spreadsheet())
+        text = admin_panel.build_dashboard()
     except Exception as e:
         log.error(f"Ошибка при формировании админ-панели: {e}")
         text = "⚠️ Не удалось получить статистику, подробности в логах демона."
@@ -166,7 +185,9 @@ async def on_startup(app: Application) -> None:
     log.info("Бот запущен (long-polling режим)")
     log.info(f"Время старта: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     log.info("=" * 50)
+    sheets_cache.init_db()
     _refresh_poll_cache()
+    _refresh_db_cache()
 
 
 async def on_shutdown(app: Application) -> None:

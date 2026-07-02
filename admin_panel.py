@@ -3,136 +3,52 @@
 Админ-панель бота: статистика по игрокам/голосованиям и короткий лог
 последних автоматических действий (опросы, анонсы, результаты, дни рождения).
 
-Данные берутся из уже существующих листов Google Sheets ("Игроки",
-"Посещаемость", "Сервисный") — здесь только чтение и форматирование.
+Данные читаются из локального SQLite-кэша (sheets_cache.py), который сам
+периодически синхронизируется с Google Sheets — см. bot_daemon.py. Здесь
+только чтение кэша и форматирование.
 """
 
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from datetime import datetime, timezone
 
-from enhanced_duplicate_protection import TYPE_COL, DATE_COL, STATUS_COL
+import sheets_cache
 
-PLAYERS_SHEET_NAME = "Игроки"
-ATTEND_SHEET_NAME = "Посещаемость"
-SERVICE_SHEET_NAME = "Сервисный"
+PENDING_STATUSES = sheets_cache.PENDING_STATUSES
 
-# Только эти типы записей "Сервисного" листа считаем событиями автоматизации
-# (остальные строки там — служебная конфигурация, а не лог действий).
-ACTIVITY_TYPES = [
-    "ОПРОС_ГОЛОСОВАНИЕ",
-    "ОПРОС_ИГРА",
-    "АНОНС_ИГРА",
-    "РЕЗУЛЬТАТ_ИГРА",
-    "ДЕНЬ_РОЖДЕНИЯ",
-    "КАЛЕНДАРЬ_ИГРА",
-]
-
-# В реальных данных статус — произвольная фраза ("ОПРОС СОЗДАН", "АНОНС ОТПРАВЛЕН"
-# и т.п.), явного статуса ошибки система не пишет. Поэтому считаем "активными"
-# (в процессе/ожидании) только явно временные статусы, всё остальное — готово.
-PENDING_STATUSES = {"АКТИВЕН", "ОТПРАВЛЯЕТСЯ"}
+# Насколько старой должна быть последняя успешная синхронизация таблицы,
+# прежде чем показывать предупреждение о протухших данных (2x интервал
+# обновления кэша в bot_daemon.py, чтобы не ловить ложные срабатывания
+# на обычном дрожании расписания).
+STALE_THRESHOLD_SECONDS = 600
 
 
-def _players_stats(spreadsheet) -> Dict[str, int]:
-    try:
-        ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
-        records = ws.get_all_records()
-    except Exception:
-        return {"total": 0, "linked": 0}
-
-    total = linked = 0
-    for r in records:
-        if not r.get("Имя"):
-            continue
-        total += 1
-        if str(r.get("Telegram ID", "")).strip():
-            linked += 1
-    return {"total": total, "linked": linked}
-
-
-def _attendance_stats(spreadsheet) -> Dict[str, int]:
-    try:
-        ws = spreadsheet.worksheet(ATTEND_SHEET_NAME)
-        rows = ws.get_all_values()[1:]
-    except Exception:
-        return {"unique_users": 0, "total_votes": 0, "unique_30d": 0}
-
-    cutoff = datetime.now() - timedelta(days=30)
-    unique_all: set = set()
-    unique_30d: set = set()
-    total_votes = 0
-    for row in rows:
-        if len(row) < 2 or not row[1]:
-            continue
-        user_id = row[1]
-        unique_all.add(user_id)
-        total_votes += 1
-        updated_raw = row[9] if len(row) > 9 else ""
-        try:
-            if datetime.strptime(updated_raw, "%d.%m.%Y %H:%M") >= cutoff:
-                unique_30d.add(user_id)
-        except ValueError:
-            pass
-    return {
-        "unique_users": len(unique_all),
-        "total_votes": total_votes,
-        "unique_30d": len(unique_30d),
-    }
+def _staleness_banner() -> list:
+    status = sheets_cache.get_sync_status()
+    warnings = []
+    for table in ("players", "attendance", "service_log"):
+        info = status.get(table)
+        if not info or not info.get("last_success_at"):
+            warnings.append("⚠️ Кэш ещё не заполнен (первый запуск?) — данные могут быть неполными")
+            break
+        last_success = datetime.fromisoformat(info["last_success_at"])
+        age = (datetime.now(timezone.utc) - last_success).total_seconds()
+        if age > STALE_THRESHOLD_SECONDS:
+            local_time = last_success.astimezone().strftime("%H:%M")
+            minutes_ago = int(age // 60)
+            warnings.append(f"⚠️ Данные могут быть устаревшими (последняя синхронизация: {local_time}, {minutes_ago} мин назад)")
+            break
+    return warnings
 
 
-def _service_rows(spreadsheet) -> List[List[str]]:
-    try:
-        ws = spreadsheet.worksheet(SERVICE_SHEET_NAME)
-        return ws.get_all_values()[1:]
-    except Exception:
-        return []
-
-
-def _automation_stats(rows: List[List[str]]) -> Dict[str, Dict[str, int]]:
-    stats: Dict[str, Dict[str, int]] = {}
-    for row in rows:
-        if not row or not row[TYPE_COL] or row[TYPE_COL] not in ACTIVITY_TYPES:
-            continue
-        bucket = stats.setdefault(row[TYPE_COL], {"total": 0, "active": 0, "done": 0})
-        bucket["total"] += 1
-        status = row[STATUS_COL] if len(row) > STATUS_COL else ""
-        if status in PENDING_STATUSES:
-            bucket["active"] += 1
-        else:
-            bucket["done"] += 1
-    return stats
-
-
-def _recent_events(rows: List[List[str]], limit: int = 8) -> List[str]:
-    dated: List[Tuple[datetime, List[str]]] = []
-    for row in rows:
-        if not row or row[TYPE_COL] not in ACTIVITY_TYPES:
-            continue
-        date_raw = row[DATE_COL] if len(row) > DATE_COL else ""
-        try:
-            dt = datetime.strptime(date_raw, "%d.%m.%Y %H:%M")
-        except ValueError:
-            continue
-        dated.append((dt, row))
-    dated.sort(key=lambda pair: pair[0], reverse=True)
-
-    lines = []
-    for dt, row in dated[:limit]:
-        status = row[STATUS_COL] if len(row) > STATUS_COL else ""
-        emoji = "🟡" if status in PENDING_STATUSES else "✅"
-        lines.append(f"{emoji} {row[TYPE_COL]} — {status or '?'} ({dt.strftime('%d.%m %H:%M')})")
-    return lines
-
-
-def build_dashboard(spreadsheet) -> str:
-    players = _players_stats(spreadsheet)
-    attendance = _attendance_stats(spreadsheet)
-    service_rows = _service_rows(spreadsheet)
-    automation = _automation_stats(service_rows)
-    recent = _recent_events(service_rows)
+def build_dashboard() -> str:
+    players = sheets_cache.get_players_stats()
+    attendance = sheets_cache.get_attendance_stats()
+    automation = sheets_cache.get_service_activity_stats()
+    recent = sheets_cache.get_recent_service_events()
 
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [f"📊 Админ-панель — {now}", ""]
+
+    lines.extend(_staleness_banner())
 
     lines.append("👥 Игроки")
     lines.append(f"• Всего в базе: {players['total']}")
@@ -152,6 +68,17 @@ def build_dashboard(spreadsheet) -> str:
         lines.append("")
 
     lines.append("🕐 Последние события:")
-    lines.extend(recent if recent else ["нет данных"])
+    if recent:
+        for row in recent:
+            status = row["status"]
+            emoji = "🟡" if status in PENDING_STATUSES else "✅"
+            try:
+                dt = datetime.strptime(row["logged_at"], "%d.%m.%Y %H:%M")
+                when = dt.strftime("%d.%m %H:%M")
+            except ValueError:
+                when = row["logged_at"] or "?"
+            lines.append(f"{emoji} {row['data_type']} — {status or '?'} ({when})")
+    else:
+        lines.append("нет данных")
 
     return "\n".join(lines)
