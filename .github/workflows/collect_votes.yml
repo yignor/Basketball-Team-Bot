@@ -1,9 +1,10 @@
 name: Collect Training Votes
 
 on:
-  schedule:
-    # Каждый час в :05 (не в :00, чтобы не конфликтовать с Daily Bot)
-    - cron: '5 * * * *'
+  # Расписание отключено: реальное время голосований теперь обрабатывает
+  # постоянный демон bot_daemon.py на сервере (long-polling). Параллельный
+  # запуск этого скрипта вызывал "Conflict: terminated by other getUpdates
+  # request" у демона. Оставлен только ручной запуск для отладки.
   workflow_dispatch:
     inputs:
       reason:

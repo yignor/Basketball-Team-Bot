@@ -1,9 +1,8 @@
 name: Training Attendance Report
 
 on:
-  schedule:
-    # 1-го числа каждого месяца в 09:00 МСК (06:00 UTC)
-    - cron: '0 6 1 * *'
+  # Расписание отключено: тот же скрипт теперь запускается через cron
+  # на постоянном сервере (deploy/basketball-cron), 1-го числа в 09:00 МСК.
   workflow_dispatch:
     inputs:
       mode:
