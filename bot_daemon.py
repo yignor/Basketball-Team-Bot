@@ -18,13 +18,22 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
     PollAnswerHandler,
+    filters,
 )
 
 load_dotenv()
@@ -169,6 +178,44 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def _is_admin(user) -> bool:
     return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
+
+
+ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
+
+
+def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Постоянная кнопка внизу экрана — открывает то же меню, что и /admin,
+    без необходимости печатать команду каждый раз. Видна только админу,
+    т.к. отправляется только в его личном чате с ботом."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(ADMIN_KEYBOARD_LABEL)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
+    for attempt in range(3):
+        try:
+            if with_keyboard:
+                await update.message.reply_text(ADMIN_KEYBOARD_LABEL + " активна ⬇️", reply_markup=_admin_reply_keyboard())
+            await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
+            return
+        except Exception as e:
+            log.warning(f"Не удалось отправить главное меню (попытка {attempt + 1}/3): {e}")
+            await asyncio.sleep(2)
+    log.error("Не удалось отправить главное меню после 3 попыток")
+
+
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+    if not _is_admin(user):
+        return
+    _refresh_db_cache()
+    await _send_main_menu(update, with_keyboard=True)
 
 
 # Конфигурация кнопок "Запуск оповещений". "daily" (Оповещения на сегодня)
@@ -412,17 +459,20 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if not _is_admin(user):
         return
-
     _refresh_db_cache()
+    await _send_main_menu(update)
 
-    for attempt in range(3):
-        try:
-            await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
-            return
-        except Exception as e:
-            log.warning(f"Не удалось отправить главное меню /admin (попытка {attempt + 1}/3): {e}")
-            await asyncio.sleep(2)
-    log.error("Не удалось отправить главное меню /admin после 3 попыток")
+
+async def handle_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Нажатие постоянной кнопки '📊 Админ-панель' — то же самое, что /admin."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+    if not _is_admin(user):
+        return
+    _refresh_db_cache()
+    await _send_main_menu(update)
 
 
 async def on_startup(app: Application) -> None:
@@ -433,6 +483,13 @@ async def on_startup(app: Application) -> None:
     sheets_cache.init_db()
     _refresh_poll_cache()
     _refresh_db_cache()
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("admin", "Админ-панель"),
+            BotCommand("start", "Показать кнопку админ-панели"),
+        ])
+    except Exception as e:
+        log.warning(f"Не удалось зарегистрировать список команд: {e}")
 
 
 async def on_shutdown(app: Application) -> None:
@@ -462,7 +519,9 @@ def main() -> None:
     )
 
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("admin", handle_admin))
+    app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     log.info("Запуск polling...")
