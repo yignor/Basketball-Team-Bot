@@ -45,11 +45,12 @@ FILES_TO_EXCLUDE = [
 ]
 
 def run_command(cmd, cwd=None, check=True):
-    """Выполняет команду и возвращает результат"""
+    """Выполняет команду (список аргументов, без shell — имена файлов и
+    сообщения коммитов не должны интерпретироваться оболочкой) и
+    возвращает результат"""
     try:
         result = subprocess.run(
             cmd,
-            shell=True,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -63,18 +64,18 @@ def get_changed_files():
     """Получает список измененных файлов в исходном репозитории"""
     # Сначала проверяем незакоммиченные изменения
     stdout, stderr, code = run_command(
-        "git diff --name-only",
+        ["git", "diff", "--name-only"],
         cwd=SOURCE_REPO,
         check=False
     )
-    
+
     if stdout.strip():
         changed = [f.strip() for f in stdout.split('\n') if f.strip()]
         return changed
-    
+
     # Если нет незакоммиченных, проверяем последний коммит
     stdout, stderr, code = run_command(
-        "git diff --name-only HEAD~1 HEAD",
+        ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
         cwd=SOURCE_REPO,
         check=False
     )
@@ -189,30 +190,30 @@ def main():
     # Делаем коммит в целевом репозитории
     print("\n📝 Создание коммита...")
     stdout, stderr, code = run_command(
-        "git status --short",
+        ["git", "status", "--short"],
         cwd=TARGET_REPO,
         check=False
     )
-    
+
     if not stdout.strip():
         print("ℹ️ Нет изменений для коммита")
         sys.exit(0)
-    
-    # Добавляем файлы
+
+    # Добавляем файлы (-- отделяет пути от опций git)
     for file_path in synced_files:
         run_command(
-            f"git add {file_path}",
+            ["git", "add", "--", str(file_path)],
             cwd=TARGET_REPO,
             check=False
         )
-    
+
     # Создаем коммит
     commit_message = f"Синхронизация из Basketball-Team-Bot: {', '.join([str(f) for f in synced_files[:3]])}"
     if len(synced_files) > 3:
         commit_message += f" и еще {len(synced_files) - 3} файлов"
-    
+
     stdout, stderr, code = run_command(
-        f'git commit -m "{commit_message}"',
+        ["git", "commit", "-m", commit_message],
         cwd=TARGET_REPO,
         check=False
     )

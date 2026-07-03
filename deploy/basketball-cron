@@ -44,5 +44,7 @@ LOG=/var/log/basketball-bot
 # Отчёт посещаемости игр — 1-е число месяца 09:00 МСК (06:00 UTC)
 0 6 1 * * botuser cd $BOT_DIR && $VENV game_report.py >> $LOG/game_report.log 2>&1
 
-# Ротация логов cron (оставляем последние 1000 строк)
-0 3 * * * botuser for f in $LOG/*.log; do tail -1000 "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done
+# Ротация логов cron (оставляем последние 1000 строк; chmod — чтобы
+# пересозданный файл не получил широкие права по umask: логи не должны
+# быть читаемы посторонними пользователями сервера)
+0 3 * * * botuser for f in $LOG/*.log; do tail -1000 "$f" > "$f.tmp" && mv "$f.tmp" "$f" && chmod 640 "$f"; done

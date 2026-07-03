@@ -42,20 +42,67 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
 ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
 
+DAEMON_LOG_PATH = "/var/log/basketball-bot/daemon.log"
+
+
+def _scrub_token_from_old_log() -> None:
+    """Одноразовая зачистка: до фикса httpx-логирования в daemon.log попадали
+    URL Telegram API с токеном. Файл могут читать другие пользователи
+    сервера, поэтому вычищаем токен из уже накопленных строк. Выполняется
+    ДО открытия FileHandler, пока файл никто не дописывает."""
+    if not BOT_TOKEN:
+        return
+    try:
+        with open(DAEMON_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        if BOT_TOKEN in content:
+            with open(DAEMON_LOG_PATH, "w", encoding="utf-8") as f:
+                f.write(content.replace(BOT_TOKEN, "***TOKEN-REDACTED***"))
+    except OSError:
+        pass  # локальный запуск без этого файла — не критично
+
+
+class _RedactTokenFilter(logging.Filter):
+    """Страховка: если токен каким-то путём снова окажется в сообщении
+    лога (новая библиотека, DEBUG-режим), замазываем его до записи."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        if BOT_TOKEN:
+            msg = record.getMessage()
+            if BOT_TOKEN in msg:
+                record.msg = msg.replace(BOT_TOKEN, "***TOKEN-REDACTED***")
+                record.args = ()
+        return True
+
+
+_scrub_token_from_old_log()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("/var/log/basketball-bot/daemon.log", encoding="utf-8"),
+        logging.FileHandler(DAEMON_LOG_PATH, encoding="utf-8"),
     ],
 )
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RedactTokenFilter())
 log = logging.getLogger(__name__)
 
 # httpx/httpcore логируют полный URL запроса на уровне INFO, а URL Telegram API
 # содержит BOT_TOKEN — поднимаем порог, чтобы токен не попадал в логи/журнал.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+# Логи не должны быть читаемы посторонними пользователями сервера (в
+# daemon.log исторически попадал BOT_TOKEN через httpx). chmod при каждом
+# старте, а не разово руками: cron-ротация пересоздаёт файлы через mv и
+# может вернуть широкие права.
+for _log_path, _log_mode in (("/var/log/basketball-bot", 0o750),
+                             ("/var/log/basketball-bot/daemon.log", 0o640)):
+    try:
+        os.chmod(_log_path, _log_mode)
+    except OSError:
+        pass  # локальный запуск без этого каталога / нет прав — не критично
 
 
 # Импортируем логику из collect_votes (переиспользуем без изменений).
