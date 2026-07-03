@@ -24,13 +24,18 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Dict, Optional
+from datetime import timedelta
+from typing import Dict
 
 import sheets_cache
 import script_runner
 import game_peek
-from datetime_utils import get_moscow_time
+from datetime_utils import (
+    get_moscow_time,
+    parse_game_datetime,
+    is_within_game_tracking_window,
+    GAME_TRACKING_WINDOW_HOURS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -64,33 +69,30 @@ class WatchedGame:
 _watched_games: Dict[str, WatchedGame] = {}
 
 
-def _parse_game_datetime(game_date: str, game_time: str) -> Optional[datetime]:
-    try:
-        naive = datetime.strptime(f"{game_date} {game_time}", "%d.%m.%Y %H:%M")
-        return naive.replace(tzinfo=get_moscow_time().tzinfo)
-    except ValueError:
-        return None
-
-
 def refresh_watch_list() -> None:
-    """Подтягивает сегодняшние анонсированные игры без результата из
-    локальной service_records. Записи без game_id (~5% случаев) не
-    добавляются — peek невозможен без ID, их по-прежнему покрывает
+    """Подтягивает анонсированные игры без результата из локальной
+    service_records — сегодняшние и вчерашние (ночные игры могут начаться
+    поздно вечером и идти после полуночи, поэтому одной календарной даты
+    недостаточно; точный отсев — по фактическому времени с начала игры,
+    см. is_within_game_tracking_window). Записи без game_id (~5% случаев)
+    не добавляются — peek невозможен без ID, их по-прежнему покрывает
     неизменный cron (работает по ссылке, не по ID)."""
-    today = get_moscow_time().strftime("%d.%m.%Y")
+    now_dt = get_moscow_time()
+    today = now_dt.strftime("%d.%m.%Y")
+    yesterday = (now_dt - timedelta(days=1)).strftime("%d.%m.%Y")
     try:
         with sheets_cache.get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT unique_key, game_id, game_date, game_time FROM service_records
-                WHERE deleted = 0 AND data_type = 'АНОНС_ИГРА' AND game_date = ?
+                WHERE deleted = 0 AND data_type = 'АНОНС_ИГРА' AND game_date IN (?, ?)
                   AND game_id != ''
                   AND game_id NOT IN (
                       SELECT game_id FROM service_records
                       WHERE deleted = 0 AND data_type = 'РЕЗУЛЬТАТ_ИГРА' AND game_id != ''
                   )
                 """,
-                (today,),
+                (today, yesterday),
             ).fetchall()
     except Exception as e:
         log.warning(f"game_watcher: не удалось обновить список наблюдаемых игр: {e}")
@@ -99,6 +101,8 @@ def refresh_watch_list() -> None:
     for row in rows:
         game_id = row["game_id"]
         if game_id in _watched_games:
+            continue
+        if not is_within_game_tracking_window(row["game_date"], row["game_time"]):
             continue
         watch = WatchedGame(game_id=game_id, game_date=row["game_date"], game_time=row["game_time"])
         watch.next_check_at = time.time()
@@ -110,8 +114,17 @@ async def _advance(watch: WatchedGame) -> None:
     now = time.time()
     moscow_now = get_moscow_time()
 
+    # Абсолютный потолок вне зависимости от фазы: игры бывают ночными,
+    # поэтому дата не годится как граница — отсчитываем от фактического
+    # времени начала игры.
+    if not is_within_game_tracking_window(watch.game_date, watch.game_time):
+        log.info(f"game_watcher: {watch.game_id} — прошло больше {GAME_TRACKING_WINDOW_HOURS}ч "
+                 f"с предполагаемого начала игры, прекращаю слежение")
+        del _watched_games[watch.game_id]
+        return
+
     if watch.phase == "scheduled":
-        game_dt = _parse_game_datetime(watch.game_date, watch.game_time)
+        game_dt = parse_game_datetime(watch.game_date, watch.game_time)
         if game_dt is None:
             log.warning(f"game_watcher: не удалось разобрать время игры {watch.game_id} "
                         f"({watch.game_date} {watch.game_time}), передаю только крону")

@@ -6,8 +6,9 @@ LOG=/var/log/basketball-bot
 
 # ── Ежедневные задачи ────────────────────────────────────────────────────────
 
-# Daily Bot: игры, опросы, анонсы — 09:05 МСК (06:05 UTC)
-5 6 * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
+# Daily Bot: игры, опросы, анонсы — каждые 3 часа (быстрее ловим смену
+# соперника/переприсвоение game_id лигой, а не раз в сутки)
+5 */3 * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
 
 # Опросы по тренировкам (создание/актуализация) — 09:05 МСК (06:05 UTC)
 5 6 * * * botuser cd $BOT_DIR && $VENV training_polls_enhanced.py >> $LOG/training_polls.log 2>&1

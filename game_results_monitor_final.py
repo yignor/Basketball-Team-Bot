@@ -183,18 +183,22 @@ class GameResultsMonitorFinal:
         """Получает результаты игр используя ссылки из сервисного листа"""
         try:
             from enhanced_duplicate_protection import duplicate_protection
-            from datetime_utils import get_moscow_time
+            from datetime_utils import is_within_game_tracking_window
 
-            today = get_moscow_time().strftime('%d.%m.%Y')
             games = []
 
-            # Ищем записи типа АНОНС_ИГРА на сегодня по полю game_date (а не
-            # по дате создания записи — записи могут быть заведены заранее,
-            # например при отслеживании переприсвоенного лигой game_id)
+            # Ищем записи типа АНОНС_ИГРА в пределах окна отслеживания — по
+            # фактическому времени начала игры (is_within_game_tracking_window),
+            # а не по дате создания записи или календарной дате: записи могут
+            # быть заведены заранее (например, при отслеживании
+            # переприсвоенного лигой game_id), а ночные игры — идти после
+            # полуночи, оставаясь при этом "сегодняшними" по смыслу.
             records = duplicate_protection.get_records_by_type("АНОНС_ИГРА")
 
             for rec in records:
-                if (rec.get('game_date') or '').strip() != today or not rec.get('link'):
+                if not rec.get('link'):
+                    continue
+                if not is_within_game_tracking_window(rec.get('game_date'), rec.get('game_time')):
                     continue
 
                 game_link = rec['link']
@@ -627,18 +631,23 @@ class GameResultsMonitorFinal:
         print("\n🔍 Проверка наличия ссылок на игры для сегодня...")
         from enhanced_duplicate_protection import duplicate_protection
         
-        # Ищем ссылки на игры на сегодня по полю game_date (а не по дате
-        # создания записи — см. fetch_game_results_from_links)
+        # Ищем ссылки на игры в пределах окна отслеживания (по фактическому
+        # времени начала игры, а не по календарной дате — ночные игры могут
+        # начаться поздно вечером и идти после полуночи, см.
+        # fetch_game_results_from_links/is_within_game_tracking_window)
         today_games_found = False
         try:
-            from datetime_utils import get_moscow_time
+            from datetime_utils import get_moscow_time, is_within_game_tracking_window
             today = get_moscow_time().strftime('%d.%m.%Y')
 
             for rec in duplicate_protection.get_records_by_type("АНОНС_ИГРА"):
-                if (rec.get('game_date') or '').strip() == today and rec.get('link'):
-                    today_games_found = True
-                    print(f"✅ Найдена игра на сегодня: {rec.get('unique_key')} (ссылка: {rec.get('link')})")
-                    break
+                if not rec.get('link'):
+                    continue
+                if not is_within_game_tracking_window(rec.get('game_date'), rec.get('game_time')):
+                    continue
+                today_games_found = True
+                print(f"✅ Найдена игра на сегодня: {rec.get('unique_key')} (ссылка: {rec.get('link')})")
+                break
 
             if not today_games_found:
                 print(f"❌ Игры на сегодня ({today}) не найдены в сервисном листе")

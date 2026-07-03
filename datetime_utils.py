@@ -134,6 +134,32 @@ def get_current_time_info():
         'formatted_datetime': now.strftime('%Y-%m-%d %H:%M:%S')
     }
 
+GAME_TRACKING_WINDOW_HOURS = 7
+
+
+def parse_game_datetime(game_date: str, game_time: str):
+    """Разбирает дату+время игры ('DD.MM.YYYY', 'HH:MM') в московское
+    datetime. None, если не удалось распарсить."""
+    try:
+        naive = datetime.datetime.strptime(f"{game_date} {game_time}", "%d.%m.%Y %H:%M")
+        return naive.replace(tzinfo=get_moscow_time().tzinfo)
+    except (ValueError, TypeError):
+        return None
+
+
+def is_within_game_tracking_window(game_date: str, game_time: str, hours: float = GAME_TRACKING_WINDOW_HOURS) -> bool:
+    """True, если игра ещё не началась либо началась не более `hours` часов
+    назад. Используется вместо сравнения календарных дат при решении,
+    продолжать ли следить за игрой/проверять результат — ночные игры
+    могут начинаться поздно вечером и идти уже после полуночи, так что
+    сравнение "game_date == сегодня" некорректно отсекает их слишком рано."""
+    game_dt = parse_game_datetime(game_date, game_time)
+    if game_dt is None:
+        return True
+    elapsed_seconds = (get_moscow_time() - game_dt).total_seconds()
+    return elapsed_seconds <= hours * 3600
+
+
 def log_current_time():
     """
     Логирует текущее время для отладки
