@@ -14,6 +14,7 @@
 при переезде на другой сервер файл базы можно не переносить вообще.
 """
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -73,6 +74,28 @@ CREATE TABLE IF NOT EXISTS attendance (
     PRIMARY KEY (tg_poll_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_attendance_training_date ON attendance(training_date);
+
+-- Голоса за игровые опросы ("Готов"/"Нет"/"Тренер") — локально-первична
+-- с самого начала (в отличие от attendance, появившейся ещё до перехода
+-- на локальную БД), поэтому без config_poll_id/row_index — они там были
+-- нужны только для сопоставления со старым Sheets-ориентированным кодом.
+CREATE TABLE IF NOT EXISTS game_votes (
+    tg_poll_id    TEXT NOT NULL,
+    user_id       TEXT NOT NULL,
+    username      TEXT NOT NULL DEFAULT '',
+    first_name    TEXT NOT NULL DEFAULT '',
+    last_name     TEXT NOT NULL DEFAULT '',
+    vote_text     TEXT NOT NULL DEFAULT '',
+    vote_type     TEXT NOT NULL DEFAULT '',
+    game_id       TEXT NOT NULL DEFAULT '',
+    game_date     TEXT NOT NULL DEFAULT '',
+    updated_at    TEXT NOT NULL DEFAULT '',
+    revote_count  INTEGER NOT NULL DEFAULT 0,
+    synced_at     TEXT NOT NULL,
+    dirty         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tg_poll_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_game_votes_game_date ON game_votes(game_date);
 
 CREATE TABLE IF NOT EXISTS service_log (
     row_index         INTEGER PRIMARY KEY,
@@ -885,6 +908,146 @@ def push_attendance(spreadsheet, batch_size: int = 500) -> Dict[str, Any]:
         with _connection() as conn:
             conn.executemany(
                 "UPDATE attendance SET dirty = 0 WHERE tg_poll_id = ? AND user_id = ?",
+                pushed_keys,
+            )
+            conn.commit()
+
+    return {"pushed": len(pushed_keys), "inserted": inserted, "updated": updated}
+
+
+# ── Реестр опросов (тренировки + игры) — читает то же место, куда пишет ────
+# add_record() для TRAINING_POLL_REG/GAME_POLL_REG. Раньше тренировочный
+# реестр читался напрямую из живого Sheets (collect_votes.load_training_polls),
+# а писался уже в локальную БД (через add_record, когда включён
+# SERVICE_RECORDS_LOCAL_PRIMARY) — из-за этого новый опрос мог быть не
+# виден демону до следующего push (до 6 часов), и голоса за него терялись
+# бы. Эта функция читает то же самое service_records, куда идёт запись —
+# без окна рассинхронизации.
+
+def load_poll_registrations_local(data_type: str) -> Dict[str, Dict[str, Any]]:
+    """{tg_poll_id: {options, training_date, config_poll_id, game_id}} —
+    game_id пуст для TRAINING_POLL_REG, training_date хранит и game_date
+    для GAME_POLL_REG (то же поле, разный смысл по контексту вызова)."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM service_records WHERE data_type = ? AND deleted = 0 ORDER BY id",
+            (data_type.upper(),),
+        ).fetchall()
+    registry: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        try:
+            meta = json.loads(r["additional_data"]) if r["additional_data"] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        tg_id = str(meta.get("tg_poll_id", ""))
+        if not tg_id:
+            continue
+        registry[tg_id] = {
+            "options": meta.get("options", []),
+            "training_date": r["game_date"],
+            "config_poll_id": r["alt_name"],
+            "game_id": meta.get("game_id", ""),
+        }
+    return registry
+
+
+# ── Голоса за игровые опросы — локально-первичные (пишет только демон) ─────
+
+def upsert_game_vote_local(
+    tg_poll_id: str, user_id: str, username: str, first_name: str, last_name: str,
+    vote_text: str, vote_type: str, game_id: str, game_date: str,
+) -> str:
+    """Атомарный upsert по (tg_poll_id, user_id) — тот же контракт, что и
+    upsert_vote_local(), для голосов по игровым опросам."""
+    init_db()
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    with _connection() as conn:
+        existing = conn.execute(
+            "SELECT revote_count FROM game_votes WHERE tg_poll_id = ? AND user_id = ?",
+            (tg_poll_id, user_id),
+        ).fetchone()
+
+        if vote_type == "REMOVED" and not existing:
+            return "skipped"
+
+        revotes = (existing["revote_count"] + 1) if existing else 0
+        conn.execute(
+            """
+            INSERT INTO game_votes
+            (tg_poll_id, user_id, username, first_name, last_name, vote_text, vote_type,
+             game_id, game_date, updated_at, revote_count, synced_at, dirty)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(tg_poll_id, user_id) DO UPDATE SET
+                username=excluded.username, first_name=excluded.first_name, last_name=excluded.last_name,
+                vote_text=excluded.vote_text, vote_type=excluded.vote_type,
+                game_id=excluded.game_id, game_date=excluded.game_date,
+                updated_at=excluded.updated_at, revote_count=excluded.revote_count, dirty=1
+            """,
+            (tg_poll_id, user_id, username, first_name, last_name, vote_text, vote_type,
+             game_id, game_date, now, revotes, _now_iso()),
+        )
+        conn.commit()
+    return "updated" if existing else "new"
+
+
+GAME_ATTEND_SHEET_NAME = "Посещаемость игр"
+GAME_ATTEND_HEADER = ["TG_POLL_ID", "USER_ID", "USERNAME", "ИМЯ", "ФАМИЛИЯ",
+                       "ОТВЕТ", "ТИП", "GAME_ID", "ДАТА_ИГРЫ", "ОБНОВЛЕНО", "ПЕРЕГОЛОСОВАНИЙ"]
+
+
+def push_game_votes(spreadsheet, batch_size: int = 500) -> Dict[str, Any]:
+    """Выгружает накопленные dirty=1 голоса за игры в лист 'Посещаемость
+    игр' (создаётся при необходимости) — по образцу push_attendance()."""
+    init_db()
+    with _connection() as conn:
+        dirty_rows = conn.execute(
+            "SELECT * FROM game_votes WHERE dirty = 1 LIMIT ?", (batch_size,)
+        ).fetchall()
+    if not dirty_rows:
+        return {"pushed": 0, "inserted": 0, "updated": 0}
+
+    ws = _get_or_create_ws(spreadsheet, GAME_ATTEND_SHEET_NAME, GAME_ATTEND_HEADER)
+    all_values = ws.get_all_values()
+    index: Dict[Tuple[str, str], int] = {}
+    for i, row in enumerate(all_values[1:], start=2):
+        if len(row) >= 2:
+            index[(row[0], row[1])] = i
+
+    updates: List[Tuple[int, List[str]]] = []
+    to_append: List[List[str]] = []
+    pushed_keys: List[Tuple[str, str]] = []
+
+    for r in dirty_rows:
+        key = (r["tg_poll_id"], r["user_id"])
+        values = [r["tg_poll_id"], r["user_id"], r["username"], r["first_name"], r["last_name"],
+                  r["vote_text"], r["vote_type"], r["game_id"], r["game_date"],
+                  r["updated_at"], str(r["revote_count"])]
+        if key in index:
+            updates.append((index[key], values))
+        else:
+            to_append.append(values)
+        pushed_keys.append(key)
+
+    updated = inserted = 0
+    for row_num, values in updates:
+        try:
+            ws.update(f"A{row_num}:K{row_num}", [values])
+            updated += 1
+        except Exception:
+            pushed_keys = [k for k in pushed_keys if k != (values[0], values[1])]
+    if to_append:
+        try:
+            ws.append_rows(to_append, value_input_option="USER_ENTERED")
+            inserted += len(to_append)
+        except Exception:
+            append_keys = {(v[0], v[1]) for v in to_append}
+            pushed_keys = [k for k in pushed_keys if k not in append_keys]
+
+    if pushed_keys:
+        with _connection() as conn:
+            conn.executemany(
+                "UPDATE game_votes SET dirty = 0 WHERE tg_poll_id = ? AND user_id = ?",
                 pushed_keys,
             )
             conn.commit()

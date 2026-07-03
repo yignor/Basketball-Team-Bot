@@ -21,65 +21,30 @@
 
 import argparse
 import json
-import os
-from calendar import monthrange
 from collections import defaultdict
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import date, datetime
+from typing import Dict, List, Optional, Tuple
 
 import gspread
-from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 
-load_dotenv()
-
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
-SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+from report_common import (
+    MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
+    init_sheets as _init_sheets,
+    get_or_create as _get_or_create,
+    load_players,
+    resolve_player,
+    iso_to_date,
+    week_range,
+    parse_period_args,
+    apply_formatting,
+)
 
 ATTEND_SHEET  = "Посещаемость"
 REPORT_SHEET  = "Тренировки"
 PLAYERS_SHEET = "Игроки"
 
-MONTHS_RU = {
-    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
-    5: "Май",    6: "Июнь",    7: "Июль", 8: "Август",
-    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
-}
-MONTHS_RU_GEN = {
-    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
-    5: "мая",    6: "июня",    7: "июля",  8: "августа",
-    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
-}
-DAYS_RU = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
-DAYS_FULL_RU = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
-
-STATUS_EMOJI = {
-    "PRESENT": "✅",
-    "ABSENT":  "❌",
-    "COACH":   "🎽",
-    "REMOVED": "↩️",
-}
-
 # ─────────────────────────── Google Sheets ───────────────────────────────────
-
-def _init_sheets():
-    if not GOOGLE_CREDS_JSON or not SPREADSHEET_ID:
-        raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS или SPREADSHEET_ID не заданы")
-    creds_data = json.loads(GOOGLE_CREDS_JSON)
-    creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    return gc.open_by_key(SPREADSHEET_ID)
-
-
-def _get_or_create(spreadsheet, title: str, rows=2000, cols=12):
-    try:
-        return spreadsheet.worksheet(title)
-    except gspread.WorksheetNotFound:
-        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+# _init_sheets/_get_or_create — см. report_common.py (общие для всех отчётов)
 
 
 # ─────────────────────────── Data loading ────────────────────────────────────
@@ -113,56 +78,6 @@ def load_votes(spreadsheet) -> List[Dict]:
             "revotes":       int(row[10]) if len(row) > 10 and row[10].isdigit() else 0,
         })
     return votes
-
-
-def load_players(spreadsheet) -> Dict[str, Dict]:
-    """Возвращает {username_lower: {surname, name, telegram_id}} и {telegram_id: ...}."""
-    try:
-        ws = spreadsheet.worksheet(PLAYERS_SHEET)
-    except gspread.WorksheetNotFound:
-        return {}
-
-    rows = ws.get_all_values()
-    if len(rows) < 2:
-        return {}
-
-    by_uname: Dict[str, Dict] = {}
-    by_tid:   Dict[str, Dict] = {}
-
-    for row in rows[1:]:
-        if len(row) < 3 or not row[1]:  # need at least name
-            continue
-        p = {
-            "surname":     row[0] if len(row) > 0 else "",
-            "name":        row[1] if len(row) > 1 else "",
-            "username":    (row[2] if len(row) > 2 else "").lstrip("@").lower(),
-            "telegram_id": row[3] if len(row) > 3 else "",
-            "status":      row[5] if len(row) > 5 else "",
-        }
-        if p["username"]:
-            by_uname[p["username"]] = p
-        if p["telegram_id"]:
-            by_tid[p["telegram_id"]] = p
-
-    return {**by_uname, **{f"id:{k}": v for k, v in by_tid.items()}}
-
-
-def resolve_player(vote: Dict, players: Dict[str, Dict]) -> Tuple[str, str]:
-    """Возвращает (Фамилия Имя, ник-для-отображения)."""
-    uname = vote["username"].lower()
-    tid   = f"id:{vote['user_id']}"
-
-    p = players.get(uname) or players.get(tid)
-    if p:
-        return f"{p['surname']} {p['name']}".strip(), vote["username"] or vote["first_name"]
-
-    # Fallback: Telegram имя
-    display = (
-        f"{vote['first_name']} {vote['last_name']}".strip()
-        or vote["username"]
-        or vote["user_id"]
-    )
-    return display, vote["username"] or vote["first_name"]
 
 
 def load_poll_registry(spreadsheet) -> Dict[str, Dict]:
@@ -201,17 +116,7 @@ def group_by_training(votes: List[Dict]) -> Dict[str, List[Dict]]:
     return groups
 
 
-def iso_to_date(s: str) -> Optional[date]:
-    try:
-        return date.fromisoformat(s)
-    except (ValueError, AttributeError):
-        return None
-
-
-def week_range(d: date) -> Tuple[date, date]:
-    """Возвращает (понедельник, воскресенье) недели для даты d."""
-    start = d - timedelta(days=d.weekday())
-    return start, start + timedelta(days=6)
+# iso_to_date/week_range — см. report_common.py (общие для всех отчётов)
 
 
 # ─────────────────────────── Sheet building ──────────────────────────────────
@@ -446,48 +351,7 @@ def build_report(
     return all_rows
 
 
-# ─────────────────────────── Sheet formatting ────────────────────────────────
-
-def apply_formatting(ws, all_rows: List[List[str]]) -> None:
-    """Применяет жирный шрифт к заголовочным строкам."""
-    bold_patterns = [
-        "═══", "────", "🏀 Тренировка", "ПОСЕЩАЕМОСТЬ",
-        "СВОДКИ", "ДЕТАЛЬНЫЕ", "Неделя:", "Сводка за",
-        "Фамилия / Имя",
-    ]
-    requests = []
-    for i, row in enumerate(all_rows):
-        text = row[0] if row else ""
-        is_bold = any(p in text for p in bold_patterns)
-        if is_bold:
-            requests.append({
-                "repeatCell": {
-                    "range": {
-                        "sheetId": ws.id,
-                        "startRowIndex": i,
-                        "endRowIndex":   i + 1,
-                        "startColumnIndex": 0,
-                        "endColumnIndex":   8,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "textFormat": {"bold": True},
-                            "backgroundColor": {
-                                "red":   0.23 if "═══" in text else (0.17 if "🏀" in text else 0.95),
-                                "green": 0.27 if "═══" in text else (0.23 if "🏀" in text else 0.95),
-                                "blue":  0.40 if "═══" in text else (0.30 if "🏀" in text else 0.95),
-                            },
-                        }
-                    },
-                    "fields": "userEnteredFormat(textFormat,backgroundColor)",
-                }
-            })
-
-    if requests:
-        try:
-            ws.spreadsheet.batch_update({"requests": requests})
-        except Exception as e:
-            print(f"   ⚠️  Форматирование: {e}")
+# apply_formatting — см. report_common.py (общие паттерны + "🏀 Тренировка" передаётся отдельно)
 
 
 # ─────────────────────────── Entry point ─────────────────────────────────────
@@ -556,7 +420,7 @@ def main(
     except Exception:
         pass
 
-    apply_formatting(report_ws, all_rows)
+    apply_formatting(report_ws, all_rows, extra_bold_patterns=["🏀 Тренировка"])
     print(f"\n✅  Отчёт записан: {len(all_rows)} строк → лист '{REPORT_SHEET}'")
 
 
@@ -567,29 +431,5 @@ if __name__ == "__main__":
     ap.add_argument("--week",  type=str, nargs="?", const="current", default=None,
                      help="Текущая неделя (без значения) или конкретная: YYYY-WW")
     args = ap.parse_args()
-
-    months: Optional[List[Tuple[int, int]]] = None
-    week: Optional[Tuple[date, date]] = None
-
-    if args.week:
-        if args.week == "current":
-            week = week_range(date.today())
-        else:
-            try:
-                y, w = map(int, args.week.split("-"))
-                week = week_range(date.fromisocalendar(y, w, 1))
-            except ValueError:
-                print("❌ Формат --week: YYYY-WW (например 2026-27)")
-                exit(1)
-    elif args.month:
-        try:
-            y, m = map(int, args.month.split("-"))
-            months = [(y, m)]
-        except ValueError:
-            print("❌ Формат --month: YYYY-MM (например 2026-06)")
-            exit(1)
-    elif not args.all:
-        today = date.today()
-        months = [(today.year, today.month)]
-
+    months, week = parse_period_args(args)
     main(target_months=months, target_week=week)

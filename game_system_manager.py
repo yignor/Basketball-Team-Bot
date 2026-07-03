@@ -1640,7 +1640,40 @@ class GameSystemManager:
             
             # Используем первое сообщение для совместимости
             poll_message = poll_messages[0] if poll_messages else None
-            
+
+            # Регистрируем опрос(ы) для сбора голосов (game_watcher/bot_daemon).
+            # Опрос уходит в несколько чатов — на каждое сообщение свой
+            # tg_poll_id, поэтому регистрация тоже на каждое сообщение, ключ
+            # включает message_id. game_id НЕ передаём в add_record() отдельным
+            # параметром — есть частичный уникальный индекс (data_type, game_id),
+            # вторая запись для того же game_id (второй чат) упадёт с
+            # IntegrityError; game_id кладём только внутрь additional_data.
+            try:
+                game_date_iso = datetime.datetime.strptime(game_info['date'], '%d.%m.%Y').strftime('%Y-%m-%d')
+            except (ValueError, KeyError):
+                game_date_iso = game_info.get('date', '')
+            game_id_for_reg = game_info.get('game_id')
+            for pm in poll_messages:
+                tg_poll_id = pm.poll.id if pm.poll else None
+                if not tg_poll_id:
+                    continue
+                duplicate_protection.add_record(
+                    "GAME_POLL_REG",
+                    f"GPOLL_{game_id_for_reg}_{pm.message_id}",
+                    status="АКТИВЕН",
+                    additional_data=json.dumps({
+                        "tg_poll_id": tg_poll_id,
+                        "options": options,
+                        "chat_id": pm.chat.id if pm.chat else None,
+                        "message_id": pm.message_id,
+                        "game_id": game_id_for_reg,
+                    }, ensure_ascii=False),
+                    alt_name=str(game_id_for_reg) if game_id_for_reg is not None else "",
+                    game_date=game_date_iso,
+                )
+            if poll_messages:
+                print(f"   📋 Зарегистрировано опросов для сбора голосов: {len(poll_messages)}")
+
             await self._send_calendar_event(bot, game_info, team_label, opponent, form_color)
             
             # Добавляем запись в сервисный лист для защиты от дублирования

@@ -36,6 +36,14 @@ SCOPES = [
 VOTE_COACH_WORDS  = {"тренер", "coach"}
 VOTE_ABSENT_WORDS = {"нет", "не приду", "no", "не могу", "пропущу"}
 
+# Отдельный набор слов для игровых опросов ("✅ Готов"/"❌ Нет"/"👨‍🏫 Тренер") —
+# вокабула результата (PRESENT/ABSENT/COACH/REMOVED) та же, что и у
+# тренировок, чтобы код отчётов (game_report.py) был копией training_report.py
+# без перевода терминов, но слова-триггеры не связаны с формулировками
+# тренировочного опроса.
+VOTE_GAME_COACH_WORDS  = {"тренер", "coach"}
+VOTE_GAME_ABSENT_WORDS = {"нет", "не могу", "не приду", "no"}
+
 ATTEND_SHEET  = "Посещаемость"
 ATTEND_HEADER = [
     "TG_POLL_ID", "USER_ID", "USERNAME", "ИМЯ", "ФАМИЛИЯ",
@@ -148,6 +156,19 @@ def classify_vote(option_text: str) -> str:
     if any(w in low for w in VOTE_COACH_WORDS):
         return "COACH"
     if any(w in low for w in VOTE_ABSENT_WORDS):
+        return "ABSENT"
+    return "PRESENT"
+
+
+def classify_game_vote(option_text: str) -> str:
+    """PRESENT | ABSENT | COACH | REMOVED — для опций "✅ Готов"/"❌ Нет"/
+    "👨‍🏫 Тренер" игровых опросов."""
+    if not option_text:
+        return "REMOVED"
+    low = option_text.strip().lower()
+    if any(w in low for w in VOTE_GAME_COACH_WORDS):
+        return "COACH"
+    if any(w in low for w in VOTE_GAME_ABSENT_WORDS):
         return "ABSENT"
     return "PRESENT"
 

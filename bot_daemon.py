@@ -60,16 +60,11 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Импортируем логику из collect_votes (переиспользуем без изменений).
 # upsert_vote (прямая запись в Sheets) больше не используется здесь — голоса
-# локально-первичные, см. sheets_cache.upsert_vote_local.
+# локально-первичные, см. sheets_cache.upsert_vote_local/upsert_game_vote_local.
 from collect_votes import (
     _init_sheets,
-    load_training_polls,
     classify_vote,
-    _get_service_ws,
-    _get_or_create_sheet,
-    _ensure_attend_header,
-    ATTEND_SHEET,
-    ATTEND_HEADER,
+    classify_game_vote,
 )
 import admin_panel
 import sheets_cache
@@ -77,12 +72,11 @@ import script_runner
 import game_watcher
 from enhanced_duplicate_protection import duplicate_protection
 
-# Кэш зарегистрированных опросов (обновляем раз в 5 минут)
+# Кэш зарегистрированных опросов (обновляем раз в 5 минут) — тренировки и игры
 _poll_cache: dict = {}
+_game_poll_cache: dict = {}
 _poll_cache_time: float = 0.0
 _spreadsheet = None
-_attend_ws   = None
-_service_ws  = None
 
 # Локальный SQLite-кэш листов Sheets для /admin (обновляем раз в 5 минут)
 _db_sync_time: float = 0.0
@@ -95,27 +89,21 @@ def _get_spreadsheet():
     return _spreadsheet
 
 
-def _get_worksheets():
-    global _attend_ws, _service_ws
-    sp = _get_spreadsheet()
-    if _service_ws is None:
-        _service_ws = _get_service_ws(sp)
-    if _attend_ws is None:
-        _attend_ws = _get_or_create_sheet(sp, ATTEND_SHEET, rows=2000, cols=len(ATTEND_HEADER))
-        _ensure_attend_header(_attend_ws)
-    return _service_ws, _attend_ws
-
-
 def _refresh_poll_cache() -> None:
-    global _poll_cache, _poll_cache_time
+    """Читает реестр опросов (TRAINING_POLL_REG/GAME_POLL_REG) напрямую из
+    локальной service_records — то же место, куда пишет add_record(), без
+    задержки push'а в Sheets (раньше тренировочный реестр читался из живого
+    Sheets, что могло на несколько часов "терять из виду" только что
+    зарегистрированный опрос)."""
+    global _poll_cache, _game_poll_cache, _poll_cache_time
     now = time.time()
     if now - _poll_cache_time < 300:  # 5 минут
         return
     try:
-        svc_ws, _ = _get_worksheets()
-        _poll_cache = load_training_polls(svc_ws)
+        _poll_cache = sheets_cache.load_poll_registrations_local("TRAINING_POLL_REG")
+        _game_poll_cache = sheets_cache.load_poll_registrations_local("GAME_POLL_REG")
         _poll_cache_time = now
-        log.info(f"Кэш опросов обновлён: {len(_poll_cache)} тренировочных опросов")
+        log.info(f"Кэш опросов обновлён: {len(_poll_cache)} тренировочных, {len(_game_poll_cache)} игровых")
     except Exception as e:
         log.warning(f"Не удалось обновить кэш опросов: {e}")
 
@@ -137,9 +125,9 @@ _last_push_time: float = 0.0
 
 
 def _push_local_changes() -> dict:
-    """Выгружает накопленные локальные изменения (service_records +
-    attendance, оба dirty=1) в Sheets. Используется и периодическим
-    циклом демона, и кнопкой '🔄 Синхронизация' в /admin."""
+    """Выгружает накопленные локальные изменения (service_records,
+    attendance, game_votes — все dirty=1) в Sheets. Используется и
+    периодическим циклом демона, и кнопкой '🔄 Синхронизация' в /admin."""
     sp = _get_spreadsheet()
     result = {}
     try:
@@ -152,6 +140,11 @@ def _push_local_changes() -> dict:
     except Exception as e:
         log.warning(f"Не удалось выгрузить attendance: {e}")
         result["attendance"] = {"error": str(e)}
+    try:
+        result["game_votes"] = sheets_cache.push_game_votes(sp)
+    except Exception as e:
+        log.warning(f"Не удалось выгрузить game_votes: {e}")
+        result["game_votes"] = {"error": str(e)}
     return result
 
 
@@ -174,13 +167,13 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     _periodic_push_local_changes()
 
     tg_poll_id = str(poll_answer.poll_id)
-    if tg_poll_id not in _poll_cache:
-        return  # не тренировочный опрос
+    is_training = tg_poll_id in _poll_cache
+    is_game = tg_poll_id in _game_poll_cache
+    if not is_training and not is_game:
+        return  # ни тренировочный, ни игровой опрос
 
-    poll_info      = _poll_cache[tg_poll_id]
-    options_list   = poll_info["options"]
-    training_date  = poll_info["training_date"]
-    config_poll_id = poll_info["config_poll_id"]
+    poll_info = _poll_cache[tg_poll_id] if is_training else _game_poll_cache[tg_poll_id]
+    options_list = poll_info["options"]
 
     user       = poll_answer.user
     user_id    = str(user.id)
@@ -190,19 +183,27 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not poll_answer.option_ids:
         vote_text = ""
-        vote_type = "REMOVED"
+        chosen_first = ""
     else:
         chosen = [options_list[i] for i in poll_answer.option_ids if i < len(options_list)]
         vote_text = " + ".join(chosen)
-        vote_type = classify_vote(chosen[0] if chosen else "")
+        chosen_first = chosen[0] if chosen else ""
 
     try:
-        # Голоса — локально-первичные (пишем в SQLite сразу, выгрузка в
-        # Sheets отдельно, периодически/по кнопке — см. push_attendance).
-        sheets_cache.upsert_vote_local(
-            tg_poll_id, user_id, username, first_name, last_name,
-            vote_text, vote_type, training_date, config_poll_id,
-        )
+        if is_training:
+            vote_type = classify_vote(chosen_first) if vote_text else "REMOVED"
+            # Голоса — локально-первичные (пишем в SQLite сразу, выгрузка в
+            # Sheets отдельно, периодически/по кнопке — см. push_attendance).
+            sheets_cache.upsert_vote_local(
+                tg_poll_id, user_id, username, first_name, last_name,
+                vote_text, vote_type, poll_info["training_date"], poll_info["config_poll_id"],
+            )
+        else:
+            vote_type = classify_game_vote(chosen_first) if vote_text else "REMOVED"
+            sheets_cache.upsert_game_vote_local(
+                tg_poll_id, user_id, username, first_name, last_name,
+                vote_text, vote_type, poll_info["game_id"], poll_info["training_date"],
+            )
     except Exception as e:
         log.error(f"Ошибка при сохранении голоса: {e}")
         sheets_cache.report_error("handle_poll_answer", str(e), _get_spreadsheet())
@@ -413,6 +414,7 @@ def _render_errors_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
 def _reports_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏋️ Тренировки", callback_data="admin:menu:reports:training")],
+        [InlineKeyboardButton("🏀 Игры", callback_data="admin:menu:reports:games")],
         _back_button(),
     ])
 
@@ -421,6 +423,14 @@ def _reports_training_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("За неделю", callback_data="admin:report:training:week")],
         [InlineKeyboardButton("За месяц", callback_data="admin:report:training:month")],
+        _back_button("admin:menu:reports"),
+    ])
+
+
+def _reports_games_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("За неделю", callback_data="admin:report:games:week")],
+        [InlineKeyboardButton("За месяц", callback_data="admin:report:games:month")],
         _back_button("admin:menu:reports"),
     ])
 
@@ -488,22 +498,30 @@ async def _handle_launch_action(query, action: str, force: bool) -> None:
     await query.edit_message_text(text, reply_markup=_launch_menu_markup())
 
 
+REPORT_SCRIPTS = {
+    "training": ("training_report.py", "Тренировки", _reports_training_menu_markup),
+    "games": ("game_report.py", "Игры", _reports_games_menu_markup),
+}
+
+
 async def _handle_report_action(query, kind: str, period: str) -> None:
-    if kind != "training":
+    cfg = REPORT_SCRIPTS.get(kind)
+    if not cfg:
         return
-    await query.edit_message_text(f"⏳ Формирую отчёт (тренировки, {period})...")
+    script, sheet_label, menu_fn = cfg
+    await query.edit_message_text(f"⏳ Формирую отчёт ({sheet_label.lower()}, {period})...")
     args = ["--week"] if period == "week" else ["--month", datetime.now().strftime("%Y-%m")]
     try:
-        code, _stdout, stderr = await script_runner.run_script("training_report.py", args)
+        code, _stdout, stderr = await script_runner.run_script(script, args)
     except Exception as e:
         code, stderr = 1, str(e)
     if code == 0:
-        text = "✅ Отчёт обновлён в таблице (лист «Тренировки»)."
+        text = f"✅ Отчёт обновлён в таблице (лист «{sheet_label}»)."
     else:
         text = f"❌ Не удалось сформировать отчёт: {stderr.strip().splitlines()[-1] if stderr.strip() else 'см. логи демона'}"
-        log.error(f"training_report.py завершился с ошибкой (код {code}): {stderr[-2000:]}")
-        sheets_cache.report_error("training_report.py", stderr[-2000:] or f"exit code {code}", _get_spreadsheet())
-    await query.edit_message_text(text, reply_markup=_reports_training_menu_markup())
+        log.error(f"{script} завершился с ошибкой (код {code}): {stderr[-2000:]}")
+        sheets_cache.report_error(script, stderr[-2000:] or f"exit code {code}", _get_spreadsheet())
+    await query.edit_message_text(text, reply_markup=menu_fn())
 
 
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -532,8 +550,11 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             elif screen == "log":
                 await query.edit_message_text("📋 Лог действий", reply_markup=_log_menu_markup())
             elif screen == "reports":
-                if len(parts) > 3 and parts[3] == "training":
+                sub = parts[3] if len(parts) > 3 else None
+                if sub == "training":
                     await query.edit_message_text("📊 Отчёты → Тренировки", reply_markup=_reports_training_menu_markup())
+                elif sub == "games":
+                    await query.edit_message_text("📊 Отчёты → Игры", reply_markup=_reports_games_menu_markup())
                 else:
                     await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
 
@@ -579,13 +600,16 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 pull_result = {"error": str(e)}
             sr = push_result.get("service_records", {})
             at = push_result.get("attendance", {})
+            gv = push_result.get("game_votes", {})
             lines = [
                 "✅ Синхронизация завершена",
                 "",
                 f"Выгружено в Sheets: события {sr.get('pushed', 0)} "
                 f"(добавлено {sr.get('inserted', 0)}, обновлено {sr.get('updated', 0)}, "
-                f"удалено {sr.get('deleted', 0)}), голоса {at.get('pushed', 0)} "
-                f"(добавлено {at.get('inserted', 0)}, обновлено {at.get('updated', 0)})",
+                f"удалено {sr.get('deleted', 0)}), голоса тренировок {at.get('pushed', 0)} "
+                f"(добавлено {at.get('inserted', 0)}, обновлено {at.get('updated', 0)}), "
+                f"голоса игр {gv.get('pushed', 0)} "
+                f"(добавлено {gv.get('inserted', 0)}, обновлено {gv.get('updated', 0)})",
                 f"Забрано из Sheets: {pull_result}",
             ]
             await query.edit_message_text("\n".join(lines), reply_markup=_main_menu_markup())

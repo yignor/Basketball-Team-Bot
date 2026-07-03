@@ -134,6 +134,7 @@ async def _advance(watch: WatchedGame) -> None:
         if peek.max_period >= 4 or peek.game_status == 1:
             watch.phase = "final_period"
             watch.phase_entered_at = now
+            watch.last_result_trigger_at = now
             watch.next_check_at = now
             log.info(f"game_watcher: {watch.game_id} -> final_period "
                      f"(период={peek.max_period}, статус={peek.game_status})")
