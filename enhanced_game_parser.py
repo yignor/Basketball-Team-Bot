@@ -472,6 +472,26 @@ class EnhancedGameParser:
                     game_info['our_score'] = our_team_entry['score']
                     game_info['opponent_score'] = opponent_entry['score']
 
+                    # Четверти приходят в порядке команда1:команда2
+                    # (хозяева:гости) — и как dict из OnlinePeriods, и как
+                    # строки "A:B" из _compute_quarter_scores. Заголовок же
+                    # сообщения собирается в порядке наши:соперник. Если
+                    # наши — команда 2 (играем в гостях), разворачиваем
+                    # четверти, чтобы обе строки читались одинаково.
+                    if our_team_entry is game_info['teams'][1]:
+                        flipped_quarters: List[Any] = []
+                        for quarter in game_info['quarters']:
+                            if isinstance(quarter, dict):
+                                quarter['score1'], quarter['score2'] = quarter.get('score2'), quarter.get('score1')
+                                quarter['total'] = f"{quarter['score1']}:{quarter['score2']}"
+                                flipped_quarters.append(quarter)
+                            elif isinstance(quarter, str) and re.fullmatch(r'\d+:\d+', quarter.strip()):
+                                left, right = quarter.strip().split(':')
+                                flipped_quarters.append(f"{right}:{left}")
+                            else:
+                                flipped_quarters.append(quarter)
+                        game_info['quarters'] = flipped_quarters
+
                     team_metadata = {}
                     for config_source in potential_configs:
                         metadata_source = config_source.get('metadata') if isinstance(config_source.get('metadata'), dict) else {}
