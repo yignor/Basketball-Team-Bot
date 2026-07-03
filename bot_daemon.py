@@ -336,12 +336,22 @@ LAUNCH_ACTIONS = {
         "args": ["--only", "announcements"],
         "data_types": ["АНОНС_ИГРА"],
     },
+    "slpro": {
+        "label": "🏀 SLPRO (Farm)",
+        "script": "run_slpro_monitor.py",
+        "args": [],
+        "data_types": ["ОПРОС_ИГРА_SLPRO", "АНОНС_ИГРА_SLPRO", "РЕЗУЛЬТАТ_ИГРА_SLPRO"],
+    },
 }
-DAILY_DATA_TYPES = ["ДЕНЬ_РОЖДЕНИЯ", "ОПРОС_ГОЛОСОВАНИЕ", "ОПРОС_ИГРА", "АНОНС_ИГРА"]
+DAILY_DATA_TYPES = [
+    "ДЕНЬ_РОЖДЕНИЯ", "ОПРОС_ГОЛОСОВАНИЕ", "ОПРОС_ИГРА", "АНОНС_ИГРА",
+    "ОПРОС_ИГРА_SLPRO", "АНОНС_ИГРА_SLPRO", "РЕЗУЛЬТАТ_ИГРА_SLPRO",
+]
 DAILY_SCRIPTS = [
     ("run_birthday_notifications.py", []),
     ("training_polls_enhanced.py", []),
     ("run_game_system.py", []),
+    ("run_slpro_monitor.py", []),
 ]
 
 
