@@ -1111,6 +1111,89 @@ class GameSystemManager:
             print(f"⚠️ Ошибка проверки сервисного листа по дате/времени/противнику: {e}")
             return False
 
+    @staticmethod
+    def _extract_opponent_from_poll_text(text: Optional[str]) -> Optional[str]:
+        """Достаёт имя соперника из текста опроса вида "🏀 PULL UP против
+        {opponent}\\n..." — нужно как human-readable fallback, когда
+        opponent_id старой (переприсвоенной) игры не входит в team_configs."""
+        if not text:
+            return None
+        match = re.search(r'против\s+(.+)', text)
+        if not match:
+            return None
+        return match.group(1).split('\n')[0].strip() or None
+
+    def _find_superseded_game_record(self, game_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Ищет ОПРОС_ИГРА-запись с тем же game_date/game_time/arena и нашей
+        командой, но другим game_id — признак того, что лига переприсвоила ID
+        той же игре (например, заменился соперник), а не завела новую игру."""
+        game_id = str(game_info.get('game_id') or '')
+        date = (game_info.get('date') or '').strip()
+        time = self._normalize_time_string(game_info.get('time'))
+        arena = (game_info.get('venue') or '').strip()
+        our_team_id = self._to_int(game_info.get('our_team_id'))
+        if not (game_id and date and time and our_team_id is not None):
+            return None
+
+        best: Optional[Dict[str, Any]] = None
+        best_game_id: Optional[int] = None
+        for rec in duplicate_protection.get_records_by_type("ОПРОС_ИГРА"):
+            rec_game_id = str(rec.get('game_id') or '')
+            if not rec_game_id or rec_game_id == game_id:
+                continue
+            if (rec.get('game_date') or '').strip() != date:
+                continue
+            if self._normalize_time_string(rec.get('game_time')) != time:
+                continue
+            if arena and (rec.get('arena') or '').strip() != arena:
+                continue
+            rec_team_a = self._to_int(rec.get('team_a_id'))
+            rec_team_b = self._to_int(rec.get('team_b_id'))
+            if our_team_id not in (rec_team_a, rec_team_b):
+                continue
+            rec_game_id_int = self._to_int(rec_game_id)
+            if best is None or (rec_game_id_int is not None and (best_game_id is None or rec_game_id_int > best_game_id)):
+                best = rec
+                best_game_id = rec_game_id_int
+        return best
+
+    def _register_superseded_game_for_monitoring(self, superseded: Dict[str, Any], game_info: Dict[str, Any]) -> None:
+        """Регистрирует старый (переприсвоенный лигой) game_id как
+        АНОНС_ИГРА, чтобы game_watcher и мониторинг результатов начали
+        следить за ним в день игры наравне с новым game_id — на случай,
+        если лига в итоге опубликует результат под старым ID."""
+        old_game_id = str(superseded.get('game_id') or '')
+        if not old_game_id:
+            return
+        old_link = (superseded.get('link') or '').strip() or (
+            f"https://www.fbp.ru/game.html?gameId={old_game_id}"
+            f"&apiUrl=https://reg.infobasket.su&lang=ru"
+        )
+        new_opponent = game_info.get('opponent_team_name') or game_info.get('team2') or ''
+        duplicate_protection.upsert_game_record(
+            data_type="АНОНС_ИГРА",
+            identifier=old_game_id,
+            status="АНОНС ОТПРАВЛЕН (соперник заменён, следим за старым ID)",
+            additional_data=(
+                f"Соперник в этом слоте заменён на {new_opponent} (новый GameID "
+                f"{game_info.get('game_id')}), отслеживаем результат старой игры "
+                f"на случай публикации лигой"
+            ),
+            game_link=old_link,
+            comp_id=self._to_int(superseded.get('comp_id')),
+            team_id=self._to_int(superseded.get('team_id')),
+            alt_name=superseded.get('alt_name') or '',
+            settings="",
+            game_id=old_game_id,
+            game_date=superseded.get('game_date') or '',
+            game_time=superseded.get('game_time') or '',
+            arena=superseded.get('arena') or '',
+            team_a_id=self._to_int(superseded.get('team_a_id')),
+            team_b_id=self._to_int(superseded.get('team_b_id')),
+        )
+        print(f"🔔 Обнаружена замена соперника: старый GameID {old_game_id} → "
+              f"новый {game_info.get('game_id')}. Регистрирую старую игру для отслеживания результата.")
+
     async def _process_future_game(self, game_info: Dict[str, Any]) -> bool:
         if not self._is_correct_time_for_polls():
             return False
@@ -1181,6 +1264,20 @@ class GameSystemManager:
                 if self._check_duplicate_by_date_time_opponent(date, time, opponent):
                     print(f"⏭️ Игра {date} {time} против {opponent} уже найдена в сервисном листе (дата, время и противник совпадают), пропускаем создание опроса")
                     return False
+
+            # Тот же слот (дата/время/арена), но другой game_id — лига
+            # переприсвоила ID той же игре (например, заменился соперник).
+            superseded = self._find_superseded_game_record(game_info)
+            if superseded:
+                our_team_id = self._to_int(game_info.get('our_team_id'))
+                old_team_a = self._to_int(superseded.get('team_a_id'))
+                old_team_b = self._to_int(superseded.get('team_b_id'))
+                old_opponent_id = old_team_b if old_team_a == our_team_id else old_team_a
+                old_opponent_fallback = self._extract_opponent_from_poll_text(superseded.get('additional_data'))
+                old_opponent_name = self._get_team_display_name(old_opponent_id, old_opponent_fallback)
+                changes = {'opponent': (old_opponent_name, opponent or '')}
+                await self._notify_game_update(changes, game_info)
+                self._register_superseded_game_for_monitoring(superseded, game_info)
 
         question = await self.create_game_poll(game_info)
         if not question:

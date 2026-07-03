@@ -184,41 +184,35 @@ class GameResultsMonitorFinal:
         try:
             from enhanced_duplicate_protection import duplicate_protection
             from datetime_utils import get_moscow_time
-            
+
             today = get_moscow_time().strftime('%d.%m.%Y')
             games = []
-            
-            # Получаем все данные из сервисного листа
-            worksheet = duplicate_protection._get_service_worksheet()
-            if not worksheet:
-                print("❌ Сервисный лист недоступен")
-                return []
-            
-            all_data = worksheet.get_all_values()
-            
-            # Ищем записи типа АНОНС_ИГРА за сегодня с ссылками
-            for row in all_data:
-                if (len(row) >= 6 and 
-                    row[0] == "АНОНС_ИГРА" and 
-                    today in row[1] and 
-                    row[5]):  # Есть ссылка
-                    
-                    game_link = row[5]
-                    if not game_link.startswith('http'):
-                        game_link = f"http://letobasket.ru/{game_link}"
-                    
-                    print(f"🔍 Парсим игру по ссылке: {game_link}")
-                    
-                    # Парсим игру используя улучшенный парсер
-                    game_info = await self.parse_game_from_link(game_link)
-                    if game_info:
-                        games.append(game_info)
-                        print(f"✅ Игра добавлена: {game_info['our_team']} vs {game_info['opponent']} - {game_info['result']}")
-                    else:
-                        print(f"❌ Не удалось распарсить игру")
-            
+
+            # Ищем записи типа АНОНС_ИГРА на сегодня по полю game_date (а не
+            # по дате создания записи — записи могут быть заведены заранее,
+            # например при отслеживании переприсвоенного лигой game_id)
+            records = duplicate_protection.get_records_by_type("АНОНС_ИГРА")
+
+            for rec in records:
+                if (rec.get('game_date') or '').strip() != today or not rec.get('link'):
+                    continue
+
+                game_link = rec['link']
+                if not game_link.startswith('http'):
+                    game_link = f"http://letobasket.ru/{game_link}"
+
+                print(f"🔍 Парсим игру по ссылке: {game_link}")
+
+                # Парсим игру используя улучшенный парсер
+                game_info = await self.parse_game_from_link(game_link)
+                if game_info:
+                    games.append(game_info)
+                    print(f"✅ Игра добавлена: {game_info['our_team']} vs {game_info['opponent']} - {game_info['result']}")
+                else:
+                    print(f"❌ Не удалось распарсить игру")
+
             return games
-            
+
         except Exception as e:
             print(f"❌ Ошибка получения результатов по ссылкам: {e}")
             return []
@@ -633,35 +627,24 @@ class GameResultsMonitorFinal:
         print("\n🔍 Проверка наличия ссылок на игры для сегодня...")
         from enhanced_duplicate_protection import duplicate_protection
         
-        # Ищем ссылки на игры в сервисном листе
+        # Ищем ссылки на игры на сегодня по полю game_date (а не по дате
+        # создания записи — см. fetch_game_results_from_links)
         today_games_found = False
         try:
             from datetime_utils import get_moscow_time
             today = get_moscow_time().strftime('%d.%m.%Y')
-            
-            # Получаем все данные из сервисного листа
-            worksheet = duplicate_protection._get_service_worksheet()
-            if worksheet:
-                all_data = worksheet.get_all_values()
-                
-                # Ищем записи типа АНОНС_ИГРА за сегодня
-                for row in all_data:
-                    if (len(row) >= 6 and 
-                        row[0] == "АНОНС_ИГРА" and 
-                        today in row[1] and  # Дата в колонке B
-                        row[5]):  # Ссылка в колонке F
-                        today_games_found = True
-                        print(f"✅ Найдена игра на сегодня: {row[2]} (ссылка: {row[5]})")
-                        break
-                
-                if not today_games_found:
-                    print(f"❌ Игры на сегодня ({today}) не найдены в сервисном листе")
-                    print("💡 Убедитесь, что анонсы игр были созданы и содержат ссылки")
-                    return
-            else:
-                print("❌ Сервисный лист недоступен")
+
+            for rec in duplicate_protection.get_records_by_type("АНОНС_ИГРА"):
+                if (rec.get('game_date') or '').strip() == today and rec.get('link'):
+                    today_games_found = True
+                    print(f"✅ Найдена игра на сегодня: {rec.get('unique_key')} (ссылка: {rec.get('link')})")
+                    break
+
+            if not today_games_found:
+                print(f"❌ Игры на сегодня ({today}) не найдены в сервисном листе")
+                print("💡 Убедитесь, что анонсы игр были созданы и содержат ссылки")
                 return
-                
+
         except Exception as e:
             print(f"❌ Ошибка проверки ссылок на игры: {e}")
             return
