@@ -24,6 +24,7 @@ from telegram import (
     KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application,
@@ -43,6 +44,33 @@ SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
 ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
 
 DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.log")
+
+# Mini App фэнтези: URL фронта (GitHub Pages, статичный) + URL API (Cloudflare
+# Tunnel). Адрес туннеля меняется при рестарте quick-tunnel, поэтому берём его
+# из файла, который пишет обёртка cloudflared (fallback — env FANTASY_API_URL).
+FANTASY_WEBAPP_URL = os.getenv("FANTASY_WEBAPP_URL", "")
+FANTASY_API_URL_FILE = os.getenv("FANTASY_API_URL_FILE", "data/fantasy_api_url.txt")
+
+
+def _fantasy_api_url() -> str:
+    url = os.getenv("FANTASY_API_URL", "").strip()
+    if url:
+        return url
+    try:
+        with open(FANTASY_API_URL_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _fantasy_webapp_markup() -> Optional[InlineKeyboardMarkup]:
+    """Кнопка «Открыть фэнтези» (web_app). None, если Mini App не настроен."""
+    api = _fantasy_api_url()
+    if not FANTASY_WEBAPP_URL or not api:
+        return None
+    sep = "&" if "?" in FANTASY_WEBAPP_URL else "?"
+    url = f"{FANTASY_WEBAPP_URL}{sep}api={api}"
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]])
 
 
 def _scrub_token_from_old_log() -> None:
@@ -313,6 +341,31 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _refresh_db_cache()
     _periodic_push_local_changes()
     await _send_main_menu(update, with_keyboard=True)
+
+
+async def handle_fantasy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/fantasy — открыть Mini App фэнтези (кнопка web_app). Доступно всем."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+    try:
+        sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
+    except Exception:
+        pass
+    import fantasy
+    season = fantasy.get_active_season()
+    markup = _fantasy_webapp_markup()
+    if not markup:
+        await update.message.reply_text("🏆 Фэнтези скоро откроется — приложение ещё настраивается.")
+        return
+    if not season:
+        await update.message.reply_text("🏆 Сейчас нет активного сезона фэнтези. Загляни позже!")
+        return
+    await update.message.reply_text(
+        f"🏆 Фэнтези «{season['name']}» ({season['format']})\nНабери состав в приложении:",
+        reply_markup=markup,
+    )
 
 
 # Конфигурация кнопок "Запуск оповещений". "daily" (Оповещения на сегодня)
@@ -891,6 +944,7 @@ def main() -> None:
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("admin", handle_admin))
+    app.add_handler(CommandHandler("fantasy", handle_fantasy))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 

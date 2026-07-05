@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Tunnel for Basketball Bot Fantasy Mini App API
+After=network-online.target basketball-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/basketball-bot
+Environment=FANTASY_API_PORT=8081
+Environment=FANTASY_API_URL_FILE=/opt/basketball-bot/data/fantasy_api_url.txt
+ExecStart=/bin/bash /opt/basketball-bot/deploy/cloudflared-fantasy.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
