@@ -226,3 +226,64 @@ def _get_season(season_id: int) -> Optional[Dict[str, Any]]:
     with sheets_cache.get_connection() as conn:
         row = conn.execute("SELECT * FROM fantasy_seasons WHERE id=?", (season_id,)).fetchone()
     return dict(row) if row else None
+
+
+# ─────────────────────────── Имена и форматирование ──────────────────────────
+
+def display_names(user_ids: List[str]) -> Dict[str, str]:
+    """Telegram ID -> отображаемое имя из players (транзитно; в таблицах
+    фэнтези ФИО не храним, только показываем)."""
+    ids = [str(u) for u in user_ids]
+    if not ids:
+        return {}
+    sheets_cache.init_db()
+    placeholders = ",".join("?" * len(ids))
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            f"SELECT telegram_id, surname, name, nickname FROM players WHERE telegram_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    out: Dict[str, str] = {}
+    for r in rows:
+        out[str(r["telegram_id"])] = (f"{r['surname']} {r['name']}".strip()
+                                      or r["nickname"] or str(r["telegram_id"]))
+    return out
+
+
+_MEDALS = ["🥇", "🥈", "🥉"]
+
+
+def format_weekly_table(season_id: int, week_start: str) -> str:
+    """Текст недельной таблицы для чата/лички."""
+    season = _get_season(season_id)
+    table = weekly_standings(season_id, week_start)
+    d_from, d_to = week_bounds(week_start)
+    names = display_names([r["user_id"] for r in table])
+    header = f"🏆 Фэнтези — итоги недели {d_from} – {d_to}"
+    if season:
+        header = f"🏆 Фэнтези «{season['name']}» — неделя {d_from} – {d_to}"
+    if not table:
+        return header + "\n\nНа этой неделе никто не набрал состав."
+    lines = [header, ""]
+    for i, r in enumerate(table):
+        place = _MEDALS[i] if i < 3 else f"{i + 1}."
+        name = names.get(str(r["user_id"]), f"Участник {r['user_id']}")
+        lines.append(f"{place} {name} — {r['points']:g}")
+    return "\n".join(lines)
+
+
+def format_season_final(season_id: int) -> str:
+    """Текст итогов сезона с тройкой победителей."""
+    season = _get_season(season_id)
+    table = season_standings(season_id)
+    names = display_names([r["user_id"] for r in table])
+    title = season["name"] if season else "Фэнтези"
+    lines = [f"🏁 Сезон «{title}» завершён! Итоги:", ""]
+    if not table:
+        return f"🏁 Сезон «{title}» завершён. Участников нет."
+    for i, r in enumerate(table):
+        place = _MEDALS[i] if i < 3 else f"{i + 1}."
+        name = names.get(str(r["user_id"]), f"Участник {r['user_id']}")
+        lines.append(f"{place} {name} — {r['points']:g} очк за {r['weeks']} нед")
+    lines += ["", "Поздравляем призёров! 🎉"]
+    return "\n".join(lines)

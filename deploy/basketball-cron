@@ -13,6 +13,12 @@ LOG=/var/log/basketball-bot
 # SLPRO (Pull Up Farm): опросы/анонсы/результаты — каждые 3 часа
 20 */3 * * * botuser cd $BOT_DIR && $VENV run_slpro_monitor.py >> $LOG/slpro.log 2>&1
 
+# Фэнтези: выкачка статистики завершённых игр — каждые 3 часа
+35 */3 * * * botuser cd $BOT_DIR && $VENV run_fantasy.py --only ingest >> $LOG/fantasy.log 2>&1
+
+# Фэнтези: понедельничный подсчёт + рассылка таблицы — пн 09:00 МСК (06:00 UTC)
+0 6 * * 1 botuser cd $BOT_DIR && $VENV run_fantasy.py --only weekly >> $LOG/fantasy.log 2>&1
+
 # Опросы по тренировкам (создание/актуализация) — 09:05 МСК (06:05 UTC)
 5 6 * * * botuser cd $BOT_DIR && $VENV training_polls_enhanced.py >> $LOG/training_polls.log 2>&1
 

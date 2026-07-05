@@ -42,7 +42,7 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
 ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
 
-DAEMON_LOG_PATH = "/var/log/basketball-bot/daemon.log"
+DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.log")
 
 
 def _scrub_token_from_old_log() -> None:
@@ -367,8 +367,35 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
+        [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
+
+
+def _fantasy_menu_markup() -> InlineKeyboardMarkup:
+    import fantasy
+    season = fantasy.get_active_season()
+    rows: List[List[InlineKeyboardButton]] = []
+    if not season:
+        rows.append([InlineKeyboardButton("▶️ Старт сезона", callback_data="admin:fantasy:start")])
+    else:
+        fmt = season.get("format", "3x3")
+        other = "5x5" if str(fmt).startswith("3") else "3x3"
+        rows.append([InlineKeyboardButton(f"🔀 Формат: {fmt} → {other}", callback_data="admin:fantasy:format")])
+        rows.append([InlineKeyboardButton("📥 Пересчитать статистику", callback_data="admin:fantasy:ingest")])
+        rows.append([InlineKeyboardButton("🏁 Завершить сезон", callback_data="admin:fantasy:end")])
+    rows.append(_back_button())
+    return InlineKeyboardMarkup(rows)
+
+
+def _fantasy_menu_text() -> str:
+    import fantasy
+    season = fantasy.get_active_season()
+    if not season:
+        return "🏆 Фэнтези лига\n\nАктивного сезона нет."
+    return (f"🏆 Фэнтези лига\n\nСезон: «{season['name']}»\n"
+            f"Формат: {season.get('format', '3x3')}\n"
+            f"Старт: {season.get('started_at', '')[:10]}")
 
 
 def _back_button(target: str = "admin:menu:main") -> List[InlineKeyboardButton]:
@@ -509,6 +536,49 @@ def _check_already_run_today(data_types: List[str]) -> Optional[str]:
     return None
 
 
+async def _handle_fantasy_action(query, action: str) -> None:
+    import fantasy
+    if action == "start":
+        now = datetime.now()
+        months = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
+                  "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+        name = f"Фэнтези {months[now.month]} {now.year}"
+        season = fantasy.start_season(name, "3x3")
+        await query.edit_message_text(
+            f"✅ Сезон запущен: «{season['name']}» (формат {season['format']}).",
+            reply_markup=_fantasy_menu_markup(),
+        )
+    elif action == "format":
+        season = fantasy.get_active_season()
+        if not season:
+            await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+            return
+        new_fmt = "5x5" if str(season.get("format", "3x3")).startswith("3") else "3x3"
+        fantasy.set_format(new_fmt)
+        await query.edit_message_text(
+            f"🔀 Формат изменён на {new_fmt}.", reply_markup=_fantasy_menu_markup())
+    elif action == "ingest":
+        await query.edit_message_text("⏳ Пересчёт статистики фэнтези...")
+        try:
+            code, out, err = await script_runner.run_script("run_fantasy.py", ["--only", "ingest"])
+            summary = script_runner.summarize_output(out) if code == 0 else (err.strip().splitlines()[-1:] or ["ошибка"])[0]
+        except Exception as e:
+            summary = str(e)
+        await query.edit_message_text(f"📥 Статистика фэнтези\n\n{summary}", reply_markup=_fantasy_menu_markup())
+    elif action == "end":
+        result = fantasy.end_season()
+        if not result:
+            await query.edit_message_text("Активного сезона нет.", reply_markup=_fantasy_menu_markup())
+            return
+        final = fantasy.format_season_final(result["season"]["id"])
+        await query.edit_message_text(
+            f"{final}\n\n(Показано только тебе. Разошли в чат вручную, если нужно.)",
+            reply_markup=_fantasy_menu_markup(),
+        )
+    else:
+        await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+
+
 async def _handle_launch_action(query, action: str, force: bool) -> None:
     if action == "daily":
         data_types = DAILY_DATA_TYPES
@@ -620,6 +690,11 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.edit_message_text("📊 Отчёты → Игры", reply_markup=_reports_games_menu_markup())
                 else:
                     await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
+            elif screen == "fantasy":
+                await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+
+        elif parts[1] == "fantasy":
+            await _handle_fantasy_action(query, parts[2] if len(parts) > 2 else "")
 
         elif parts[1] == "run":
             action = parts[2]

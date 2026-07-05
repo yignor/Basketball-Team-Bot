@@ -205,28 +205,11 @@ async def handle_standings(request: web.Request) -> web.Response:
     table = fantasy.weekly_standings(season["id"], week_start)
     # user_id -> отображаемое имя (из players, транзитно — в таблицах фэнтези
     # ФИО не храним; здесь только показываем).
-    names = _display_names([r["user_id"] for r in table])
+    names = fantasy.display_names([r["user_id"] for r in table])
     for r in table:
         r["name"] = names.get(str(r["user_id"]), "")
         r.pop("refs", None)
     return web.json_response({"week_start": week_start, "standings": table})
-
-
-def _display_names(user_ids: List[str]) -> Dict[str, str]:
-    if not user_ids:
-        return {}
-    sheets_cache.init_db()
-    placeholders = ",".join("?" * len(user_ids))
-    with sheets_cache.get_connection() as conn:
-        rows = conn.execute(
-            f"SELECT telegram_id, surname, name, nickname FROM players WHERE telegram_id IN ({placeholders})",
-            [str(u) for u in user_ids],
-        ).fetchall()
-    out: Dict[str, str] = {}
-    for r in rows:
-        label = f"{r['surname']} {r['name']}".strip() or r["nickname"] or str(r["telegram_id"])
-        out[str(r["telegram_id"])] = label
-    return out
 
 
 def create_app(bot_token: str) -> web.Application:
