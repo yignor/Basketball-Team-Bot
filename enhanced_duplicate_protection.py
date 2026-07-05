@@ -106,13 +106,14 @@ AUTOMATION_SECTION_HEADER = [
     "Анонимный",
     "Множественный выбор",
     "Комментарий",
+    "Время (МСК)",
 ]
 AUTOMATION_SECTION_END_MARKER = "--- END AUTOMATIONS ---"
 AUTOMATION_DEFAULT_ROWS = [
-    {"key": "BIRTHDAY_NOTIFICATIONS", "name": "Уведомления о днях рождения", "comment": "Поздравления именинников"},
-    {"key": "GAME_ANNOUNCEMENTS", "name": "Анонсы игр", "comment": "Сообщения с информацией об игре"},
-    {"key": "GAME_POLLS", "name": "Опросы на игры", "comment": "Опрос о готовности на игру"},
-    {"key": "VOTING_POLLS", "name": "Опросы тренировок", "comment": "Опрос присутствия на тренировках (топик тренировок)"},
+    {"key": "BIRTHDAY_NOTIFICATIONS", "name": "Уведомления о днях рождения", "comment": "Поздравления именинников", "notify_time": "09:00"},
+    {"key": "GAME_ANNOUNCEMENTS", "name": "Анонсы игр", "comment": "Сообщения с информацией об игре", "notify_time": "09:00"},
+    {"key": "GAME_POLLS", "name": "Опросы на игры", "comment": "Опрос о готовности на игру", "notify_time": "09:00"},
+    {"key": "VOTING_POLLS", "name": "Опросы тренировок", "comment": "Опрос присутствия на тренировках (топик тренировок)", "notify_time": "09:00"},
     {"key": "GAME_UPDATES", "name": "Уведомления об изменениях", "comment": "Уведомления об изменениях в расписании игр"},
     {"key": "GAME_RESULTS", "name": "Результаты игр", "comment": "Уведомления о результатах завершенных игр"},
     {"key": "CALENDAR_EVENTS", "name": "Календарные события", "comment": "Отправка календарных событий (.ics файлов)"},
@@ -146,6 +147,16 @@ AUTOMATION_KEY_TO_NAME = {
     for row in AUTOMATION_DEFAULT_ROWS
 }
 LEGACY_AUTOMATION_HEADERS = [
+    # Прежний 6-колоночный заголовок (без «Время (МСК)») — чтобы старый лист
+    # распознавался по префиксу до ре-бутстрапа и топики не терялись.
+    [
+        "Автоматическое сообщение",
+        "ID топика",
+        "ID чата",
+        "Анонимный",
+        "Множественный выбор",
+        "Комментарий",
+    ],
     [
         "Автоматическое сообщение",
         "ID топика",
@@ -427,6 +438,7 @@ class EnhancedDuplicateProtection:
                 anon_value = row[3] if len(row) > 3 else ""
                 multiple_value = row[4] if len(row) > 4 else ""
                 comment_value = row[5] if len(row) > 5 else ""
+                notify_time_value = row[6] if len(row) > 6 else ""
                 existing_entries[key_upper] = {
                     "label": display_name,
                     "topic": topic_value,
@@ -434,6 +446,7 @@ class EnhancedDuplicateProtection:
                     "anon": anon_value,
                     "multiple": multiple_value,
                     "comment": comment_value,
+                    "notify_time": notify_time_value,
                 }
 
             rows_to_write: List[List[str]] = []
@@ -446,6 +459,7 @@ class EnhancedDuplicateProtection:
                 anon_value = ""
                 multiple_value = ""
                 comment_value = default.get("comment", "")
+                notify_time_value = default.get("notify_time", "")
                 if existing:
                     label = existing.get("label") or label
                     topic_value = existing.get("topic", "")
@@ -453,7 +467,8 @@ class EnhancedDuplicateProtection:
                     anon_value = existing.get("anon", "")
                     multiple_value = existing.get("multiple", "")
                     comment_value = existing.get("comment", "") or comment_value
-                rows_to_write.append([label, topic_value, chat_id_value, anon_value, multiple_value, comment_value])
+                    notify_time_value = existing.get("notify_time", "") or notify_time_value
+                rows_to_write.append([label, topic_value, chat_id_value, anon_value, multiple_value, comment_value, notify_time_value])
 
             for key_upper, entry in existing_entries.items():
                 rows_to_write.append([
@@ -463,6 +478,7 @@ class EnhancedDuplicateProtection:
                     entry.get("anon", ""),
                     entry.get("multiple", ""),
                     entry.get("comment", ""),
+                    entry.get("notify_time", ""),
                 ])
 
             rows_to_write.append([AUTOMATION_SECTION_END_MARKER] + [""] * (len(AUTOMATION_SECTION_HEADER) - 1))
@@ -1825,6 +1841,7 @@ class EnhancedDuplicateProtection:
                     anon_raw = row[3] if len(row) > 3 else ""
                     multiple_raw = row[4] if len(row) > 4 else ""
                     comment_raw = self._normalize_cell_text(row[5]) if len(row) > 5 else ""
+                    notify_time_raw = self._normalize_cell_text(row[6]) if len(row) > 6 else ""
                     mapped_key = AUTOMATION_NAME_TO_KEY.get(raw_label.lower())
                     key_upper = mapped_key.upper() if mapped_key else raw_label.upper()
                     entry: Dict[str, Any] = {}
@@ -1847,6 +1864,8 @@ class EnhancedDuplicateProtection:
                         entry["allows_multiple_answers"] = multiple_value
                     if comment_raw:
                         entry["comment"] = comment_raw
+                    if notify_time_raw:
+                        entry["notify_time"] = notify_time_raw
                     automation_topics[key_upper] = entry
 
             has_data = bool(

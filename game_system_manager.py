@@ -1575,21 +1575,42 @@ class GameSystemManager:
         print(f"✅ Игра {game_info['date']} подходит для анонса (сегодня)")
         return True
     
+    DEFAULT_NOTIFY_TIME = "09:00"
+
+    def _notify_time_reached(self, automation_key: str) -> bool:
+        """True, если текущее московское время достигло настроенного времени
+        оповещения для этой автоматизации (столбец «Время (МСК)» в листе
+        «Конфиг», по умолчанию 09:00). До этого времени опрос/анонс не шлём —
+        так cron-прогоны рано утром не публикуют раньше срока, а
+        публикация происходит на первом прогоне в/после назначенного часа
+        (повтор гасит дедуп)."""
+        entry = self._get_automation_entry(automation_key)
+        raw = ""
+        if isinstance(entry, dict):
+            raw = str(entry.get("notify_time") or "").strip()
+        raw = raw or self.DEFAULT_NOTIFY_TIME
+        hh, mm = 9, 0
+        try:
+            parts = raw.replace(".", ":").replace("-", ":").split(":")
+            hh = int(parts[0])
+            mm = int(parts[1]) if len(parts) > 1 and parts[1] != "" else 0
+            if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                hh, mm = 9, 0
+        except (ValueError, IndexError):
+            hh, mm = 9, 0
+        now = get_moscow_time()
+        reached = (now.hour, now.minute) >= (hh, mm)
+        state = "можно" if reached else "рано"
+        print(f"🕐 {automation_key}: сейчас {now.strftime('%H:%M')} МСК, назначено {hh:02d}:{mm:02d} — {state}")
+        return reached
+
     def _is_correct_time_for_polls(self) -> bool:
-        """Проверяет, подходящее ли время для создания опросов"""
-        now = get_moscow_time()
-        
-        # Создаем опросы в течение всего дня (защита от дублирования через Google Sheets)
-        print(f"🕐 Время подходящее для создания опросов: {now.strftime('%H:%M')} (весь день)")
-        return True
-    
+        """Опросы создаём начиная с настроенного времени (GAME_POLLS)."""
+        return self._notify_time_reached(AUTOMATION_KEY_GAME_POLLS)
+
     def _is_correct_time_for_announcements(self) -> bool:
-        """Проверяет, подходящее ли время для отправки анонсов"""
-        now = get_moscow_time()
-        
-        # Отправляем анонсы в течение всего дня (защита от дублирования через Google Sheets)
-        print(f"🕐 Время подходящее для отправки анонсов: {now.strftime('%H:%M')} (весь день)")
-        return True
+        """Анонсы шлём начиная с настроенного времени (GAME_ANNOUNCEMENTS)."""
+        return self._notify_time_reached(AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
     
 
     

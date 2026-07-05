@@ -307,6 +307,13 @@ class SlproManager:
         today = get_moscow_time().date()
         polls = announces = results = 0
 
+        # Опросы/анонсы — не раньше настроенного времени (тот же столбец
+        # «Время (МСК)» в Конфиге, что и у основной команды), чтобы cron рано
+        # утром не публиковал раньше срока. Результаты НЕ гейтим — их надо
+        # публиковать сразу по завершении игры.
+        polls_time_ok = self.gsm._notify_time_reached(AUTOMATION_KEY_GAME_POLLS)
+        announce_time_ok = self.gsm._notify_time_reached(AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
+
         for game in games:
             try:
                 gdate = datetime.datetime.strptime(game["game_date"], "%Y-%m-%d").date()
@@ -322,10 +329,10 @@ class SlproManager:
                         results += 1
             elif status == 0:
                 if gdate > today:
-                    if only in (None, "polls") and await self.create_poll(game, ctx):
+                    if only in (None, "polls") and polls_time_ok and await self.create_poll(game, ctx):
                         polls += 1
                 elif gdate == today:
-                    if only in (None, "announcements") and await self.send_announcement(game, ctx):
+                    if only in (None, "announcements") and announce_time_ok and await self.send_announcement(game, ctx):
                         announces += 1
 
         print(f"\n📊 SLPRO ИТОГИ: опросов {polls}, анонсов {announces}, результатов {results}")
