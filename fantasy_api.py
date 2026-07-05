@@ -222,4 +222,11 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/standings", handle_standings),
         web.get("/health", lambda r: web.json_response({"ok": True})),
     ])
+    # Фронт Mini App отдаём с того же сервера (за тем же Cloudflare Tunnel) —
+    # GitHub Pages не нужен, CORS не нужен (один origin). URL Mini App:
+    #   {tunnel}/app/index.html?api={tunnel}
+    from pathlib import Path
+    webapp_dir = Path(__file__).parent / "webapp"
+    if webapp_dir.is_dir():
+        app.router.add_static("/app/", str(webapp_dir))
     return app

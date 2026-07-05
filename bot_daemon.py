@@ -45,31 +45,30 @@ ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("A
 
 DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.log")
 
-# Mini App фэнтези: URL фронта (GitHub Pages, статичный) + URL API (Cloudflare
-# Tunnel). Адрес туннеля меняется при рестарте quick-tunnel, поэтому берём его
-# из файла, который пишет обёртка cloudflared (fallback — env FANTASY_API_URL).
-FANTASY_WEBAPP_URL = os.getenv("FANTASY_WEBAPP_URL", "")
+# Mini App фэнтези: и фронт, и API отдаёт сам бот (aiohttp) за Cloudflare
+# Tunnel — GitHub Pages не нужен. Адрес туннеля меняется при рестарте
+# quick-tunnel, поэтому берём его из файла, который пишет обёртка cloudflared
+# (fallback — env FANTASY_API_URL). URL Mini App: {tunnel}/app/index.html?api={tunnel}
 FANTASY_API_URL_FILE = os.getenv("FANTASY_API_URL_FILE", "data/fantasy_api_url.txt")
 
 
 def _fantasy_api_url() -> str:
     url = os.getenv("FANTASY_API_URL", "").strip()
     if url:
-        return url
+        return url.rstrip("/")
     try:
         with open(FANTASY_API_URL_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            return f.read().strip().rstrip("/")
     except OSError:
         return ""
 
 
 def _fantasy_webapp_markup() -> Optional[InlineKeyboardMarkup]:
-    """Кнопка «Открыть фэнтези» (web_app). None, если Mini App не настроен."""
+    """Кнопка «Открыть фэнтези» (web_app). None, если туннель не поднят."""
     api = _fantasy_api_url()
-    if not FANTASY_WEBAPP_URL or not api:
+    if not api:
         return None
-    sep = "&" if "?" in FANTASY_WEBAPP_URL else "?"
-    url = f"{FANTASY_WEBAPP_URL}{sep}api={api}"
+    url = f"{api}/app/index.html?api={api}"
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]])
 
 
