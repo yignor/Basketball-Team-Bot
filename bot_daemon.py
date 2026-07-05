@@ -117,7 +117,13 @@ import admin_panel
 import sheets_cache
 import script_runner
 import game_watcher
+import fantasy_api
 from enhanced_duplicate_protection import duplicate_protection
+
+# Фэнтези-API (aiohttp) — включается флагом; наружу через Cloudflare Tunnel.
+FANTASY_API_ENABLED = os.getenv("FANTASY_API_ENABLED", "false").lower() == "true"
+FANTASY_API_PORT = int(os.getenv("FANTASY_API_PORT", "8081"))
+_fantasy_runner = None
 
 # Кэш зарегистрированных опросов (обновляем раз в 5 минут) — тренировки и игры
 _poll_cache: dict = {}
@@ -753,14 +759,34 @@ async def on_startup(app: Application) -> None:
     global _background_task
     _background_task = asyncio.create_task(_background_loop())
 
+    # Фэнтези-API в том же event loop (localhost; наружу — Cloudflare Tunnel).
+    global _fantasy_runner
+    if FANTASY_API_ENABLED and BOT_TOKEN:
+        try:
+            from aiohttp import web
+            fapp = fantasy_api.create_app(BOT_TOKEN)
+            _fantasy_runner = web.AppRunner(fapp)
+            await _fantasy_runner.setup()
+            site = web.TCPSite(_fantasy_runner, "127.0.0.1", FANTASY_API_PORT)
+            await site.start()
+            log.info(f"Фэнтези-API поднят на 127.0.0.1:{FANTASY_API_PORT}")
+        except Exception as e:
+            log.error(f"Не удалось поднять фэнтези-API: {e}")
+            _fantasy_runner = None
+
 
 async def on_shutdown(app: Application) -> None:
-    global _background_task
+    global _background_task, _fantasy_runner
     if _background_task:
         _background_task.cancel()
         try:
             await _background_task
         except asyncio.CancelledError:
+            pass
+    if _fantasy_runner:
+        try:
+            await _fantasy_runner.cleanup()
+        except Exception:
             pass
     log.info("Бот остановлен.")
 
