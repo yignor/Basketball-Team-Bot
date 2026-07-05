@@ -144,6 +144,16 @@ class SlproClient:
         data = await self._post("teams/get-players", team_id=team_id)
         return (data or {}).get("players", []) or []
 
+    async def get_game(self, game_id: Any, ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Полный box-score одной игры: {game, players:{home_players,
+        guest_players}, log:[...]}. Требует tournament_id + season_id — берём
+        из ctx (discover_context) либо дефолт (tournament_id=2)."""
+        params: Dict[str, Any] = {"game_id": str(game_id), "tournament_id": 2}
+        if ctx:
+            if ctx.get("season_id") is not None:
+                params["season_id"] = ctx["season_id"]
+        return await self._post("games", **params)
+
     async def get_our_games(self, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Игры нашей команды (по team_id из ctx) из расписания стадии."""
         team_id = ctx.get("team_id")

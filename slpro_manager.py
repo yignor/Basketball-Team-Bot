@@ -32,6 +32,7 @@ from game_system_manager import (
     AUTOMATION_KEY_GAME_ANNOUNCEMENTS,
 )
 from slpro_client import SlproClient
+from slpro_game import parse_box_score, format_quarters, format_leaders
 from datetime_utils import get_moscow_time, is_within_game_tracking_window
 
 # Отдельные типы записей, чтобы Infobasket-конвейер (game_watcher.py,
@@ -266,12 +267,32 @@ class SlproManager:
             emoji, result_text = "🤝", "НИЧЬЯ"
 
         date_ddmm = self._date_ddmmyyyy(game["game_date"])
-        text = (
-            f"{emoji} {result_text}: {our} против {opp}\n"
-            f"🏀 {our} {our_s}:{opp_s} {opp}\n"
-            f"📅 {date_ddmm}\n"
-            f"🏀 SLPRO · {ctx.get('division_name', '')}"
-        )
+        lines = [
+            f"{emoji} {result_text}: {our} против {opp}",
+            f"🏀 {our} {our_s}:{opp_s} {opp}",
+        ]
+
+        # Детальный box-score (четверти + MVP/лидеры + видео VK). Если не
+        # получилось — не критично, публикуем результат по счёту.
+        try:
+            resp = await self.client.get_game(game.get("game_id"), ctx)
+            box = parse_box_score(resp) if resp else None
+        except Exception as e:
+            print(f"⚠️ SLPRO: не удалось получить box-score {sid}: {e}")
+            box = None
+        if box:
+            quarters = format_quarters(box, team_id)
+            if quarters:
+                lines.append(f"📈 Четверти: {quarters}")
+            leaders = format_leaders(box, team_id)
+            if leaders:
+                lines.append(leaders)
+            if box.video_vk:
+                lines.append(f"📹 Видео: {box.video_vk}")
+
+        lines.append(f"📅 {date_ddmm}")
+        lines.append(f"🏀 SLPRO · {ctx.get('division_name', '')}")
+        text = "\n".join(lines)
         # Результат публикуем в чат анонсов (или опросов — тот же общий чат).
         chat_ids = self._announce_chat_ids() or self._poll_chat_ids()
         messages = await self._send_to_chats(chat_ids, text, self.gsm.game_announcement_topic_id)
