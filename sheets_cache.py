@@ -201,6 +201,85 @@ CREATE TABLE IF NOT EXISTS config_rows (
     col_h       TEXT NOT NULL DEFAULT '',
     synced_at   TEXT NOT NULL
 );
+
+-- ── Фэнтези-лига (бэклог п.3) ─────────────────────────────────────────────
+-- Кеш статистики по игроку за игру — основа очков фэнтези. Ключ
+-- (source, game_id, player_id): завершённая игра тянется РАЗ и навсегда,
+-- раздаётся всем участникам/фичам. По юр-инварианту храним только
+-- player_id + номер (display_name НЕ храним, показываем транзитно).
+-- source: 'slpro' | 'infobasket'. player_id — строка (у источников разный тип).
+CREATE TABLE IF NOT EXISTS game_player_stats (
+    source        TEXT NOT NULL,
+    game_id       TEXT NOT NULL,
+    player_id     TEXT NOT NULL,
+    team_id       TEXT NOT NULL DEFAULT '',
+    number        TEXT NOT NULL DEFAULT '',
+    game_date     TEXT NOT NULL DEFAULT '',   -- ISO YYYY-MM-DD
+    season_id     TEXT NOT NULL DEFAULT '',
+    pts           INTEGER NOT NULL DEFAULT 0,
+    reb           INTEGER NOT NULL DEFAULT 0,
+    reb_off       INTEGER NOT NULL DEFAULT 0,
+    reb_def       INTEGER NOT NULL DEFAULT 0,
+    ast           INTEGER NOT NULL DEFAULT 0,
+    stl           INTEGER NOT NULL DEFAULT 0,
+    blk           INTEGER NOT NULL DEFAULT 0,
+    tur           INTEGER NOT NULL DEFAULT 0,
+    pf            INTEGER NOT NULL DEFAULT 0,
+    fgm           INTEGER NOT NULL DEFAULT 0,
+    fga           INTEGER NOT NULL DEFAULT 0,
+    tpm           INTEGER NOT NULL DEFAULT 0,
+    tpa           INTEGER NOT NULL DEFAULT 0,
+    ftm           INTEGER NOT NULL DEFAULT 0,
+    fta           INTEGER NOT NULL DEFAULT 0,
+    fetched_at    TEXT NOT NULL,
+    PRIMARY KEY (source, game_id, player_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gps_player ON game_player_stats(source, player_id);
+CREATE INDEX IF NOT EXISTS idx_gps_date ON game_player_stats(game_date);
+
+-- Какие игры уже выкачаны (чтобы не дёргать API повторно; отдельно от
+-- game_player_stats, т.к. игра могла быть без нашей команды/пустой).
+CREATE TABLE IF NOT EXISTS game_stats_fetched (
+    source        TEXT NOT NULL,
+    game_id       TEXT NOT NULL,
+    game_date     TEXT NOT NULL DEFAULT '',
+    fetched_at    TEXT NOT NULL,
+    PRIMARY KEY (source, game_id)
+);
+
+CREATE TABLE IF NOT EXISTS fantasy_seasons (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL DEFAULT '',
+    format        TEXT NOT NULL DEFAULT '3x3',
+    status        TEXT NOT NULL DEFAULT 'active',   -- active | ended
+    scoring_json  TEXT NOT NULL DEFAULT '',
+    started_at    TEXT NOT NULL DEFAULT '',
+    ended_at      TEXT NOT NULL DEFAULT ''
+);
+
+-- Состав участника на конкретную игровую неделю (история по неделям).
+-- player_refs_json — список выбранных игроков пула (ключи вида
+-- "slpro:707:12684" / "ib:36502:400566" — источник:team:player_id).
+CREATE TABLE IF NOT EXISTS fantasy_rosters (
+    user_id          TEXT NOT NULL,
+    season_id        INTEGER NOT NULL,
+    week_start       TEXT NOT NULL,             -- ISO дата понедельника недели
+    player_refs_json TEXT NOT NULL DEFAULT '[]',
+    locked           INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, season_id, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_fantasy_rosters_week ON fantasy_rosters(season_id, week_start);
+
+CREATE TABLE IF NOT EXISTS fantasy_weekly_scores (
+    user_id       TEXT NOT NULL,
+    season_id     INTEGER NOT NULL,
+    week_start    TEXT NOT NULL,
+    points        REAL NOT NULL DEFAULT 0,
+    computed_at   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, season_id, week_start)
+);
+CREATE INDEX IF NOT EXISTS idx_fantasy_scores_season ON fantasy_weekly_scores(season_id);
 """
 
 # Порядок колонок в листе "Сервисный" — должен совпадать с SERVICE_HEADER
