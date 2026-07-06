@@ -67,14 +67,13 @@ class PlayersManager:
                     # Убираем лишние пробелы
                     cleaned_credentials = cleaned_credentials.strip()
                     
-                    print(f"🔍 Очищенная строка (первые 200 символов): {cleaned_credentials[:200]}...")
-                    
+                    # Содержимое credentials в вывод не печатаем никогда —
+                    # это ключ сервисного аккаунта, а stdout уходит в логи.
                     creds_dict = json.loads(cleaned_credentials)
                     print("✅ JSON credentials успешно распарсен (после тщательной очистки)")
                 except json.JSONDecodeError as e2:
                     print(f"❌ Ошибка парсинга JSON credentials: {e2}")
-                    print(f"🔍 Первые 100 символов оригинала: {GOOGLE_SHEETS_CREDENTIALS[:100]}...")
-                    print(f"🔍 Первые 100 символов после очистки: {cleaned_credentials[:100]}...")
+                    print(f"🔍 Длина оригинала: {len(GOOGLE_SHEETS_CREDENTIALS)}, после очистки: {len(cleaned_credentials)}")
                     return
             
             # Проверяем обязательные поля

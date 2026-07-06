@@ -6,8 +6,18 @@ LOG=/var/log/basketball-bot
 
 # ── Ежедневные задачи ────────────────────────────────────────────────────────
 
-# Daily Bot: игры, опросы, анонсы — 09:05 МСК (06:05 UTC)
-5 6 * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
+# Daily Bot: игры, опросы, анонсы — каждые 3 часа (быстрее ловим смену
+# соперника/переприсвоение game_id лигой, а не раз в сутки)
+5 */3 * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
+
+# SLPRO (Pull Up Farm): опросы/анонсы/результаты — каждые 3 часа
+20 */3 * * * botuser cd $BOT_DIR && $VENV run_slpro_monitor.py >> $LOG/slpro.log 2>&1
+
+# Фэнтези: выкачка статистики завершённых игр — каждые 3 часа
+35 */3 * * * botuser cd $BOT_DIR && $VENV run_fantasy.py --only ingest >> $LOG/fantasy.log 2>&1
+
+# Фэнтези: понедельничный подсчёт + рассылка таблицы — пн 09:00 МСК (06:00 UTC)
+0 6 * * 1 botuser cd $BOT_DIR && $VENV run_fantasy.py --only weekly >> $LOG/fantasy.log 2>&1
 
 # Опросы по тренировкам (создание/актуализация) — 09:05 МСК (06:05 UTC)
 5 6 * * * botuser cd $BOT_DIR && $VENV training_polls_enhanced.py >> $LOG/training_polls.log 2>&1
@@ -29,10 +39,21 @@ LOG=/var/log/basketball-bot
 # Статистика игрока (Шараев, ID 400566) — воскресенье 10:00 МСК (07:00 UTC)
 0 7 * * 0 botuser cd $BOT_DIR && $VENV player_stats.py --person-id 400566 >> $LOG/player_stats.log 2>&1
 
+# Отчёт посещаемости тренировок за неделю — воскресенье 09:00 МСК (06:00 UTC)
+0 6 * * 0 botuser cd $BOT_DIR && $VENV training_report.py --week >> $LOG/training_report.log 2>&1
+
+# Отчёт посещаемости игр за неделю — понедельник 09:00 МСК (06:00 UTC)
+0 6 * * 1 botuser cd $BOT_DIR && $VENV game_report.py --week >> $LOG/game_report.log 2>&1
+
 # ── Ежемесячные задачи ───────────────────────────────────────────────────────
 
 # Отчёт посещаемости тренировок — 1-е число месяца 09:00 МСК (06:00 UTC)
 0 6 1 * * botuser cd $BOT_DIR && $VENV training_report.py >> $LOG/training_report.log 2>&1
 
-# Ротация логов cron (оставляем последние 1000 строк)
-0 3 * * * botuser for f in $LOG/*.log; do tail -1000 "$f" > "$f.tmp" && mv "$f.tmp" "$f"; done
+# Отчёт посещаемости игр — 1-е число месяца 09:00 МСК (06:00 UTC)
+0 6 1 * * botuser cd $BOT_DIR && $VENV game_report.py >> $LOG/game_report.log 2>&1
+
+# Ротация логов cron (оставляем последние 1000 строк; chmod — чтобы
+# пересозданный файл не получил широкие права по umask: логи не должны
+# быть читаемы посторонними пользователями сервера)
+0 3 * * * botuser for f in $LOG/*.log; do tail -1000 "$f" > "$f.tmp" && mv "$f.tmp" "$f" && chmod 640 "$f"; done

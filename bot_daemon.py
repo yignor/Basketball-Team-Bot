@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Постоянно работающий демон бота.
-Обрабатывает голоса в опросах в реальном времени (вместо hourly GitHub Actions).
+Обрабатывает голоса в опросах в реальном времени (вместо hourly GitHub Actions)
+и интерактивное админ-меню (/admin) с inline-кнопками.
 Запускается как systemd-сервис и работает непрерывно.
 """
 
@@ -13,26 +14,105 @@ import signal
 import sys
 import time
 from datetime import datetime
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, PollAnswerHandler, ContextTypes
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+    WebAppInfo,
+)
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    PollAnswerHandler,
+    filters,
+)
 
 load_dotenv()
 
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDENTIALS", "")
 SPREADSHEET_ID    = os.getenv("SPREADSHEET_ID", "")
-ADMIN_USER_ID     = os.getenv("ADMIN_USER_ID", "")
+ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
+
+DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.log")
+
+# Mini App фэнтези: и фронт, и API отдаёт сам бот (aiohttp) за Cloudflare
+# Tunnel — GitHub Pages не нужен. Адрес туннеля меняется при рестарте
+# quick-tunnel, поэтому берём его из файла, который пишет обёртка cloudflared
+# (fallback — env FANTASY_API_URL). URL Mini App: {tunnel}/app/index.html?api={tunnel}
+FANTASY_API_URL_FILE = os.getenv("FANTASY_API_URL_FILE", "data/fantasy_api_url.txt")
+
+
+def _fantasy_api_url() -> str:
+    url = os.getenv("FANTASY_API_URL", "").strip()
+    if url:
+        return url.rstrip("/")
+    try:
+        with open(FANTASY_API_URL_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip().rstrip("/")
+    except OSError:
+        return ""
+
+
+def _fantasy_webapp_markup() -> Optional[InlineKeyboardMarkup]:
+    """Кнопка «Открыть фэнтези» (web_app). None, если туннель не поднят."""
+    api = _fantasy_api_url()
+    if not api:
+        return None
+    url = f"{api}/app/index.html?api={api}"
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]])
+
+
+def _scrub_token_from_old_log() -> None:
+    """Одноразовая зачистка: до фикса httpx-логирования в daemon.log попадали
+    URL Telegram API с токеном. Файл могут читать другие пользователи
+    сервера, поэтому вычищаем токен из уже накопленных строк. Выполняется
+    ДО открытия FileHandler, пока файл никто не дописывает."""
+    if not BOT_TOKEN:
+        return
+    try:
+        with open(DAEMON_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        if BOT_TOKEN in content:
+            with open(DAEMON_LOG_PATH, "w", encoding="utf-8") as f:
+                f.write(content.replace(BOT_TOKEN, "***TOKEN-REDACTED***"))
+    except OSError:
+        pass  # локальный запуск без этого файла — не критично
+
+
+class _RedactTokenFilter(logging.Filter):
+    """Страховка: если токен каким-то путём снова окажется в сообщении
+    лога (новая библиотека, DEBUG-режим), замазываем его до записи."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        if BOT_TOKEN:
+            msg = record.getMessage()
+            if BOT_TOKEN in msg:
+                record.msg = msg.replace(BOT_TOKEN, "***TOKEN-REDACTED***")
+                record.args = ()
+        return True
+
+
+_scrub_token_from_old_log()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("/var/log/basketball-bot/daemon.log", encoding="utf-8"),
+        logging.FileHandler(DAEMON_LOG_PATH, encoding="utf-8"),
     ],
 )
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RedactTokenFilter())
 log = logging.getLogger(__name__)
 
 # httpx/httpcore логируют полный URL запроса на уровне INFO, а URL Telegram API
@@ -40,28 +120,43 @@ log = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+# Логи не должны быть читаемы посторонними пользователями сервера (в
+# daemon.log исторически попадал BOT_TOKEN через httpx). chmod при каждом
+# старте, а не разово руками: cron-ротация пересоздаёт файлы через mv и
+# может вернуть широкие права.
+for _log_path, _log_mode in (("/var/log/basketball-bot", 0o750),
+                             ("/var/log/basketball-bot/daemon.log", 0o640)):
+    try:
+        os.chmod(_log_path, _log_mode)
+    except OSError:
+        pass  # локальный запуск без этого каталога / нет прав — не критично
 
-# Импортируем логику из collect_votes (переиспользуем без изменений)
+
+# Импортируем логику из collect_votes (переиспользуем без изменений).
+# upsert_vote (прямая запись в Sheets) больше не используется здесь — голоса
+# локально-первичные, см. sheets_cache.upsert_vote_local/upsert_game_vote_local.
 from collect_votes import (
     _init_sheets,
-    load_training_polls,
     classify_vote,
-    upsert_vote,
-    _get_service_ws,
-    _get_or_create_sheet,
-    _ensure_attend_header,
-    ATTEND_SHEET,
-    ATTEND_HEADER,
+    classify_game_vote,
 )
 import admin_panel
 import sheets_cache
+import script_runner
+import game_watcher
+import fantasy_api
+from enhanced_duplicate_protection import duplicate_protection
 
-# Кэш зарегистрированных опросов (обновляем раз в 5 минут)
+# Фэнтези-API (aiohttp) — включается флагом; наружу через Cloudflare Tunnel.
+FANTASY_API_ENABLED = os.getenv("FANTASY_API_ENABLED", "false").lower() == "true"
+FANTASY_API_PORT = int(os.getenv("FANTASY_API_PORT", "8081"))
+_fantasy_runner = None
+
+# Кэш зарегистрированных опросов (обновляем раз в 5 минут) — тренировки и игры
 _poll_cache: dict = {}
+_game_poll_cache: dict = {}
 _poll_cache_time: float = 0.0
 _spreadsheet = None
-_attend_ws   = None
-_service_ws  = None
 
 # Локальный SQLite-кэш листов Sheets для /admin (обновляем раз в 5 минут)
 _db_sync_time: float = 0.0
@@ -74,27 +169,21 @@ def _get_spreadsheet():
     return _spreadsheet
 
 
-def _get_worksheets():
-    global _attend_ws, _service_ws
-    sp = _get_spreadsheet()
-    if _service_ws is None:
-        _service_ws = _get_service_ws(sp)
-    if _attend_ws is None:
-        _attend_ws = _get_or_create_sheet(sp, ATTEND_SHEET, rows=2000, cols=len(ATTEND_HEADER))
-        _ensure_attend_header(_attend_ws)
-    return _service_ws, _attend_ws
-
-
 def _refresh_poll_cache() -> None:
-    global _poll_cache, _poll_cache_time
+    """Читает реестр опросов (TRAINING_POLL_REG/GAME_POLL_REG) напрямую из
+    локальной service_records — то же место, куда пишет add_record(), без
+    задержки push'а в Sheets (раньше тренировочный реестр читался из живого
+    Sheets, что могло на несколько часов "терять из виду" только что
+    зарегистрированный опрос)."""
+    global _poll_cache, _game_poll_cache, _poll_cache_time
     now = time.time()
     if now - _poll_cache_time < 300:  # 5 минут
         return
     try:
-        svc_ws, _ = _get_worksheets()
-        _poll_cache = load_training_polls(svc_ws)
+        _poll_cache = sheets_cache.load_poll_registrations_local("TRAINING_POLL_REG")
+        _game_poll_cache = sheets_cache.load_poll_registrations_local("GAME_POLL_REG")
         _poll_cache_time = now
-        log.info(f"Кэш опросов обновлён: {len(_poll_cache)} тренировочных опросов")
+        log.info(f"Кэш опросов обновлён: {len(_poll_cache)} тренировочных, {len(_game_poll_cache)} игровых")
     except Exception as e:
         log.warning(f"Не удалось обновить кэш опросов: {e}")
 
@@ -111,6 +200,43 @@ def _refresh_db_cache() -> None:
         log.warning(f"Не удалось обновить SQLite-кэш: {e}")
 
 
+PUSH_INTERVAL_SECONDS = 6 * 60 * 60  # 6 часов — периодическая выгрузка в Sheets
+_last_push_time: float = 0.0
+
+
+def _push_local_changes() -> dict:
+    """Выгружает накопленные локальные изменения (service_records,
+    attendance, game_votes — все dirty=1) в Sheets. Используется и
+    периодическим циклом демона, и кнопкой '🔄 Синхронизация' в /admin."""
+    sp = _get_spreadsheet()
+    result = {}
+    try:
+        result["service_records"] = sheets_cache.push_service_records(sp)
+    except Exception as e:
+        log.warning(f"Не удалось выгрузить service_records: {e}")
+        result["service_records"] = {"error": str(e)}
+    try:
+        result["attendance"] = sheets_cache.push_attendance(sp)
+    except Exception as e:
+        log.warning(f"Не удалось выгрузить attendance: {e}")
+        result["attendance"] = {"error": str(e)}
+    try:
+        result["game_votes"] = sheets_cache.push_game_votes(sp)
+    except Exception as e:
+        log.warning(f"Не удалось выгрузить game_votes: {e}")
+        result["game_votes"] = {"error": str(e)}
+    return result
+
+
+def _periodic_push_local_changes() -> None:
+    global _last_push_time
+    now = time.time()
+    if now - _last_push_time < PUSH_INTERVAL_SECONDS:
+        return
+    _push_local_changes()
+    _last_push_time = now
+
+
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     poll_answer = update.poll_answer
     if not poll_answer:
@@ -118,15 +244,16 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     _refresh_poll_cache()
     _refresh_db_cache()
+    _periodic_push_local_changes()
 
     tg_poll_id = str(poll_answer.poll_id)
-    if tg_poll_id not in _poll_cache:
-        return  # не тренировочный опрос
+    is_training = tg_poll_id in _poll_cache
+    is_game = tg_poll_id in _game_poll_cache
+    if not is_training and not is_game:
+        return  # ни тренировочный, ни игровой опрос
 
-    poll_info      = _poll_cache[tg_poll_id]
-    options_list   = poll_info["options"]
-    training_date  = poll_info["training_date"]
-    config_poll_id = poll_info["config_poll_id"]
+    poll_info = _poll_cache[tg_poll_id] if is_training else _game_poll_cache[tg_poll_id]
+    options_list = poll_info["options"]
 
     user       = poll_answer.user
     user_id    = str(user.id)
@@ -136,48 +263,607 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not poll_answer.option_ids:
         vote_text = ""
-        vote_type = "REMOVED"
+        chosen_first = ""
     else:
         chosen = [options_list[i] for i in poll_answer.option_ids if i < len(options_list)]
         vote_text = " + ".join(chosen)
-        vote_type = classify_vote(chosen[0] if chosen else "")
+        chosen_first = chosen[0] if chosen else ""
 
     try:
-        _, attend_ws = _get_worksheets()
-        upsert_vote(
-            attend_ws,
-            tg_poll_id, user_id, username, first_name, last_name,
-            vote_text, vote_type, training_date, config_poll_id,
-        )
+        if is_training:
+            vote_type = classify_vote(chosen_first) if vote_text else "REMOVED"
+            # Голоса — локально-первичные (пишем в SQLite сразу, выгрузка в
+            # Sheets отдельно, периодически/по кнопке — см. push_attendance).
+            sheets_cache.upsert_vote_local(
+                tg_poll_id, user_id, username, first_name, last_name,
+                vote_text, vote_type, poll_info["training_date"], poll_info["config_poll_id"],
+            )
+        else:
+            vote_type = classify_game_vote(chosen_first) if vote_text else "REMOVED"
+            sheets_cache.upsert_game_vote_local(
+                tg_poll_id, user_id, username, first_name, last_name,
+                vote_text, vote_type, poll_info["game_id"], poll_info["training_date"],
+            )
     except Exception as e:
         log.error(f"Ошибка при сохранении голоса: {e}")
+        sheets_cache.report_error("handle_poll_answer", str(e), _get_spreadsheet())
+
+
+# ─────────────────────────── Админ-меню ───────────────────────────────────
+
+def _is_admin(user) -> bool:
+    return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
+
+
+ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
+
+
+def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Постоянная кнопка внизу экрана — открывает то же меню, что и /admin,
+    без необходимости печатать команду каждый раз. Видна только админу,
+    т.к. отправляется только в его личном чате с ботом."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(ADMIN_KEYBOARD_LABEL)]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
+    for attempt in range(3):
+        try:
+            if with_keyboard:
+                await update.message.reply_text(ADMIN_KEYBOARD_LABEL + " активна ⬇️", reply_markup=_admin_reply_keyboard())
+            await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
+            return
+        except Exception as e:
+            log.warning(f"Не удалось отправить главное меню (попытка {attempt + 1}/3): {e}")
+            await asyncio.sleep(2)
+    log.error("Не удалось отправить главное меню после 3 попыток")
+
+
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+
+    # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
+    # админа. Нужно для "Список пользователей → В боте".
+    try:
+        sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
+    except Exception as e:
+        log.warning(f"Не удалось записать пользователя бота: {e}")
+
+    if not _is_admin(user):
+        return
+    _refresh_db_cache()
+    _periodic_push_local_changes()
+    await _send_main_menu(update, with_keyboard=True)
+
+
+async def handle_fantasy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/fantasy — открыть Mini App фэнтези (кнопка web_app). Доступно всем."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+    try:
+        sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
+    except Exception:
+        pass
+    import fantasy
+    season = fantasy.get_active_season()
+    markup = _fantasy_webapp_markup()
+    if not markup:
+        await update.message.reply_text("🏆 Фэнтези скоро откроется — приложение ещё настраивается.")
+        return
+    if not season:
+        await update.message.reply_text("🏆 Сейчас нет активного сезона фэнтези. Загляни позже!")
+        return
+    await update.message.reply_text(
+        f"🏆 Фэнтези «{season['name']}» ({season['format']})\nНабери состав в приложении:",
+        reply_markup=markup,
+    )
+
+
+# Конфигурация кнопок "Запуск оповещений". "daily" (Оповещения на сегодня)
+# обрабатывается отдельно ниже — это последовательный запуск первых трёх.
+LAUNCH_ACTIONS = {
+    "birthday": {
+        "label": "🎂 ДР",
+        "script": "run_birthday_notifications.py",
+        "args": [],
+        "data_types": ["ДЕНЬ_РОЖДЕНИЯ"],
+    },
+    "training_polls": {
+        "label": "📋 Опросы тренировок",
+        "script": "training_polls_enhanced.py",
+        "args": [],
+        "data_types": ["ОПРОС_ГОЛОСОВАНИЕ"],
+    },
+    "game_polls": {
+        "label": "🏀 Опросы игры",
+        "script": "run_game_system.py",
+        "args": ["--only", "polls"],
+        "data_types": ["ОПРОС_ИГРА"],
+    },
+    "game_announce": {
+        "label": "📢 Анонс игры",
+        "script": "run_game_system.py",
+        "args": ["--only", "announcements"],
+        "data_types": ["АНОНС_ИГРА"],
+    },
+    "slpro": {
+        "label": "🏀 SLPRO (Farm)",
+        "script": "run_slpro_monitor.py",
+        "args": [],
+        "data_types": ["ОПРОС_ИГРА_SLPRO", "АНОНС_ИГРА_SLPRO", "РЕЗУЛЬТАТ_ИГРА_SLPRO"],
+    },
+}
+DAILY_DATA_TYPES = [
+    "ДЕНЬ_РОЖДЕНИЯ", "ОПРОС_ГОЛОСОВАНИЕ", "ОПРОС_ИГРА", "АНОНС_ИГРА",
+    "ОПРОС_ИГРА_SLPRO", "АНОНС_ИГРА_SLPRO", "РЕЗУЛЬТАТ_ИГРА_SLPRO",
+]
+DAILY_SCRIPTS = [
+    ("run_birthday_notifications.py", []),
+    ("training_polls_enhanced.py", []),
+    ("run_game_system.py", []),
+    ("run_slpro_monitor.py", []),
+]
+
+
+def _main_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
+        [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
+        [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
+        [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
+        [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
+        [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
+    ])
+
+
+def _fantasy_menu_markup() -> InlineKeyboardMarkup:
+    import fantasy
+    season = fantasy.get_active_season()
+    rows: List[List[InlineKeyboardButton]] = []
+    if not season:
+        rows.append([InlineKeyboardButton("▶️ Старт сезона", callback_data="admin:fantasy:start")])
+    else:
+        fmt = season.get("format", "3x3")
+        other = "5x5" if str(fmt).startswith("3") else "3x3"
+        rows.append([InlineKeyboardButton(f"🔀 Формат: {fmt} → {other}", callback_data="admin:fantasy:format")])
+        rows.append([InlineKeyboardButton("📥 Пересчитать статистику", callback_data="admin:fantasy:ingest")])
+        rows.append([InlineKeyboardButton("🏁 Завершить сезон", callback_data="admin:fantasy:end")])
+    rows.append(_back_button())
+    return InlineKeyboardMarkup(rows)
+
+
+def _fantasy_menu_text() -> str:
+    import fantasy
+    season = fantasy.get_active_season()
+    if not season:
+        return "🏆 Фэнтези лига\n\nАктивного сезона нет."
+    return (f"🏆 Фэнтези лига\n\nСезон: «{season['name']}»\n"
+            f"Формат: {season.get('format', '3x3')}\n"
+            f"Старт: {season.get('started_at', '')[:10]}")
+
+
+def _back_button(target: str = "admin:menu:main") -> List[InlineKeyboardButton]:
+    return [InlineKeyboardButton("⬅️ Назад", callback_data=target)]
+
+
+def _launch_menu_markup() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📅 Оповещения на сегодня", callback_data="admin:run:daily")]]
+    for key, cfg in LAUNCH_ACTIONS.items():
+        rows.append([InlineKeyboardButton(cfg["label"], callback_data=f"admin:run:{key}")])
+    rows.append(_back_button())
+    return InlineKeyboardMarkup(rows)
+
+
+def _log_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Лог бота", callback_data="admin:log:bot")],
+        [InlineKeyboardButton("👤 Лог пользователей", callback_data="admin:log:users:0")],
+        [InlineKeyboardButton("⚠️ Ошибки", callback_data="admin:log:errors:0")],
+        _back_button(),
+    ])
+
+
+def _users_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 По таблице", callback_data="admin:users:table:0")],
+        [InlineKeyboardButton("🤖 В боте", callback_data="admin:users:bot:0")],
+        _back_button(),
+    ])
+
+
+PAGE_SIZE = 8
+
+
+def _pagination_row(base: str, offset: int, limit: int, total: int) -> List[InlineKeyboardButton]:
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"{base}:{max(0, offset - limit)}"))
+    if offset + limit < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"{base}:{offset + limit}"))
+    return nav
+
+
+def _render_players_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_players_page(offset=offset, limit=PAGE_SIZE)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"👥 Игроки по таблице ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        name = f"{r['surname']} {r['name']}".strip()
+        nick = f" (@{r['nickname']})" if r["nickname"] else ""
+        tg = "✅ TG" if r["telegram_id"] else "— без TG"
+        lines.append(f"• {name}{nick} — {tg}")
+    if not data["rows"]:
+        lines.append("Пусто")
+    rows = [_pagination_row("admin:users:table", offset, PAGE_SIZE, data["total"])]
+    rows.append(_back_button("admin:menu:users"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_bot_users_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_bot_users_page(offset=offset, limit=PAGE_SIZE)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"🤖 Пользователи в боте ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        uname = f"@{r['username']}" if r["username"] else "(без username)"
+        try:
+            when = datetime.fromisoformat(r["first_seen_at"]).astimezone().strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            when = r["first_seen_at"]
+        lines.append(f"• {r['first_name']} {uname} — первый /start {when}")
+    if not data["rows"]:
+        lines.append("Пока никто не запускал бота через /start")
+    rows = [_pagination_row("admin:users:bot", offset, PAGE_SIZE, data["total"])]
+    rows.append(_back_button("admin:menu:users"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_user_log_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_user_action_log(offset=offset, limit=10)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"👤 Лог пользователей ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        who = f"@{r['username']}" if r["username"] else (r["first_name"] or r["user_id"])
+        detail = f" — {r['detail']}" if r["detail"] else ""
+        lines.append(f"• [{r['kind']}] {who}{detail} ({r['ts']})")
+    if not data["rows"]:
+        lines.append("Событий пока нет")
+    rows = [_pagination_row("admin:log:users", offset, 10, data["total"])]
+    rows.append(_back_button("admin:menu:log"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_errors_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_errors_page(offset=offset, limit=PAGE_SIZE)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"⚠️ Ошибки ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        lines.append(f"• [{r['source']}] {r['message'][:200]} ({r['logged_at']})")
+    if not data["rows"]:
+        lines.append("Ошибок не зафиксировано")
+    rows = [_pagination_row("admin:log:errors", offset, PAGE_SIZE, data["total"])]
+    rows.append(_back_button("admin:menu:log"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _reports_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏋️ Тренировки", callback_data="admin:menu:reports:training")],
+        [InlineKeyboardButton("🏀 Игры", callback_data="admin:menu:reports:games")],
+        _back_button(),
+    ])
+
+
+def _reports_training_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("За неделю", callback_data="admin:report:training:week")],
+        [InlineKeyboardButton("За месяц", callback_data="admin:report:training:month")],
+        _back_button("admin:menu:reports"),
+    ])
+
+
+def _reports_games_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("За неделю", callback_data="admin:report:games:week")],
+        [InlineKeyboardButton("За месяц", callback_data="admin:report:games:month")],
+        _back_button("admin:menu:reports"),
+    ])
+
+
+def _check_already_run_today(data_types: List[str]) -> Optional[str]:
+    """Прямая проверка по Сервисному листу (не через 5-минутный кэш —
+    сразу после реального запуска кэш ещё не мог обновиться)."""
+    today_str = datetime.now().strftime("%d.%m.%Y")
+    for dt_ in data_types:
+        for record in duplicate_protection.get_records_by_type(dt_):
+            if record.get("date", "").startswith(today_str):
+                return record["date"]
+    return None
+
+
+async def _handle_fantasy_action(query, action: str) -> None:
+    import fantasy
+    if action == "start":
+        now = datetime.now()
+        months = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
+                  "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+        name = f"Фэнтези {months[now.month]} {now.year}"
+        season = fantasy.start_season(name, "3x3")
+        await query.edit_message_text(
+            f"✅ Сезон запущен: «{season['name']}» (формат {season['format']}).",
+            reply_markup=_fantasy_menu_markup(),
+        )
+    elif action == "format":
+        season = fantasy.get_active_season()
+        if not season:
+            await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+            return
+        new_fmt = "5x5" if str(season.get("format", "3x3")).startswith("3") else "3x3"
+        fantasy.set_format(new_fmt)
+        await query.edit_message_text(
+            f"🔀 Формат изменён на {new_fmt}.", reply_markup=_fantasy_menu_markup())
+    elif action == "ingest":
+        await query.edit_message_text("⏳ Пересчёт статистики фэнтези...")
+        try:
+            code, out, err = await script_runner.run_script("run_fantasy.py", ["--only", "ingest"])
+            summary = script_runner.summarize_output(out) if code == 0 else (err.strip().splitlines()[-1:] or ["ошибка"])[0]
+        except Exception as e:
+            summary = str(e)
+        await query.edit_message_text(f"📥 Статистика фэнтези\n\n{summary}", reply_markup=_fantasy_menu_markup())
+    elif action == "end":
+        result = fantasy.end_season()
+        if not result:
+            await query.edit_message_text("Активного сезона нет.", reply_markup=_fantasy_menu_markup())
+            return
+        final = fantasy.format_season_final(result["season"]["id"])
+        await query.edit_message_text(
+            f"{final}\n\n(Показано только тебе. Разошли в чат вручную, если нужно.)",
+            reply_markup=_fantasy_menu_markup(),
+        )
+    else:
+        await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+
+
+async def _handle_launch_action(query, action: str, force: bool) -> None:
+    if action == "daily":
+        data_types = DAILY_DATA_TYPES
+        scripts = DAILY_SCRIPTS
+        label = "Оповещения на сегодня"
+    else:
+        cfg = LAUNCH_ACTIONS.get(action)
+        if not cfg:
+            return
+        data_types = cfg["data_types"]
+        scripts = [(cfg["script"], cfg["args"])]
+        label = cfg["label"]
+
+    if not force:
+        already_at = _check_already_run_today(data_types)
+        if already_at:
+            await query.edit_message_text(
+                f"⚠️ {label}: уже запускалось сегодня ({already_at})\n\nЗапустить повторно?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Всё равно запустить", callback_data=f"admin:run:{action}:force")],
+                    [InlineKeyboardButton("Отмена", callback_data="admin:menu:launch")],
+                ]),
+            )
+            return
+    else:
+        for dt_ in data_types:
+            duplicate_protection.delete_todays_records(dt_)
+
+    await query.edit_message_text(f"⏳ Запускаю: {label}...")
+
+    ok = True
+    result_lines = []
+    for script, args in scripts:
+        try:
+            code, out, stderr = await script_runner.run_script(script, args)
+        except Exception as e:
+            code, out, stderr = 1, "", str(e)
+        if code == 0:
+            result_lines.append(f"✅ {script}\n{script_runner.summarize_output(out)}")
+        else:
+            ok = False
+            result_lines.append(f"❌ {script}: {stderr.strip().splitlines()[-1] if stderr.strip() else 'ошибка, см. логи демона'}")
+            log.error(f"Скрипт {script} завершился с ошибкой (код {code}): {stderr[-2000:]}")
+            sheets_cache.report_error(script, stderr[-2000:] or f"exit code {code}", _get_spreadsheet())
+
+    header = "✅" if ok else "⚠️"
+    text = f"{header} {label} — готово\n\n" + "\n\n".join(result_lines)
+    if len(text) > 3800:  # запас от лимита Telegram в 4096 символов
+        text = text[:3800] + "\n…(обрезано)"
+    await query.edit_message_text(text, reply_markup=_launch_menu_markup())
+
+
+REPORT_SCRIPTS = {
+    "training": ("training_report.py", "Тренировки", _reports_training_menu_markup),
+    "games": ("game_report.py", "Игры", _reports_games_menu_markup),
+}
+
+
+async def _handle_report_action(query, kind: str, period: str) -> None:
+    cfg = REPORT_SCRIPTS.get(kind)
+    if not cfg:
+        return
+    script, sheet_label, menu_fn = cfg
+    await query.edit_message_text(f"⏳ Формирую отчёт ({sheet_label.lower()}, {period})...")
+    args = ["--week"] if period == "week" else ["--month", datetime.now().strftime("%Y-%m")]
+    try:
+        code, _stdout, stderr = await script_runner.run_script(script, args)
+    except Exception as e:
+        code, stderr = 1, str(e)
+    if code == 0:
+        text = f"✅ Отчёт обновлён в таблице (лист «{sheet_label}»)."
+    else:
+        text = f"❌ Не удалось сформировать отчёт: {stderr.strip().splitlines()[-1] if stderr.strip() else 'см. логи демона'}"
+        log.error(f"{script} завершился с ошибкой (код {code}): {stderr[-2000:]}")
+        sheets_cache.report_error(script, stderr[-2000:] or f"exit code {code}", _get_spreadsheet())
+    await query.edit_message_text(text, reply_markup=menu_fn())
+
+
+async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not _is_admin(user):
+        if query:
+            await query.answer()
+        return
+
+    await query.answer()
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != "admin":
+        return
+
+    try:
+        if parts[1] == "menu":
+            screen = parts[2] if len(parts) > 2 else "main"
+            if screen == "main":
+                await query.edit_message_text("📊 Админ-панель", reply_markup=_main_menu_markup())
+            elif screen == "launch":
+                await query.edit_message_text("🚀 Запуск оповещений\nВыберите действие:", reply_markup=_launch_menu_markup())
+            elif screen == "users":
+                await query.edit_message_text("👥 Список пользователей", reply_markup=_users_menu_markup())
+            elif screen == "log":
+                await query.edit_message_text("📋 Лог действий", reply_markup=_log_menu_markup())
+            elif screen == "reports":
+                sub = parts[3] if len(parts) > 3 else None
+                if sub == "training":
+                    await query.edit_message_text("📊 Отчёты → Тренировки", reply_markup=_reports_training_menu_markup())
+                elif sub == "games":
+                    await query.edit_message_text("📊 Отчёты → Игры", reply_markup=_reports_games_menu_markup())
+                else:
+                    await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
+            elif screen == "fantasy":
+                await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+
+        elif parts[1] == "fantasy":
+            await _handle_fantasy_action(query, parts[2] if len(parts) > 2 else "")
+
+        elif parts[1] == "run":
+            action = parts[2]
+            force = len(parts) > 3 and parts[3] == "force"
+            await _handle_launch_action(query, action, force)
+
+        elif parts[1] == "users":
+            mode = parts[2]
+            offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            if mode == "table":
+                _refresh_db_cache()
+                text, markup = _render_players_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif mode == "bot":
+                text, markup = _render_bot_users_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
+
+        elif parts[1] == "log":
+            mode = parts[2]
+            offset = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            if mode == "bot":
+                _refresh_db_cache()
+                await query.edit_message_text(admin_panel.render_bot_log(since_days=1), reply_markup=_log_menu_markup())
+            elif mode == "users":
+                text, markup = _render_user_log_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif mode == "errors":
+                text, markup = _render_errors_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
+
+        elif parts[1] == "report":
+            kind, period = parts[2], parts[3]
+            await _handle_report_action(query, kind, period)
+
+        elif parts[1] == "sync":
+            await query.edit_message_text("⏳ Синхронизация...")
+            push_result = _push_local_changes()
+            try:
+                pull_result = sheets_cache.sync_all(_get_spreadsheet())
+            except Exception as e:
+                pull_result = {"error": str(e)}
+            sr = push_result.get("service_records", {})
+            at = push_result.get("attendance", {})
+            gv = push_result.get("game_votes", {})
+            lines = [
+                "✅ Синхронизация завершена",
+                "",
+                f"Выгружено в Sheets: события {sr.get('pushed', 0)} "
+                f"(добавлено {sr.get('inserted', 0)}, обновлено {sr.get('updated', 0)}, "
+                f"удалено {sr.get('deleted', 0)}), голоса тренировок {at.get('pushed', 0)} "
+                f"(добавлено {at.get('inserted', 0)}, обновлено {at.get('updated', 0)}), "
+                f"голоса игр {gv.get('pushed', 0)} "
+                f"(добавлено {gv.get('inserted', 0)}, обновлено {gv.get('updated', 0)})",
+                f"Забрано из Sheets: {pull_result}",
+            ]
+            await query.edit_message_text("\n".join(lines), reply_markup=_main_menu_markup())
+
+    except Exception as e:
+        log.error(f"Ошибка в админ-меню (callback_data={data!r}): {e}")
+        sheets_cache.report_error("admin_menu", f"{data!r}: {e}", _get_spreadsheet())
+        try:
+            await query.edit_message_text("⚠️ Произошла ошибка, подробности в логах демона.", reply_markup=_main_menu_markup())
+        except Exception:
+            pass
 
 
 async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
-    # Только личка с админом. Если ADMIN_USER_ID не настроен — команда не работает нигде.
+    # Только личка с админом. Если ADMIN_USER_IDS не настроен — команда не работает нигде.
     if not user or not chat or chat.type != "private":
         return
-    if not ADMIN_USER_ID or str(user.id) != ADMIN_USER_ID:
+    if not _is_admin(user):
         return
-
     _refresh_db_cache()
+    _periodic_push_local_changes()
+    await _send_main_menu(update)
 
-    try:
-        text = admin_panel.build_dashboard()
-    except Exception as e:
-        log.error(f"Ошибка при формировании админ-панели: {e}")
-        text = "⚠️ Не удалось получить статистику, подробности в логах демона."
 
-    for attempt in range(3):
+async def handle_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Нажатие постоянной кнопки '📊 Админ-панель' — то же самое, что /admin."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+    if not _is_admin(user):
+        return
+    _refresh_db_cache()
+    _periodic_push_local_changes()
+    await _send_main_menu(update)
+
+
+BACKGROUND_TICK_SECONDS = 30
+_background_task = None
+
+
+async def _background_loop() -> None:
+    """Единственный независимый таймер демона. Раньше _refresh_poll_cache/
+    _refresh_db_cache/_periodic_push_local_changes срабатывали только
+    попутно с входящим трафиком Telegram — во время матча без активности
+    в чате это могло надолго задерживать и их, и (что важнее) вотчер
+    результатов игр, которому нужно тикать независимо от чата."""
+    log.info(f"Фоновый цикл запущен (тик каждые {BACKGROUND_TICK_SECONDS}с)")
+    while True:
         try:
-            await update.message.reply_text(text)
-            return
+            await asyncio.sleep(BACKGROUND_TICK_SECONDS)
+            _refresh_poll_cache()
+            _refresh_db_cache()
+            _periodic_push_local_changes()
+            await game_watcher.tick()
+        except asyncio.CancelledError:
+            log.info("Фоновый цикл остановлен")
+            raise
         except Exception as e:
-            log.warning(f"Не удалось отправить ответ /admin (попытка {attempt + 1}/3): {e}")
-            await asyncio.sleep(2)
-    log.error("Не удалось отправить ответ /admin после 3 попыток")
+            # Один плохой тик не должен убивать демон и останавливать вотчер навсегда.
+            log.error(f"Ошибка в фоновом цикле: {e}")
+            sheets_cache.report_error("background_loop", str(e), _get_spreadsheet())
 
 
 async def on_startup(app: Application) -> None:
@@ -188,9 +874,47 @@ async def on_startup(app: Application) -> None:
     sheets_cache.init_db()
     _refresh_poll_cache()
     _refresh_db_cache()
+    _periodic_push_local_changes()
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("admin", "Админ-панель"),
+            BotCommand("start", "Показать кнопку админ-панели"),
+        ])
+    except Exception as e:
+        log.warning(f"Не удалось зарегистрировать список команд: {e}")
+
+    global _background_task
+    _background_task = asyncio.create_task(_background_loop())
+
+    # Фэнтези-API в том же event loop (localhost; наружу — Cloudflare Tunnel).
+    global _fantasy_runner
+    if FANTASY_API_ENABLED and BOT_TOKEN:
+        try:
+            from aiohttp import web
+            fapp = fantasy_api.create_app(BOT_TOKEN)
+            _fantasy_runner = web.AppRunner(fapp)
+            await _fantasy_runner.setup()
+            site = web.TCPSite(_fantasy_runner, "127.0.0.1", FANTASY_API_PORT)
+            await site.start()
+            log.info(f"Фэнтези-API поднят на 127.0.0.1:{FANTASY_API_PORT}")
+        except Exception as e:
+            log.error(f"Не удалось поднять фэнтези-API: {e}")
+            _fantasy_runner = None
 
 
 async def on_shutdown(app: Application) -> None:
+    global _background_task, _fantasy_runner
+    if _background_task:
+        _background_task.cancel()
+        try:
+            await _background_task
+        except asyncio.CancelledError:
+            pass
+    if _fantasy_runner:
+        try:
+            await _fantasy_runner.cleanup()
+        except Exception:
+            pass
     log.info("Бот остановлен.")
 
 
@@ -198,6 +922,8 @@ def main() -> None:
     if not BOT_TOKEN:
         log.error("BOT_TOKEN не задан в .env")
         sys.exit(1)
+    if not ADMIN_USER_IDS:
+        log.warning("ADMIN_USER_IDS не задан — команда /admin будет недоступна никому")
 
     # Трафик бота идёт через VPN-туннель с обфускацией (обход блокировки Telegram
     # провайдером), что добавляет джиттер задержки — дефолтные таймауты httpx
@@ -215,11 +941,15 @@ def main() -> None:
     )
 
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("admin", handle_admin))
+    app.add_handler(CommandHandler("fantasy", handle_fantasy))
+    app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
+    app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     log.info("Запуск polling...")
     app.run_polling(
-        allowed_updates=["poll_answer", "message"],
+        allowed_updates=["poll_answer", "message", "callback_query"],
         drop_pending_updates=False,
     )
 

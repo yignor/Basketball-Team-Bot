@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""
+Клиент JSON-API лиги SLPRO (basketstat.su).
+
+Официально «API нет» — сайт https://slpro.basketstat.ru это Vue SPA, но за
+ним лежит полноценный JSON-API, доступный анонимно. Все запросы:
+    POST https://api.basketstat.su/v1/{route}
+    тело JSON с "url":"{route}", "tournament": slug, для защищённых
+    роутов — "auth_token":"" (пустая строка = аноним, проходит).
+
+Сезон/дивизион/стадия/team_id НЕ хардкодятся — discover_context() находит
+их по имени команды через settings + tournament/teams, поэтому смена
+сезона лигой не требует правок.
+"""
+
+import asyncio
+import re
+from typing import Any, Dict, List, Optional
+
+import aiohttp
+
+API_BASE = "https://api.basketstat.su/v1"
+ORIGIN = "https://slpro.basketstat.ru"
+DEFAULT_TOURNAMENT = "slpro"
+
+
+def _normalize_name(name: Optional[str]) -> str:
+    """Нормализация названия команды для сравнения (как в enhanced_game_parser)."""
+    if not isinstance(name, str):
+        return ""
+    return re.sub(r"[\s\-_/.]", "", name.strip().lower())
+
+
+class SlproClient:
+    def __init__(self, tournament: str = DEFAULT_TOURNAMENT, timeout: float = 20.0):
+        self.tournament = tournament
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+
+    async def _post(self, route: str, retries: int = 3, base_delay: float = 2.0,
+                    **params: Any) -> Optional[Dict[str, Any]]:
+        """POST на {API_BASE}/{route}. Подставляет url/tournament/auth_token.
+        Возвращает распарсенный JSON или None при ошибке (с ретраями)."""
+        payload: Dict[str, Any] = {
+            "url": route,
+            "tournament": self.tournament,
+            "auth_token": "",
+        }
+        payload.update(params)
+        headers = {"Origin": ORIGIN, "Content-Type": "application/json"}
+
+        last_error: Optional[str] = None
+        for attempt in range(retries):
+            try:
+                async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                    async with session.post(f"{API_BASE}/{route}", json=payload, headers=headers) as resp:
+                        text = await resp.text()
+                        if not (200 <= resp.status < 300):
+                            last_error = f"HTTP {resp.status}: {text[:200]}"
+                        else:
+                            data = await resp.json(content_type=None)
+                            if isinstance(data, dict) and data.get("error"):
+                                last_error = f"API error: {data['error']}"
+                            else:
+                                return data
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_error = f"{type(e).__name__}: {e}"
+            if attempt < retries - 1:
+                await asyncio.sleep(base_delay * (2 ** attempt))
+
+        print(f"⚠️ SLPRO {route}: не удалось получить данные ({last_error})")
+        return None
+
+    # ── Справочники ──────────────────────────────────────────────────────────
+
+    async def get_settings(self) -> Optional[Dict[str, Any]]:
+        return await self._post("settings")
+
+    async def discover_context(self, team_names: List[str]) -> Optional[Dict[str, Any]]:
+        """Находит текущую (активную) стадию, в которой играет наша команда,
+        по имени. Возвращает {season_id, division_id, stage_id, group_id,
+        team_id, team_name, season, division_name} или None.
+
+        Перебираем активные стадии всех сезонов (active-флаг у стадии), в
+        каждой запрашиваем tournament/teams и ищем совпадение имени. Так id
+        не хардкодятся и переживают смену сезона."""
+        wanted = {_normalize_name(n) for n in team_names if n}
+        if not wanted:
+            return None
+
+        settings = await self.get_settings()
+        if not settings or "seasons" not in settings:
+            return None
+
+        # Кандидаты-стадии: сперва active, затем остальные (fallback).
+        active_stages: List[Dict[str, Any]] = []
+        other_stages: List[Dict[str, Any]] = []
+        for season in settings.get("seasons", []):
+            for division in season.get("divisions", []):
+                for stage in division.get("stages", []):
+                    ctx = {
+                        "season_id": season.get("season_id"),
+                        "season": season.get("season"),
+                        "division_id": division.get("division_id"),
+                        "division": division.get("division"),
+                        "division_name": division.get("division_name"),
+                        "stage_id": stage.get("stage_id"),
+                        "group_id": (stage.get("groups") or [{}])[0].get("group_id"),
+                    }
+                    if stage.get("active"):
+                        active_stages.append(ctx)
+                    else:
+                        other_stages.append(ctx)
+
+        for ctx in active_stages + other_stages:
+            teams = await self.get_standings(ctx)
+            for team in teams:
+                if _normalize_name(team.get("name")) in wanted:
+                    return {
+                        **ctx,
+                        "team_id": team.get("team_id"),
+                        "team_name": team.get("name"),
+                    }
+        return None
+
+    async def get_standings(self, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+        data = await self._post(
+            "tournament/teams",
+            season_id=ctx.get("season_id"),
+            division_id=ctx.get("division_id"),
+            stage_id=ctx.get("stage_id"),
+        )
+        return (data or {}).get("teams", []) or []
+
+    async def get_schedule(self, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+        data = await self._post(
+            "tournament/schedule",
+            season_id=ctx.get("season_id"),
+            division_id=ctx.get("division_id"),
+            stage_id=ctx.get("stage_id"),
+        )
+        return (data or {}).get("schedule", []) or []
+
+    async def get_roster(self, team_id: int) -> List[Dict[str, Any]]:
+        data = await self._post("teams/get-players", team_id=team_id)
+        return (data or {}).get("players", []) or []
+
+    async def get_game(self, game_id: Any, ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Полный box-score одной игры: {game, players:{home_players,
+        guest_players}, log:[...]}. Требует tournament_id + season_id — берём
+        из ctx (discover_context) либо дефолт (tournament_id=2)."""
+        params: Dict[str, Any] = {"game_id": str(game_id), "tournament_id": 2}
+        if ctx:
+            if ctx.get("season_id") is not None:
+                params["season_id"] = ctx["season_id"]
+        return await self._post("games", **params)
+
+    async def get_our_games(self, ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Игры нашей команды (по team_id из ctx) из расписания стадии."""
+        team_id = ctx.get("team_id")
+        if team_id is None:
+            return []
+        games = await self.get_schedule(ctx)
+        return [g for g in games if g.get("home_id") == team_id or g.get("guest_id") == team_id]
+
+
+async def _demo() -> None:
+    """Ручная проверка: python3 slpro_client.py"""
+    client = SlproClient()
+    ctx = await client.discover_context(["PullUp Farm", "Pull Up Farm"])
+    print("context:", ctx)
+    if ctx:
+        games = await client.get_our_games(ctx)
+        print(f"наших игр: {len(games)}")
+        for g in games:
+            print(f"  {g['game_id']} {g['game_date']} {g['game_time']} "
+                  f"{g['home_name']} {g['home_score']}:{g['guest_score']} {g['guest_name']} "
+                  f"(status={g['status']})")
+
+
+if __name__ == "__main__":
+    asyncio.run(_demo())

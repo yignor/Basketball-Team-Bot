@@ -6,6 +6,7 @@ Production версия для ежедневного запуска
 """
 
 import asyncio
+import fcntl
 import os
 import json
 import re
@@ -182,42 +183,40 @@ class GameResultsMonitorFinal:
         """Получает результаты игр используя ссылки из сервисного листа"""
         try:
             from enhanced_duplicate_protection import duplicate_protection
-            from datetime_utils import get_moscow_time
-            
-            today = get_moscow_time().strftime('%d.%m.%Y')
+            from datetime_utils import is_within_game_tracking_window
+
             games = []
-            
-            # Получаем все данные из сервисного листа
-            worksheet = duplicate_protection._get_service_worksheet()
-            if not worksheet:
-                print("❌ Сервисный лист недоступен")
-                return []
-            
-            all_data = worksheet.get_all_values()
-            
-            # Ищем записи типа АНОНС_ИГРА за сегодня с ссылками
-            for row in all_data:
-                if (len(row) >= 6 and 
-                    row[0] == "АНОНС_ИГРА" and 
-                    today in row[1] and 
-                    row[5]):  # Есть ссылка
-                    
-                    game_link = row[5]
-                    if not game_link.startswith('http'):
-                        game_link = f"http://letobasket.ru/{game_link}"
-                    
-                    print(f"🔍 Парсим игру по ссылке: {game_link}")
-                    
-                    # Парсим игру используя улучшенный парсер
-                    game_info = await self.parse_game_from_link(game_link)
-                    if game_info:
-                        games.append(game_info)
-                        print(f"✅ Игра добавлена: {game_info['our_team']} vs {game_info['opponent']} - {game_info['result']}")
-                    else:
-                        print(f"❌ Не удалось распарсить игру")
-            
+
+            # Ищем записи типа АНОНС_ИГРА в пределах окна отслеживания — по
+            # фактическому времени начала игры (is_within_game_tracking_window),
+            # а не по дате создания записи или календарной дате: записи могут
+            # быть заведены заранее (например, при отслеживании
+            # переприсвоенного лигой game_id), а ночные игры — идти после
+            # полуночи, оставаясь при этом "сегодняшними" по смыслу.
+            records = duplicate_protection.get_records_by_type("АНОНС_ИГРА")
+
+            for rec in records:
+                if not rec.get('link'):
+                    continue
+                if not is_within_game_tracking_window(rec.get('game_date'), rec.get('game_time')):
+                    continue
+
+                game_link = rec['link']
+                if not game_link.startswith('http'):
+                    game_link = f"http://letobasket.ru/{game_link}"
+
+                print(f"🔍 Парсим игру по ссылке: {game_link}")
+
+                # Парсим игру используя улучшенный парсер
+                game_info = await self.parse_game_from_link(game_link)
+                if game_info:
+                    games.append(game_info)
+                    print(f"✅ Игра добавлена: {game_info['our_team']} vs {game_info['opponent']} - {game_info['result']}")
+                else:
+                    print(f"❌ Не удалось распарсить игру")
+
             return games
-            
+
         except Exception as e:
             print(f"❌ Ошибка получения результатов по ссылкам: {e}")
             return []
@@ -632,35 +631,29 @@ class GameResultsMonitorFinal:
         print("\n🔍 Проверка наличия ссылок на игры для сегодня...")
         from enhanced_duplicate_protection import duplicate_protection
         
-        # Ищем ссылки на игры в сервисном листе
+        # Ищем ссылки на игры в пределах окна отслеживания (по фактическому
+        # времени начала игры, а не по календарной дате — ночные игры могут
+        # начаться поздно вечером и идти после полуночи, см.
+        # fetch_game_results_from_links/is_within_game_tracking_window)
         today_games_found = False
         try:
-            from datetime_utils import get_moscow_time
+            from datetime_utils import get_moscow_time, is_within_game_tracking_window
             today = get_moscow_time().strftime('%d.%m.%Y')
-            
-            # Получаем все данные из сервисного листа
-            worksheet = duplicate_protection._get_service_worksheet()
-            if worksheet:
-                all_data = worksheet.get_all_values()
-                
-                # Ищем записи типа АНОНС_ИГРА за сегодня
-                for row in all_data:
-                    if (len(row) >= 6 and 
-                        row[0] == "АНОНС_ИГРА" and 
-                        today in row[1] and  # Дата в колонке B
-                        row[5]):  # Ссылка в колонке F
-                        today_games_found = True
-                        print(f"✅ Найдена игра на сегодня: {row[2]} (ссылка: {row[5]})")
-                        break
-                
-                if not today_games_found:
-                    print(f"❌ Игры на сегодня ({today}) не найдены в сервисном листе")
-                    print("💡 Убедитесь, что анонсы игр были созданы и содержат ссылки")
-                    return
-            else:
-                print("❌ Сервисный лист недоступен")
+
+            for rec in duplicate_protection.get_records_by_type("АНОНС_ИГРА"):
+                if not rec.get('link'):
+                    continue
+                if not is_within_game_tracking_window(rec.get('game_date'), rec.get('game_time')):
+                    continue
+                today_games_found = True
+                print(f"✅ Найдена игра на сегодня: {rec.get('unique_key')} (ссылка: {rec.get('link')})")
+                break
+
+            if not today_games_found:
+                print(f"❌ Игры на сегодня ({today}) не найдены в сервисном листе")
+                print("💡 Убедитесь, что анонсы игр были созданы и содержат ссылки")
                 return
-                
+
         except Exception as e:
             print(f"❌ Ошибка проверки ссылок на игры: {e}")
             return
@@ -700,10 +693,33 @@ class GameResultsMonitorFinal:
         else:
             print("\n⚠️ Результаты не отправлены (возможно, уже были отправлены ранее)")
 
+LOCK_FILE_PATH = "/tmp/game_results_monitor.lock"
+
+
 async def main():
-    """Основная функция"""
-    monitor = GameResultsMonitorFinal()
-    await monitor.run_game_results_monitor()
+    """Основная функция.
+
+    Этот скрипт теперь запускается и старым 30-минутным cron, и новым
+    адаптивным вотчером результатов (game_watcher.py) — оба могут
+    попытаться проверить/отправить результат одной и той же игры почти
+    одновременно. Атомарная защита от дублей в service_records защищает
+    только запись в БД, но не сам факт отправки сообщения в Telegram
+    (между check_duplicate и add_record есть окно) — поэтому здесь
+    дополнительно неблокирующая файловая блокировка: если кто-то уже
+    выполняет проверку, просто пропускаем этот запуск (следующий тик/крон
+    повторит попытку)."""
+    lock_file = open(LOCK_FILE_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("⏭️ Другой процесс уже проверяет результаты игр (cron/вотчер пересеклись) — пропускаю этот запуск")
+        return
+    try:
+        monitor = GameResultsMonitorFinal()
+        await monitor.run_game_results_monitor()
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
