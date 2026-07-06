@@ -17,7 +17,9 @@ mkdir -p "$(dirname "$URL_FILE")"
 
 echo "cloudflared-fantasy: туннель к http://127.0.0.1:${PORT}, URL -> ${URL_FILE}"
 
-cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" 2>&1 | while IFS= read -r line; do
+# --protocol http2: держим связь с Cloudflare по TCP 443, а не QUIC/UDP —
+# через VPN-туннель UDP/QUIC рвётся («origin unregistered from Argo Tunnel»).
+cloudflared tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:${PORT}" 2>&1 | while IFS= read -r line; do
   echo "$line"
   if [[ "$line" =~ (https://[a-z0-9-]+\.trycloudflare\.com) ]]; then
     echo "${BASH_REMATCH[1]}" > "$URL_FILE"
