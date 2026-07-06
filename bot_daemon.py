@@ -45,31 +45,58 @@ ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("A
 
 DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.log")
 
-# Mini App фэнтези: и фронт, и API отдаёт сам бот (aiohttp) за Cloudflare
-# Tunnel — GitHub Pages не нужен. Адрес туннеля меняется при рестарте
-# quick-tunnel, поэтому берём его из файла, который пишет обёртка cloudflared
-# (fallback — env FANTASY_API_URL). URL Mini App: {tunnel}/app/index.html?api={tunnel}
-FANTASY_API_URL_FILE = os.getenv("FANTASY_API_URL_FILE", "data/fantasy_api_url.txt")
+# Mini App фэнтези без туннеля: фронт — статикой на GitHub Pages
+# (FANTASY_WEBAPP_URL), данные (пул/состав/таблица) бот кладёт прямо в URL при
+# открытии, выбранный состав приходит обратно через Telegram sendData (сервер
+# наружу не светим). Открывается reply-кнопкой (sendData работает только так).
+FANTASY_WEBAPP_URL = os.getenv("FANTASY_WEBAPP_URL", "").strip()
 
 
-def _fantasy_api_url() -> str:
-    url = os.getenv("FANTASY_API_URL", "").strip()
-    if url:
-        return url.rstrip("/")
-    try:
-        with open(FANTASY_API_URL_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip().rstrip("/")
-    except OSError:
-        return ""
-
-
-def _fantasy_webapp_markup() -> Optional[InlineKeyboardMarkup]:
-    """Кнопка «Открыть фэнтези» (web_app). None, если туннель не поднят."""
-    api = _fantasy_api_url()
-    if not api:
+async def _fantasy_payload(user_id: str) -> Optional[str]:
+    """base64url(JSON) с сезоном/пулом/составом пользователя/таблицей — кладём
+    в URL Mini App. None, если нет активного сезона."""
+    import base64
+    from datetime import date
+    import fantasy
+    import fantasy_api
+    season = fantasy.get_active_season()
+    if not season:
         return None
-    url = f"{api}/app/index.html?api={api}"
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]])
+    pool = await fantasy_api.build_pool()
+    week_start = fantasy.week_start_of(date.today()).isoformat()
+    r = fantasy.get_roster(user_id, season["id"], week_start)
+    table = fantasy.weekly_standings(season["id"], week_start)
+    names = fantasy.display_names([row["user_id"] for row in table])
+    standings = [{"name": names.get(str(row["user_id"]), "Участник"), "points": row["points"]} for row in table]
+    data = {
+        "season": {"name": season["name"], "format": season["format"],
+                   "roster_size": fantasy.roster_size(season)},
+        # компактно: номер (пустой у SLPRO-ростера) и команда (одна) опускаем,
+        # чтобы URL Mini App не разрастался
+        "pool": [{"r": p["ref"], "m": p["name"]} for p in pool],
+        "roster": r["refs"] if r else [],
+        "locked": bool(r["locked"]) if r else False,
+        "week_start": week_start,
+        "standings": standings,
+    }
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+async def _fantasy_webapp_markup(user_id: str) -> Optional[ReplyKeyboardMarkup]:
+    """Reply-кнопка «Открыть фэнтези» (web_app + данные в URL). None, если
+    Mini App не настроен (нет FANTASY_WEBAPP_URL) или нет активного сезона."""
+    if not FANTASY_WEBAPP_URL:
+        return None
+    payload = await _fantasy_payload(user_id)
+    if payload is None:
+        return None
+    sep = "&" if "#" in FANTASY_WEBAPP_URL else "#"
+    url = f"{FANTASY_WEBAPP_URL}{sep}d={payload}"
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]],
+        resize_keyboard=True,
+    )
 
 
 def _scrub_token_from_old_log() -> None:
@@ -354,17 +381,70 @@ async def handle_fantasy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         pass
     import fantasy
     season = fantasy.get_active_season()
-    markup = _fantasy_webapp_markup()
-    if not markup:
-        await update.message.reply_text("🏆 Фэнтези скоро откроется — приложение ещё настраивается.")
-        return
     if not season:
         await update.message.reply_text("🏆 Сейчас нет активного сезона фэнтези. Загляни позже!")
         return
+    if not FANTASY_WEBAPP_URL:
+        await update.message.reply_text("🏆 Фэнтези скоро откроется — приложение ещё настраивается.")
+        return
+    try:
+        markup = await _fantasy_webapp_markup(str(user.id))
+    except Exception as e:
+        log.warning(f"Не удалось собрать кнопку фэнтези: {e}")
+        markup = None
+    if not markup:
+        await update.message.reply_text("🏆 Не удалось открыть фэнтези, попробуй позже.")
+        return
     await update.message.reply_text(
-        f"🏆 Фэнтези «{season['name']}» ({season['format']})\nНабери состав в приложении:",
+        f"🏆 Фэнтези «{season['name']}» ({season['format']})\nНажми кнопку ниже, чтобы набрать состав:",
         reply_markup=markup,
     )
+
+
+async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Приём состава из Mini App (Telegram sendData). Валидируем на сервере и
+    сохраняем — клиенту не доверяем."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not msg.web_app_data or not user:
+        return
+    import fantasy
+    import fantasy_api
+    try:
+        payload = json.loads(msg.web_app_data.data)
+        refs = payload.get("refs") or []
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        await msg.reply_text("⚠️ Не удалось прочитать состав.")
+        return
+
+    uid = str(user.id)
+    if not fantasy_api._is_team_member(uid):
+        await msg.reply_text("Фэнтези доступна только игрокам команды.")
+        return
+    season = fantasy.get_active_season()
+    if not season:
+        await msg.reply_text("Сейчас нет активного сезона.")
+        return
+    size = fantasy.roster_size(season)
+    if not isinstance(refs, list) or len(refs) != size or len(set(refs)) != size:
+        await msg.reply_text(f"Нужно выбрать ровно {size} игроков.")
+        return
+    try:
+        pool_refs = {p["ref"] for p in await fantasy_api.build_pool()}
+    except Exception:
+        pool_refs = set()
+    if pool_refs and any(r not in pool_refs for r in refs):
+        await msg.reply_text("В составе есть игрок не из пула. Открой заново.")
+        return
+
+    from datetime import date
+    week_start = fantasy.week_start_of(date.today()).isoformat()
+    res = fantasy.save_roster(uid, season["id"], week_start, refs)
+    if not res.get("ok"):
+        reason = "состав уже заблокирован до конца недели" if res.get("error") == "locked" else "не удалось сохранить"
+        await msg.reply_text(f"⚠️ {reason.capitalize()}.")
+        return
+    await msg.reply_text("✅ Состав сохранён! Удачи в туре 🏀")
 
 
 # Конфигурация кнопок "Запуск оповещений". "daily" (Оповещения на сегодня)
@@ -944,6 +1024,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("admin", handle_admin))
     app.add_handler(CommandHandler("fantasy", handle_fantasy))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 

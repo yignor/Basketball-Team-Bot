@@ -80,7 +80,7 @@ test-results/
 # Generated report files (created locally by player_stats.py / team_stats.py)
 *.html
 # ...кроме фронта Mini App — он должен быть в репозитории (GitHub Pages)
-!webapp/*.html
+!docs/fantasy/*.html
 
 # SQLite cache (local mirror of Google Sheets — rebuilt automatically, never authoritative)
 data/*.db

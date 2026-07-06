@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Фэнтези</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #fff);
+      --text: var(--tg-theme-text-color, #000);
+      --hint: var(--tg-theme-hint-color, #999);
+      --button: var(--tg-theme-button-color, #2481cc);
+      --button-text: var(--tg-theme-button-text-color, #fff);
+      --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); font-size: 16px; padding-bottom: 40px; }
+    header { padding: 14px 16px 6px; }
+    h1 { font-size: 18px; margin: 0 0 2px; }
+    .sub { color: var(--hint); font-size: 13px; }
+    .tabs { display: flex; gap: 8px; padding: 8px 16px; }
+    .tab { flex: 1; text-align: center; padding: 9px; border-radius: 10px;
+      background: var(--secondary-bg); color: var(--text); font-weight: 600;
+      cursor: pointer; border: none; font-size: 15px; }
+    .tab.active { background: var(--button); color: var(--button-text); }
+    .counter { padding: 4px 16px 8px; color: var(--hint); font-size: 14px; }
+    .list { padding: 0 12px; }
+    .card { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+      background: var(--secondary-bg); border-radius: 12px; margin: 8px 0;
+      cursor: pointer; border: 2px solid transparent; }
+    .card.sel { border-color: var(--button); }
+    .card.disabled { opacity: .45; }
+    .num { min-width: 34px; height: 34px; border-radius: 8px; background: var(--bg);
+      display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--hint); }
+    .card.sel .num { background: var(--button); color: var(--button-text); }
+    .pname { flex: 1; font-weight: 600; }
+    .pteam { color: var(--hint); font-size: 12px; }
+    .check { color: var(--button); font-weight: 700; font-size: 18px; opacity: 0; }
+    .card.sel .check { opacity: 1; }
+    .banner { margin: 10px 16px; padding: 12px; border-radius: 10px;
+      background: var(--secondary-bg); color: var(--hint); font-size: 14px; text-align: center; }
+    .rank { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+      background: var(--secondary-bg); border-radius: 12px; margin: 8px 0; }
+    .place { min-width: 30px; font-weight: 700; color: var(--hint); }
+    .pts { font-weight: 700; }
+    .hidden { display: none; }
+    #msg { text-align: center; color: var(--hint); padding: 40px 16px; }
+  </style>
+</head>
+<body>
+  <header><h1 id="title">🏀 Фэнтези</h1><div class="sub" id="subtitle"></div></header>
+  <div class="tabs">
+    <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
+    <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
+  </div>
+  <div id="draft">
+    <div class="counter" id="counter"></div>
+    <div id="lockBanner" class="banner hidden">🔒 Состав заблокирован до конца недели</div>
+    <div class="list" id="pool"></div>
+  </div>
+  <div id="table" class="hidden">
+    <div class="counter" id="weekLabel"></div>
+    <div class="list" id="standings"></div>
+  </div>
+  <div id="msg">Загрузка…</div>
+
+<script>
+(function () {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  let D = null, rosterSize = 3, selected = [], locked = false, pool = [];
+
+  function msg(t){ const m=document.getElementById('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
+  function haptic(t){ try{ tg.HapticFeedback.impactOccurred(t); }catch(e){} }
+  function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  // Данные приходят в URL: #d=base64url(JSON) — бот кладёт их при открытии.
+  function readData() {
+    const m = (location.hash || '').match(/[#&]d=([^&]+)/);
+    if (!m) return null;
+    try {
+      let b = m[1].replace(/-/g,'+').replace(/_/g,'/');
+      while (b.length % 4) b += '=';
+      const bin = atob(b);
+      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+      return JSON.parse(new TextDecoder('utf-8').decode(bytes));
+    } catch (e) { return null; }
+  }
+
+  function renderPool() {
+    const el = document.getElementById('pool'); el.innerHTML = '';
+    for (const p of pool) {
+      const sel = selected.includes(p.r);
+      const full = !sel && selected.length >= rosterSize;
+      const c = document.createElement('div');
+      c.className = 'card' + (sel?' sel':'') + ((full||locked)?' disabled':'');
+      c.innerHTML = '<div class="num">'+(p.n||'—')+'</div>'+
+        '<div class="pname">'+esc(p.m||p.r)+'<div class="pteam">'+esc(p.t||'')+'</div></div>'+
+        '<div class="check">✓</div>';
+      if (!locked) c.onclick = () => toggle(p.r, full);
+      el.appendChild(c);
+    }
+    updateCounter();
+  }
+  function toggle(ref, full) {
+    const i = selected.indexOf(ref);
+    if (i>=0){ selected.splice(i,1); haptic('light'); }
+    else if(!full){ selected.push(ref); haptic('medium'); }
+    else return;
+    renderPool(); syncButton();
+  }
+  function updateCounter(){ document.getElementById('counter').textContent = 'Выбрано: '+selected.length+' / '+rosterSize; }
+  function syncButton() {
+    if (!tg || !tg.MainButton) return;
+    if (locked){ tg.MainButton.hide(); return; }
+    if (selected.length === rosterSize){ tg.MainButton.setText('Сохранить состав'); tg.MainButton.show(); tg.MainButton.enable(); }
+    else tg.MainButton.hide();
+  }
+  function saveRoster() {
+    haptic('heavy');
+    // Отправляем состав боту через Telegram — сервер наружу не светим.
+    tg.sendData(JSON.stringify({ refs: selected }));
+    // Telegram сам закроет приложение после sendData.
+  }
+  function showTab(name) {
+    document.getElementById('draft').classList.toggle('hidden', name!=='draft');
+    document.getElementById('table').classList.toggle('hidden', name!=='table');
+    document.getElementById('tab-draft').classList.toggle('active', name==='draft');
+    document.getElementById('tab-table').classList.toggle('active', name==='table');
+    if (name==='draft') syncButton(); else if (tg&&tg.MainButton) tg.MainButton.hide();
+  }
+  window.showTab = showTab;
+
+  function renderStandings() {
+    const el = document.getElementById('standings'); el.innerHTML='';
+    const st = (D && D.standings) || [];
+    document.getElementById('weekLabel').textContent = D && D.week_start ? ('Неделя с '+D.week_start) : '';
+    if (!st.length){ el.innerHTML='<div class="banner">Пока нет очков</div>'; return; }
+    st.forEach((row,i)=>{
+      const medal = ['🥇','🥈','🥉'][i] || (i+1)+'.';
+      const div=document.createElement('div'); div.className='rank';
+      div.innerHTML='<div class="place">'+medal+'</div><div class="pname">'+esc(row.name||'Участник')+'</div><div class="pts">'+row.points+'</div>';
+      el.appendChild(div);
+    });
+  }
+
+  function init() {
+    D = readData();
+    if (!D) { msg('Открой фэнтези через кнопку в боте (/fantasy).'); return; }
+    if (!D.season) { msg('Сейчас нет активного сезона фэнтези.'); return; }
+    rosterSize = D.season.roster_size || 3;
+    pool = D.pool || [];
+    selected = (D.roster || []).slice();
+    locked = !!D.locked;
+    document.getElementById('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
+    document.getElementById('lockBanner').classList.toggle('hidden', !locked);
+    if (!pool.length){ msg('Пул игроков пуст — попробуй позже.'); return; }
+    msg('');
+    renderPool(); renderStandings();
+    if (tg && tg.MainButton) tg.MainButton.onClick(saveRoster);
+    syncButton();
+  }
+  init();
+})();
+</script>
+</body>
+</html>
