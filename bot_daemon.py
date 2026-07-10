@@ -1008,7 +1008,9 @@ async def on_startup(app: Application) -> None:
         try:
             from aiohttp import web
             fapp = fantasy_api.create_app(BOT_TOKEN)
-            _fantasy_runner = web.AppRunner(fapp)
+            # access_log=None: адрес публичный, сканеры найдут его за часы, а в
+            # строке запроса может оказаться подпись — незачем это писать в лог.
+            _fantasy_runner = web.AppRunner(fapp, access_log=None)
             await _fantasy_runner.setup()
             site = web.TCPSite(_fantasy_runner, "127.0.0.1", FANTASY_API_PORT)
             await site.start()

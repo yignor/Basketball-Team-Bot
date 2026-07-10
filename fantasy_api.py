@@ -136,9 +136,10 @@ async def cors_middleware(request: web.Request, handler):
 
 
 def _auth_user(request: web.Request) -> Optional[Dict[str, Any]]:
+    """Подпись принимаем ТОЛЬКО заголовком: строка запроса попадает в access-log
+    целиком, а initData — это ключ доступа, действующий сутки."""
     bot_token = request.app["bot_token"]
-    init_data = request.headers.get("X-Init-Data") or request.query.get("initData", "")
-    return verify_init_data(init_data, bot_token)
+    return verify_init_data(request.headers.get("X-Init-Data", ""), bot_token)
 
 
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
