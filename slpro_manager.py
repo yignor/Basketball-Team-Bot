@@ -281,6 +281,15 @@ class SlproManager:
             print(f"⚠️ SLPRO: не удалось получить box-score {sid}: {e}")
             box = None
         if box:
+            # Игра завершена и уже скачана — кладём в локальную копию, чтобы
+            # бэкфилл и аналитика не ходили за ней в чужой API повторно.
+            try:
+                import fantasy_stats
+                fantasy_stats.store_slpro_box(box, str(ctx.get("season_id") or ""),
+                                              ctx.get("stage_id") or "")
+            except Exception as e:
+                print(f"⚠️ SLPRO: box-score {sid} не сохранён в базу: {e}")
+
             quarters = format_quarters(box, team_id)
             if quarters:
                 lines.append(f"📈 Четверти: {quarters}")

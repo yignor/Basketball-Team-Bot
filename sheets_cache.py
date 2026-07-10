@@ -247,6 +247,29 @@ CREATE TABLE IF NOT EXISTS game_stats_fetched (
     PRIMARY KEY (source, game_id)
 );
 
+-- Матч целиком: счёт, соперники, стадия. Нужен для командной аналитики и
+-- чтобы не ходить в чужой API за тем, что уже скачано.
+-- Юр-инвариант: только id команд, без названий и без ФИО.
+CREATE TABLE IF NOT EXISTS game_meta (
+    source          TEXT NOT NULL,
+    game_id         TEXT NOT NULL,
+    game_date       TEXT NOT NULL DEFAULT '',   -- ISO YYYY-MM-DD
+    game_time       TEXT NOT NULL DEFAULT '',
+    season_id       TEXT NOT NULL DEFAULT '',
+    stage_id        TEXT NOT NULL DEFAULT '',
+    home_team_id    TEXT NOT NULL DEFAULT '',
+    guest_team_id   TEXT NOT NULL DEFAULT '',
+    home_score      INTEGER NOT NULL DEFAULT 0,
+    guest_score     INTEGER NOT NULL DEFAULT 0,
+    quarters_json   TEXT NOT NULL DEFAULT '',   -- [[home, guest], ...] по периодам
+    arena           TEXT NOT NULL DEFAULT '',
+    video_vk        TEXT NOT NULL DEFAULT '',
+    fetched_at      TEXT NOT NULL,
+    PRIMARY KEY (source, game_id)
+);
+CREATE INDEX IF NOT EXISTS idx_game_meta_date ON game_meta(game_date);
+CREATE INDEX IF NOT EXISTS idx_game_meta_teams ON game_meta(home_team_id, guest_team_id);
+
 CREATE TABLE IF NOT EXISTS fantasy_seasons (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL DEFAULT '',

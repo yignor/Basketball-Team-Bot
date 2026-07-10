@@ -75,6 +75,29 @@ class SlproClient:
     async def get_settings(self) -> Optional[Dict[str, Any]]:
         return await self._post("settings")
 
+    async def iter_stages(self) -> List[Dict[str, Any]]:
+        """Все стадии всех сезонов турнира: [{season_id, season, division_id,
+        division_name, stage_id, group_id, active}]. Активные — первыми."""
+        settings = await self.get_settings()
+        if not settings or "seasons" not in settings:
+            return []
+        stages: List[Dict[str, Any]] = []
+        for season in settings.get("seasons", []):
+            for division in season.get("divisions", []):
+                for stage in division.get("stages", []):
+                    stages.append({
+                        "season_id": season.get("season_id"),
+                        "season": season.get("season"),
+                        "division_id": division.get("division_id"),
+                        "division": division.get("division"),
+                        "division_name": division.get("division_name"),
+                        "stage_id": stage.get("stage_id"),
+                        "group_id": (stage.get("groups") or [{}])[0].get("group_id"),
+                        "active": bool(stage.get("active")),
+                    })
+        stages.sort(key=lambda s: not s["active"])
+        return stages
+
     async def discover_context(self, team_names: List[str]) -> Optional[Dict[str, Any]]:
         """Находит текущую (активную) стадию, в которой играет наша команда,
         по имени. Возвращает {season_id, division_id, stage_id, group_id,
@@ -87,31 +110,8 @@ class SlproClient:
         if not wanted:
             return None
 
-        settings = await self.get_settings()
-        if not settings or "seasons" not in settings:
-            return None
-
         # Кандидаты-стадии: сперва active, затем остальные (fallback).
-        active_stages: List[Dict[str, Any]] = []
-        other_stages: List[Dict[str, Any]] = []
-        for season in settings.get("seasons", []):
-            for division in season.get("divisions", []):
-                for stage in division.get("stages", []):
-                    ctx = {
-                        "season_id": season.get("season_id"),
-                        "season": season.get("season"),
-                        "division_id": division.get("division_id"),
-                        "division": division.get("division"),
-                        "division_name": division.get("division_name"),
-                        "stage_id": stage.get("stage_id"),
-                        "group_id": (stage.get("groups") or [{}])[0].get("group_id"),
-                    }
-                    if stage.get("active"):
-                        active_stages.append(ctx)
-                    else:
-                        other_stages.append(ctx)
-
-        for ctx in active_stages + other_stages:
+        for ctx in await self.iter_stages():
             teams = await self.get_standings(ctx)
             for team in teams:
                 if _normalize_name(team.get("name")) in wanted:

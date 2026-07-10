@@ -19,6 +19,13 @@ LOG=/var/log/basketball-bot
 # Фэнтези: понедельничный подсчёт + рассылка таблицы — пн 09:00 МСК (06:00 UTC)
 0 6 * * 1 botuser cd $BOT_DIR && $VENV run_fantasy.py --only weekly >> $LOG/fantasy.log 2>&1
 
+# Копия статистики лиг: ночью, порциями по 200 игр с паузой 1.5с между запросами.
+# Полный архив (~2100 игр SLPRO + Infobasket) наберётся примерно за две недели,
+# при этом чужие серверы не замечают выкачки. Скачанное не перезапрашивается.
+# Только от botuser: у остальных трафик уходит в туннель, а обе лиги режут
+# иностранные адреса.
+30 1 * * * botuser cd $BOT_DIR && $VENV run_backfill.py --source all --scope all --limit 200 >> $LOG/backfill.log 2>&1
+
 # Опросы по тренировкам (создание/актуализация) — 09:05 МСК (06:05 UTC)
 5 6 * * * botuser cd $BOT_DIR && $VENV training_polls_enhanced.py >> $LOG/training_polls.log 2>&1
 

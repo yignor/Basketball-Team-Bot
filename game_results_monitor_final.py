@@ -335,6 +335,19 @@ class GameResultsMonitorFinal:
                 if not player_stats:
                     return None
 
+                # Игра доиграна и box-score уже у нас — кладём в локальную копию.
+                # Бэкфилл её больше не запросит, аналитика возьмёт из своей базы.
+                try:
+                    import fantasy_stats
+                    parsed = await parser.parse_game_info(api_data)
+                    if parsed and parsed.get('is_finished'):
+                        parsed['player_stats'] = player_stats
+                        parsed.setdefault('game_id', game_id)
+                        comp_id = (api_data.get('game') or {}).get('CompID') or ''
+                        fantasy_stats.store_infobasket_game(parsed, str(comp_id))
+                except Exception as e:
+                    print(f"⚠️ Статистика игры {game_id} не сохранена в базу: {e}")
+
                 candidate_names: Set[str] = set()
 
                 for key in ['our_team', 'our_team_name']:

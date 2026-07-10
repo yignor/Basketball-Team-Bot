@@ -84,13 +84,45 @@ def _mark_fetched(conn, source: str, game_id: str, game_date: str) -> None:
     )
 
 
-def store_slpro_box(box, season_id: str = "") -> int:
+def _store_game_meta(conn, source: str, game_id: Any, meta: Dict[str, Any]) -> None:
+    """Матч целиком (счёт, соперники, стадия). Только id команд — названия и
+    ФИО в наших таблицах не живут."""
+    conn.execute(
+        """INSERT INTO game_meta (source, game_id, game_date, game_time, season_id, stage_id,
+                                  home_team_id, guest_team_id, home_score, guest_score,
+                                  quarters_json, arena, video_vk, fetched_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(source, game_id) DO UPDATE SET
+               game_date=excluded.game_date, game_time=excluded.game_time,
+               season_id=excluded.season_id, stage_id=excluded.stage_id,
+               home_team_id=excluded.home_team_id, guest_team_id=excluded.guest_team_id,
+               home_score=excluded.home_score, guest_score=excluded.guest_score,
+               quarters_json=excluded.quarters_json, arena=excluded.arena,
+               video_vk=excluded.video_vk, fetched_at=excluded.fetched_at""",
+        (source, str(game_id), meta.get("game_date", ""), meta.get("game_time", ""),
+         str(meta.get("season_id", "")), str(meta.get("stage_id", "")),
+         str(meta.get("home_team_id", "")), str(meta.get("guest_team_id", "")),
+         int(meta.get("home_score", 0) or 0), int(meta.get("guest_score", 0) or 0),
+         json.dumps(meta.get("quarters") or [], ensure_ascii=False),
+         meta.get("arena", ""), meta.get("video_vk", ""), sheets_cache.now_iso()),
+    )
+
+
+def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
     """Сохраняет статистику всех игроков из BoxScore (slpro_game). Возвращает
     число сохранённых игроков. ФИО (display_name) НЕ сохраняем."""
     sheets_cache.init_db()
     game_date = box.game_date or ""
     count = 0
     with sheets_cache.get_connection() as conn:
+        _store_game_meta(conn, SOURCE_SLPRO, box.game_id, {
+            "game_date": game_date, "game_time": box.game_time,
+            "season_id": season_id, "stage_id": stage_id,
+            "home_team_id": box.home_id, "guest_team_id": box.guest_id,
+            "home_score": box.home_score, "guest_score": box.guest_score,
+            "quarters": [list(q) for q in (box.quarters or [])],
+            "arena": box.arena, "video_vk": box.video_vk,
+        })
         for p in box.players.values():
             team_id = box.home_id if p.is_home else box.guest_id
             row = {
@@ -116,7 +148,35 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
     game_id = str(game_info.get("game_id") or "")
     game_date = _to_iso_date(game_info.get("date") or "")
     count = 0
+    teams = game_info.get("teams") or []
+    # У игрока Infobasket есть название команды, но не её id. Сопоставляем по
+    # названию; если парсер не дотянулся до имён и подставил "Team 1"/"Team 2" —
+    # по номеру.
+    by_name = {str(t.get("name", "")): t.get("id", "") for t in teams}
+    by_index = [t.get("id", "") for t in teams]
+
+    def _team_id(player: Dict[str, Any]) -> Any:
+        name = str(player.get("team", ""))
+        if name in by_name:
+            return by_name[name]
+        if name.startswith("Team ") and len(by_index) == 2:
+            n = name[5:].strip()
+            if n in ("1", "2"):
+                return by_index[int(n) - 1]
+        return ""
+
     with sheets_cache.get_connection() as conn:
+        if len(teams) == 2:
+            # quarters здесь не сохраняем: enhanced_game_parser разворачивает их
+            # под наш взгляд («мы:соперник») для сообщения в чат, и по game_info
+            # уже не отличить, перевёрнуты они или нет.
+            _store_game_meta(conn, SOURCE_INFOBASKET, game_id, {
+                "game_date": game_date, "game_time": game_info.get("time", ""),
+                "season_id": season_id,
+                "home_team_id": teams[0].get("id", ""), "guest_team_id": teams[1].get("id", ""),
+                "home_score": teams[0].get("score", 0), "guest_score": teams[1].get("score", 0),
+                "arena": game_info.get("venue", ""),
+            })
         for p in stats:
             pid = p.get("person_id")
             if not pid:
@@ -132,7 +192,7 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
                 "tpm": p.get("three_pointers_made", 0), "tpa": p.get("three_pointers_attempted", 0),
                 "ftm": p.get("free_throws_made", 0), "fta": p.get("free_throws_attempted", 0),
             }
-            team_id = p.get("team_id", "") or ""
+            team_id = p.get("team_id") or _team_id(p) or ""
             _store_player_row(conn, SOURCE_INFOBASKET, game_id, game_date, season_id, team_id, row)
             count += 1
         _mark_fetched(conn, SOURCE_INFOBASKET, game_id, game_date)
