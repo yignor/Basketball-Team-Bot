@@ -22,6 +22,8 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    MenuButtonCommands,
+    MenuButtonWebApp,
     ReplyKeyboardMarkup,
     Update,
     WebAppInfo,
@@ -92,6 +94,23 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     }
     raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+async def _setup_menu_button(app) -> None:
+    """Кнопка «Открыть» слева от поля ввода. Ставим её только вместе с живым
+    API: из кнопки меню Telegram не даёт `sendData`, и без бэкенда приложение
+    смогло бы лишь показывать данные, но не сохранять состав."""
+    try:
+        if FANTASY_WEBAPP_URL and FANTASY_API_ENABLED:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="Фэнтези",
+                                             web_app=WebAppInfo(url=FANTASY_WEBAPP_URL)))
+            log.info("Кнопка меню: Mini App фэнтези")
+        else:
+            await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+            log.info("Кнопка меню: список команд (живой API выключен)")
+    except Exception as e:
+        log.warning(f"Не удалось настроить кнопку меню: {e}")
 
 
 async def _fantasy_webapp_markup(user_id: str) -> Optional[ReplyKeyboardMarkup]:
@@ -978,10 +997,12 @@ async def on_startup(app: Application) -> None:
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
 
+    await _setup_menu_button(app)
+
     global _background_task
     _background_task = asyncio.create_task(_background_loop())
 
-    # Фэнтези-API в том же event loop (localhost; наружу — Cloudflare Tunnel).
+    # Фэнтези-API в том же event loop (localhost; наружу — Tailscale Funnel).
     global _fantasy_runner
     if FANTASY_API_ENABLED and BOT_TOKEN:
         try:
