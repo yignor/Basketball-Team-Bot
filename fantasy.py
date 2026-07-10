@@ -231,8 +231,12 @@ def _get_season(season_id: int) -> Optional[Dict[str, Any]]:
 # ─────────────────────────── Имена и форматирование ──────────────────────────
 
 def display_names(user_ids: List[str]) -> Dict[str, str]:
-    """Telegram ID -> отображаемое имя из players (транзитно; в таблицах
-    фэнтези ФИО не храним, только показываем)."""
+    """Числовой Telegram ID -> отображаемое имя (транзитно; в таблицах фэнтези
+    ФИО не храним, только показываем).
+
+    В листе «Игроки» колонка «Telegram ID» заполнена @юзернеймами, а составы
+    хранятся по числовому id. Поэтому связываем через bot_users (там есть
+    numeric -> username), с запасными вариантами."""
     ids = [str(u) for u in user_ids]
     if not ids:
         return {}
@@ -240,13 +244,38 @@ def display_names(user_ids: List[str]) -> Dict[str, str]:
     placeholders = ",".join("?" * len(ids))
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            f"SELECT telegram_id, surname, name, nickname FROM players WHERE telegram_id IN ({placeholders})",
+            f"""
+            SELECT b.telegram_id AS tid,
+                   COALESCE(p.surname, '')   AS surname,
+                   COALESCE(p.name, '')      AS name,
+                   COALESCE(p.nickname, '')  AS nickname,
+                   COALESCE(b.first_name, '') AS first_name,
+                   COALESCE(b.username, '')   AS username
+            FROM bot_users b
+            LEFT JOIN players p
+                   ON p.telegram_id = b.telegram_id
+                   OR (b.username != '' AND lower(ltrim(p.telegram_id, '@')) = lower(b.username))
+            WHERE b.telegram_id IN ({placeholders})
+            """,
             ids,
         ).fetchall()
     out: Dict[str, str] = {}
     for r in rows:
-        out[str(r["telegram_id"])] = (f"{r['surname']} {r['name']}".strip()
-                                      or r["nickname"] or str(r["telegram_id"]))
+        out[str(r["tid"])] = (f"{r['surname']} {r['name']}".strip()
+                              or r["nickname"] or r["first_name"]
+                              or (f"@{r['username']}" if r["username"] else "")
+                              or str(r["tid"]))
+    # Кого не нашли в bot_users — прямая попытка по players (если там числовой id)
+    missing = [i for i in ids if i not in out]
+    if missing:
+        ph = ",".join("?" * len(missing))
+        with sheets_cache.get_connection() as conn:
+            for r in conn.execute(
+                f"SELECT telegram_id, surname, name, nickname FROM players WHERE telegram_id IN ({ph})",
+                missing,
+            ).fetchall():
+                out[str(r["telegram_id"])] = (f"{r['surname']} {r['name']}".strip()
+                                              or r["nickname"] or str(r["telegram_id"]))
     return out
 
 

@@ -418,7 +418,7 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
         return
 
     uid = str(user.id)
-    if not fantasy_api._is_team_member(uid):
+    if not fantasy_api._is_team_member(uid, user.username or ""):
         await msg.reply_text("Фэнтези доступна только игрокам команды.")
         return
     season = fantasy.get_active_season()

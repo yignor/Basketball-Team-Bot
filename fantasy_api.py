@@ -63,12 +63,20 @@ def verify_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400) -
         return None
 
 
-def _is_team_member(telegram_id: str) -> bool:
-    """v1: участвуют только игроки команды (есть в players по Telegram ID)."""
+def _is_team_member(telegram_id: Any, username: str = "") -> bool:
+    """v1: участвуют только игроки команды (есть в листе «Игроки»).
+
+    В листе колонка «Telegram ID» исторически заполнена @юзернеймами, а не
+    числовыми id — поэтому сверяем и с тем, и с другим."""
     sheets_cache.init_db()
+    uname = (username or "").lstrip("@").lower()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
-            "SELECT 1 FROM players WHERE telegram_id = ? LIMIT 1", (str(telegram_id),)
+            """SELECT 1 FROM players
+               WHERE telegram_id = ?
+                  OR (? != '' AND lower(ltrim(telegram_id, '@')) = ?)
+               LIMIT 1""",
+            (str(telegram_id), uname, uname),
         ).fetchone()
     return row is not None
 
@@ -143,7 +151,7 @@ async def handle_pool(request: web.Request) -> web.Response:
         "season": season and {"id": season["id"], "name": season["name"], "format": season["format"],
                               "roster_size": fantasy.roster_size(season)},
         "pool": pool,
-        "member": _is_team_member(str(user.get("id"))),
+        "member": _is_team_member(str(user.get("id")), user.get("username", "")),
     })
 
 
@@ -168,7 +176,7 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     uid = str(user["id"])
-    if not _is_team_member(uid):
+    if not _is_team_member(uid, user.get("username", "")):
         return web.json_response({"error": "not_a_member"}, status=403)
     season = fantasy.get_active_season()
     if not season:
