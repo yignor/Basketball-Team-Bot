@@ -23,8 +23,7 @@ import sys
 
 import stats_backfill
 
-# Соревнования Infobasket: сезоны 2023/24, 2024/25, 2025/26.
-DEFAULT_IB_COMPS = [73582, 88649, 108009]
+DEFAULT_IB_COMPS = list(stats_backfill.IB_COMPS)
 
 
 def _ib_comps() -> list:
@@ -55,6 +54,8 @@ async def main() -> int:
                     help="пауза между запросами к чужому API, сек")
     ap.add_argument("--dry-run", action="store_true", help="только посчитать, что предстоит скачать")
     ap.add_argument("--summary", action="store_true", help="показать, что уже в локальной копии")
+    ap.add_argument("--refetch-no-stage", action="store_true",
+                    help="перекачать игры без стадии (остались от версии до stage_id)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -71,6 +72,10 @@ async def main() -> int:
                   f"строк {s.get('rows', 0):>6}  игроков {s.get('players', 0):>5}  "
                   f"период {s.get('first') or '?'} … {s.get('last') or '?'}")
         return 0
+
+    if args.refetch_no_stage:
+        n = stats_backfill.forget_games_without_stage("slpro")
+        print(f"Помечено к перекачке игр без стадии: {n}")
 
     rc = 0
     if args.source in ("slpro", "all"):

@@ -48,18 +48,20 @@ def is_game_fetched(source: str, game_id: str) -> bool:
 
 
 def _store_player_row(conn, source: str, game_id: str, game_date: str,
-                      season_id: str, team_id: str, s: Dict[str, Any]) -> None:
+                      season_id: str, team_id: str, s: Dict[str, Any],
+                      stage_id: Any = "") -> None:
     """s — нормализованная статистика игрока (ключи как в game_player_stats)."""
     conn.execute(
         """
         INSERT INTO game_player_stats
-        (source, game_id, player_id, team_id, number, game_date, season_id,
+        (source, game_id, player_id, team_id, number, game_date, season_id, stage_id,
          pts, reb, reb_off, reb_def, ast, stl, blk, tur, pf,
          fgm, fga, tpm, tpa, ftm, fta, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source, game_id, player_id) DO UPDATE SET
             team_id=excluded.team_id, number=excluded.number,
             game_date=excluded.game_date, season_id=excluded.season_id,
+            stage_id=excluded.stage_id,
             pts=excluded.pts, reb=excluded.reb, reb_off=excluded.reb_off,
             reb_def=excluded.reb_def, ast=excluded.ast, stl=excluded.stl,
             blk=excluded.blk, tur=excluded.tur, pf=excluded.pf,
@@ -67,7 +69,7 @@ def _store_player_row(conn, source: str, game_id: str, game_date: str,
             ftm=excluded.ftm, fta=excluded.fta, fetched_at=excluded.fetched_at
         """,
         (source, str(game_id), str(s["player_id"]), str(team_id), str(s.get("number", "")),
-         game_date, str(season_id),
+         game_date, str(season_id), str(stage_id or ""),
          s.get("pts", 0), s.get("reb", 0), s.get("reb_off", 0), s.get("reb_def", 0),
          s.get("ast", 0), s.get("stl", 0), s.get("blk", 0), s.get("tur", 0), s.get("pf", 0),
          s.get("fgm", 0), s.get("fga", 0), s.get("tpm", 0), s.get("tpa", 0),
@@ -132,7 +134,8 @@ def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
                 "fgm": p.fg2m + p.fg3m, "fga": p.fg2a + p.fg3a,
                 "tpm": p.fg3m, "tpa": p.fg3a, "ftm": p.ftm, "fta": p.fta,
             }
-            _store_player_row(conn, SOURCE_SLPRO, box.game_id, game_date, season_id, team_id, row)
+            _store_player_row(conn, SOURCE_SLPRO, box.game_id, game_date, season_id, team_id, row,
+                              stage_id=stage_id)
             count += 1
         _mark_fetched(conn, SOURCE_SLPRO, box.game_id, game_date)
         conn.commit()
@@ -262,13 +265,33 @@ def parse_ref(ref: str) -> Tuple[str, str]:
     return src, player_id
 
 
+def scope_where(scope: Optional[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+    """Условие «считать только этот турнир»: {source, season_id, stage_id}.
+
+    Без него очки игрока суммировались бы по всем турнирам сразу — а в базе
+    лежит вся лига за четыре сезона. Пустой scope = считать всё (так было
+    исторически, пока в базе жили только наши игры)."""
+    if not scope:
+        return "", []
+    sql, params = "", []
+    for column in ("source", "season_id", "stage_id"):
+        value = scope.get(column)
+        if value not in (None, ""):
+            sql += f" AND {column} = ?"
+            params.append(str(value))
+    return sql, params
+
+
 def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
-                  date_from: Optional[str] = None, date_to: Optional[str] = None) -> float:
+                  date_from: Optional[str] = None, date_to: Optional[str] = None,
+                  scope: Optional[Dict[str, Any]] = None) -> float:
     """Сумма очков игрока за период по всем его связанным ID (агрегация
-    SLPRO + Infobasket). refs — список ссылок вида source:team:player_id,
-    относящихся к ОДНОМУ физическому игроку. Период — ISO-даты включительно."""
+    SLPRO + Infobasket). refs — список ссылок вида source:team:player_id.
+    Повторы в refs умножают очки: можно поставить всё на одного.
+    Период — ISO-даты включительно, scope — турнир подсчёта."""
     sheets_cache.init_db()
     w = weights or DEFAULT_WEIGHTS
+    scope_sql, scope_params = scope_where(scope)
     total = 0.0
     with sheets_cache.get_connection() as conn:
         for ref in refs:
@@ -279,6 +302,8 @@ def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
                 query += " AND game_date >= ?"; params.append(date_from)
             if date_to:
                 query += " AND game_date <= ?"; params.append(date_to)
+            query += scope_sql
+            params.extend(scope_params)
             for r in conn.execute(query, params).fetchall():
                 total += fantasy_points(dict(r), w)
     return round(total, 2)
@@ -291,23 +316,25 @@ AGG_COLUMNS = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur",
 
 def player_aggregates(weights: Optional[Dict[str, float]] = None,
                       date_from: Optional[str] = None,
-                      date_to: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-    """Суммарная статистика каждого игрока за период. Ключ — "source:player_id".
+                      date_to: Optional[str] = None,
+                      scope: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """Суммарная статистика каждого игрока за период и турнир (scope).
+    Ключ — "source:player_id".
 
     Фэнтези-очки линейны по весам, поэтому итог считается от сумм, а не
     пересчётом по каждой игре."""
     sheets_cache.init_db()
     w = weights or DEFAULT_WEIGHTS
     sums = ", ".join(f"SUM({c}) AS {c}" for c in AGG_COLUMNS)
-    query = f"SELECT source, player_id, COUNT(*) AS games, {sums} FROM game_player_stats"
-    conds: List[str] = []
+    query = f"SELECT source, player_id, COUNT(*) AS games, {sums} FROM game_player_stats WHERE 1=1"
     params: List[Any] = []
     if date_from:
-        conds.append("game_date >= ?"); params.append(date_from)
+        query += " AND game_date >= ?"; params.append(date_from)
     if date_to:
-        conds.append("game_date <= ?"); params.append(date_to)
-    if conds:
-        query += " WHERE " + " AND ".join(conds)
+        query += " AND game_date <= ?"; params.append(date_to)
+    scope_sql, scope_params = scope_where(scope)
+    query += scope_sql
+    params.extend(scope_params)
     query += " GROUP BY source, player_id"
 
     out: Dict[str, Dict[str, Any]] = {}

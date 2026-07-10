@@ -216,6 +216,7 @@ CREATE TABLE IF NOT EXISTS game_player_stats (
     number        TEXT NOT NULL DEFAULT '',
     game_date     TEXT NOT NULL DEFAULT '',   -- ISO YYYY-MM-DD
     season_id     TEXT NOT NULL DEFAULT '',
+    stage_id      TEXT NOT NULL DEFAULT '',   -- стадия/дивизион: ею отличаем турниры
     pts           INTEGER NOT NULL DEFAULT 0,
     reb           INTEGER NOT NULL DEFAULT 0,
     reb_off       INTEGER NOT NULL DEFAULT 0,
@@ -369,6 +370,9 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "attendance", "dirty", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "fantasy_seasons", "settings_json", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "game_player_stats", "stage_id", "TEXT NOT NULL", "''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_gps_scope "
+                     "ON game_player_stats(source, season_id, stage_id)")
         conn.commit()
 
 

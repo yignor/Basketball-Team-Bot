@@ -32,6 +32,9 @@ DEFAULT_DELAY = 1.5          # секунд между запросами к ч�
 DEFAULT_LIMIT = 200          # игр за один прогон
 IB_API = "https://reg.infobasket.su"
 
+# Соревнования Infobasket по сезонам: comp_id -> подпись.
+IB_COMPS: Dict[int, str] = {73582: "2023/24", 88649: "2024/25", 108009: "2025/26"}
+
 # Статус завершённой игры отличается у источников.
 SLPRO_FINISHED = 2
 IB_FINISHED = 1
@@ -238,6 +241,26 @@ async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
 
 
 # ─────────────────────────── Сводка ──────────────────────────────────────────
+
+def forget_games_without_stage(source: str = "slpro") -> int:
+    """Снимает отметку «скачано» с игр, у которых не заполнена стадия.
+
+    Такие строки остались от версии до появления stage_id: при подсчёте по
+    конкретному турниру они молча выпадали бы из фэнтези. Бэкфилл перекачает
+    их и заполнит стадию. Сами данные не трогаем — их перезапишет upsert."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT game_id FROM game_player_stats
+               WHERE source = ? AND (stage_id IS NULL OR stage_id = '')""", (source,)
+        ).fetchall()
+        ids = [r["game_id"] for r in rows]
+        for gid in ids:
+            conn.execute("DELETE FROM game_stats_fetched WHERE source = ? AND game_id = ?",
+                         (source, gid))
+        conn.commit()
+    return len(ids)
+
 
 def local_summary() -> Dict[str, Any]:
     """Что уже лежит в локальной копии — для отчёта в админке.

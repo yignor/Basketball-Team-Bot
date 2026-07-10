@@ -190,7 +190,7 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
     статистика меняется после каждого ingest."""
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    agg = fantasy_stats.player_aggregates(weights)
+    agg = fantasy_stats.player_aggregates(weights, scope=fantasy.season_scope(season) if season else None)
     enriched = []
     for p in pool:
         src, pid = fantasy_stats.parse_ref(p["ref"])

@@ -127,17 +127,39 @@ def max_per_player(season: Dict[str, Any]) -> int:
         return size
 
 
-def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
-    season = get_active_season() if season_id is None else _get_season(season_id)
-    if not season:
-        return False
+def _update_settings(season: Dict[str, Any], **changes: Any) -> bool:
     settings = season_settings(season)
-    settings["max_per_player"] = int(n)
+    settings.update(changes)
     with sheets_cache.get_connection() as conn:
         conn.execute("UPDATE fantasy_seasons SET settings_json=? WHERE id=?",
                      (json.dumps(settings, ensure_ascii=False), season["id"]))
         conn.commit()
     return True
+
+
+def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    return _update_settings(season, max_per_player=int(n)) if season else False
+
+
+def season_scope(season: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Турнир, по которому считаются очки: {source, season_id, stage_id, name}.
+
+    None — считать по всем турнирам. Это опасный режим: в базе лежит вся лига
+    за четыре сезона, и игрок принесёт очки за чужой турнир тоже."""
+    scope = season_settings(season).get("scope")
+    return scope if isinstance(scope, dict) and scope else None
+
+
+def set_season_scope(scope: Optional[Dict[str, Any]], season_id: Optional[int] = None) -> bool:
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    return _update_settings(season, scope=scope or {}) if season else False
+
+
+def scope_title(scope: Optional[Dict[str, Any]]) -> str:
+    if not scope:
+        return "⚠️ не задан — считаются все турниры"
+    return scope.get("name") or f"{scope.get('source', '?')} / сезон {scope.get('season_id', '?')}"
 
 
 # ─────────────────────────── Составы ─────────────────────────────────────────
@@ -232,11 +254,13 @@ def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:
     """Таблица участников за неделю: [{user_id, points, refs}], по убыванию."""
     season = _get_season(season_id)
     weights = season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
+    scope = season_scope(season) if season else None
     d_from, d_to = week_bounds(week_start)
     rosters = get_week_rosters(season_id, week_start)
     table = []
     for r in rosters:
-        pts = fantasy_stats.player_points(r["refs"], weights, date_from=d_from, date_to=d_to)
+        pts = fantasy_stats.player_points(r["refs"], weights, date_from=d_from, date_to=d_to,
+                                          scope=scope)
         table.append({"user_id": r["user_id"], "points": pts, "refs": r["refs"]})
     table.sort(key=lambda x: x["points"], reverse=True)
     return table
