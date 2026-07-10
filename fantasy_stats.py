@@ -145,7 +145,11 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
     game_info должен содержать game_id и date (ISO или DD.MM.YYYY)."""
     sheets_cache.init_db()
     stats = (game_info.get("player_stats") or {}).get("players") or []
-    game_id = str(game_info.get("game_id") or "")
+    game_id = str(game_info.get("game_id") or "").strip()
+    if not game_id:
+        # Без id все игры схлопнулись бы в одну строку по первичному ключу, а
+        # реестр скачанного стал бы бесполезен — лучше громко ничего не сделать.
+        raise ValueError("store_infobasket_game: пустой game_id")
     game_date = _to_iso_date(game_info.get("date") or "")
     count = 0
     teams = game_info.get("teams") or []

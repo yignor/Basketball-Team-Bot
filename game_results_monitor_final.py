@@ -342,7 +342,9 @@ class GameResultsMonitorFinal:
                     parsed = await parser.parse_game_info(api_data)
                     if parsed and parsed.get('is_finished'):
                         parsed['player_stats'] = player_stats
-                        parsed.setdefault('game_id', game_id)
+                        # parse_game_info кладёт game_id=None, если его нет в
+                        # ответе, — setdefault не перезапишет, присваиваем явно.
+                        parsed['game_id'] = parsed.get('game_id') or game_id
                         comp_id = (api_data.get('game') or {}).get('CompID') or ''
                         fantasy_stats.store_infobasket_game(parsed, str(comp_id))
                 except Exception as e:

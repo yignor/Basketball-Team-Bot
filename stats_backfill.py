@@ -224,7 +224,9 @@ async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
                 if not info or not (info.get("player_stats") or {}).get("players"):
                     st.failed += 1
                 else:
-                    info.setdefault("game_id", gid)
+                    # parse_game_info кладёт game_id=None, если его нет в ответе,
+                    # поэтому setdefault тут не годится — присваиваем явно.
+                    info["game_id"] = info.get("game_id") or gid
                     fantasy_stats.store_infobasket_game(info, str(comp_id))
                     st.fetched += 1
             except Exception as e:
