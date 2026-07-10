@@ -1229,6 +1229,22 @@ class GameSystemManager:
                 if changes:
                     await self._notify_game_update(changes, game_info)
                     summary = self._format_changes_summary(changes)
+                    # Перенос даты или смена соперника — по сути другая игра:
+                    # нужен новый опрос по новой дате (раньше бот только слал
+                    # уведомление и молчал). Снимаем старую опрос-запись и старые
+                    # регистрации голосов, затем создаём свежий опрос. Прочие
+                    # изменения (время/арена) — только фиксируем.
+                    if 'date' in changes or 'opponent' in changes:
+                        duplicate_protection.deactivate_records_by_prefix(
+                            "GAME_POLL_REG", f"GAME_POLL_REG_GPOLL_{game_id}_")
+                        duplicate_protection.deactivate_game_record("ОПРОС_ИГРА", str(game_id))
+                        print(f"🔄 Игра {game_id}: {summary} — создаю новый опрос")
+                        question = await self.create_game_poll(game_info)
+                        if question:
+                            self._duplicate_check_cache[cache_key] = {"created": True}
+                            self._log_game_action("ОПРОС_ИГРА", game_info, "ОПРОС СОЗДАН", question)
+                            return True
+                        return False
                     self._log_game_action("ОПРОС_ИГРА", game_info, "ДАННЫЕ ОБНОВЛЕНЫ", summary)
                 else:
                     print(f"⏭️ Опрос для GameID {game_id} уже есть в сервисном листе")
