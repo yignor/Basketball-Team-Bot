@@ -987,6 +987,40 @@ class EnhancedDuplicateProtection:
         } for r in rows]
 
 
+    def deactivate_records_by_prefix(self, data_type: str, key_prefix: str) -> int:
+        """Мягко удаляет записи с ключом, начинающимся на key_prefix (local-
+        primary). Нужно при переопросе игры: старые регистрации голосов помечаем
+        удалёнными, чтобы голоса со снятого опроса не считались. Возвращает
+        число затронутых записей."""
+        if not SERVICE_RECORDS_LOCAL_PRIMARY:
+            return 0
+        import sheets_cache
+        with sheets_cache.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_records SET deleted = 1 "
+                "WHERE data_type = ? AND unique_key LIKE ? AND deleted = 0",
+                (data_type.upper(), key_prefix + "%"),
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def deactivate_game_record(self, data_type: str, game_id: Any) -> int:
+        """Мягко удаляет запись игры по game_id (local-primary). Нужно перед
+        перезаписью: уникальные индексы (data_type, unique_key) и
+        (data_type, game_id) частичные (WHERE deleted = 0), поэтому add_record
+        с DO NOTHING не обновит существующую строку — её надо сначала снять."""
+        if not SERVICE_RECORDS_LOCAL_PRIMARY:
+            return 0
+        import sheets_cache
+        with sheets_cache.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_records SET deleted = 1 "
+                "WHERE data_type = ? AND game_id = ? AND deleted = 0",
+                (data_type.upper(), str(game_id)),
+            )
+            conn.commit()
+            return cur.rowcount
+
     def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 2.0):
         """Повторяет вызов функции с экспоненциальной задержкой при ошибках 429"""
         import time

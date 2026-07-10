@@ -124,19 +124,48 @@ class SlproManager:
 
     async def create_poll(self, game: Dict[str, Any], ctx: Dict[str, Any]) -> bool:
         sid = self._slpro_game_id(game)
-        if duplicate_protection.get_game_record(DT_POLL, sid):
-            print(f"⏭️ SLPRO: опрос для {sid} уже создан")
-            return False
+        team_id = ctx["team_id"]
+        our, opp, _, _, is_home = self._our_side(game, team_id)
+        date_ddmm = self._date_ddmmyyyy(game["game_date"])
+        time_hhmm = self._time_hhmm(game["game_time"])
+        opp_id = game.get("guest_id") if is_home else game.get("home_id")
+
+        # Дедуп с детекцией изменений: админы лиги переносят игры и меняют
+        # соперника прямо в том же матче. Если слот или соперник отличаются от
+        # того, по чему опрашивали, старый опрос неактуален — нужен новый.
+        existing = duplicate_protection.get_game_record(DT_POLL, sid)
+        change_note = ""
+        if existing:
+            old_slot = f"{existing.get('game_date', '')} {(existing.get('game_time') or '')[:5]}".strip()
+            new_slot = f"{game['game_date']} {time_hhmm}".strip()
+            old_opp = str(existing.get("team_b_id") or "")
+            slot_changed = old_slot != new_slot
+            opp_changed = bool(old_opp) and old_opp != str(opp_id or "")
+            if not slot_changed and not opp_changed:
+                print(f"⏭️ SLPRO: опрос для {sid} уже создан")
+                return False
+            bits = []
+            if opp_changed:
+                bits.append("сменился соперник")
+            if slot_changed:
+                bits.append(f"перенос на {format_date_without_year(date_ddmm)}, "
+                            f"{get_day_of_week(date_ddmm)}, {time_hhmm}")
+            change_note = "⚠️ Игра изменилась (" + ", ".join(bits) + "). Обновлённый опрос:"
+            # Снимаем старые регистрации голосов (иначе голоса со снятого опроса
+            # считались бы) и саму дедуп-запись опроса — уникальные индексы
+            # частичные (deleted=0), поэтому без этого add_record не перезапишет
+            # дату/соперника и на следующем прогоне снова сработала бы «смена».
+            removed = duplicate_protection.deactivate_records_by_prefix(
+                "GAME_POLL_REG", f"GAME_POLL_REG_GPOLL_{sid}_")
+            duplicate_protection.deactivate_game_record(DT_POLL, sid)
+            print(f"🔄 SLPRO: игра {sid} изменилась ({', '.join(bits)}), "
+                  f"снято старых регистраций: {removed}")
 
         chat_ids = self._poll_chat_ids()
         if not chat_ids:
             print("❌ SLPRO: не настроены чаты для опросов")
             return False
 
-        team_id = ctx["team_id"]
-        our, opp, _, _, is_home = self._our_side(game, team_id)
-        date_ddmm = self._date_ddmmyyyy(game["game_date"])
-        time_hhmm = self._time_hhmm(game["game_time"])
         form = "светлая" if is_home else "тёмная"
         question = (
             f"🏀 {our} против {opp} (SLPRO)\n"
@@ -147,6 +176,9 @@ class SlproManager:
 
         bot = self.bot
         topic_id = self.gsm.game_poll_topic_id
+        # Если игра менялась — предупреждаем чат перед новым опросом.
+        if change_note:
+            await self._send_to_chats(chat_ids, change_note, topic_id)
         poll_messages = []
         for chat_id in chat_ids:
             kwargs: Dict[str, Any] = {
@@ -195,13 +227,16 @@ class SlproManager:
             )
         print(f"   📋 SLPRO: зарегистрировано опросов: {len(poll_messages)}")
 
-        # Дедуп-запись опроса.
+        # Дедуп-запись опроса. При переопросе прежнюю запись мы сняли выше, так
+        # что здесь вставляется свежая — с новыми датой/временем/соперником, и
+        # повторный перенос той же игры снова будет распознан.
         duplicate_protection.add_record(
             DT_POLL, sid, status="ОПРОС СОЗДАН",
             additional_data=question,
             alt_name=ctx.get("team_name", ""),
             game_id=sid, game_date=game_date_iso,
             game_time=time_hhmm, arena=game.get("game_address", ""),
+            team_a_id=team_id, team_b_id=opp_id,
         )
         return True
 
