@@ -218,3 +218,43 @@ def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
             for r in conn.execute(query, params).fetchall():
                 total += fantasy_points(dict(r), w)
     return round(total, 2)
+
+
+# Колонки, по которым имеет смысл суммировать (покрывают любые веса сезона).
+AGG_COLUMNS = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur",
+               "pf", "fgm", "fga", "tpm", "tpa", "ftm", "fta")
+
+
+def player_aggregates(weights: Optional[Dict[str, float]] = None,
+                      date_from: Optional[str] = None,
+                      date_to: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    """Суммарная статистика каждого игрока за период. Ключ — "source:player_id".
+
+    Фэнтези-очки линейны по весам, поэтому итог считается от сумм, а не
+    пересчётом по каждой игре."""
+    sheets_cache.init_db()
+    w = weights or DEFAULT_WEIGHTS
+    sums = ", ".join(f"SUM({c}) AS {c}" for c in AGG_COLUMNS)
+    query = f"SELECT source, player_id, COUNT(*) AS games, {sums} FROM game_player_stats"
+    conds: List[str] = []
+    params: List[Any] = []
+    if date_from:
+        conds.append("game_date >= ?"); params.append(date_from)
+    if date_to:
+        conds.append("game_date <= ?"); params.append(date_to)
+    if conds:
+        query += " WHERE " + " AND ".join(conds)
+    query += " GROUP BY source, player_id"
+
+    out: Dict[str, Dict[str, Any]] = {}
+    with sheets_cache.get_connection() as conn:
+        for row in conn.execute(query, params).fetchall():
+            r = dict(row)
+            games = int(r["games"] or 0)
+            agg: Dict[str, Any] = {"games": games}
+            for c in AGG_COLUMNS:
+                agg[c] = int(r[c] or 0)
+            agg["fp"] = round(sum(float(agg.get(k, 0)) * coeff for k, coeff in w.items()), 2)
+            agg["fp_avg"] = round(agg["fp"] / games, 2) if games else 0.0
+            out[f"{r['source']}:{r['player_id']}"] = agg
+    return out

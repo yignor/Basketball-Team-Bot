@@ -2,7 +2,7 @@
 """
 HTTP-API фэнтези для Mini App (aiohttp). Живёт в процессе демона
 (bot_daemon.on_startup подвешивает сервер в тот же event loop), наружу
-отдаётся через Cloudflare Tunnel. Фронт (GitHub Pages) ходит сюда за пулом/
+отдаётся через Tailscale Funnel. Фронт (GitHub Pages) ходит сюда за пулом/
 составом/таблицей и сохраняет состав.
 
 Авторизация — по Telegram `initData` (подпись WebApp), проверяется HMAC от
@@ -141,15 +141,29 @@ def _auth_user(request: web.Request) -> Optional[Dict[str, Any]]:
     return verify_init_data(init_data, bot_token)
 
 
+def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Дополняет пул суммарной статистикой игрока за всё время (для сортировки
+    в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
+    статистика меняется после каждого ingest."""
+    weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
+    agg = fantasy_stats.player_aggregates(weights)
+    enriched = []
+    for p in pool:
+        src, pid = fantasy_stats.parse_ref(p["ref"])
+        enriched.append({**p, "stats": agg.get(f"{src}:{pid}", {})})
+    return enriched
+
+
 async def handle_pool(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     season = fantasy.get_active_season()
-    pool = await build_pool()
+    pool = _pool_with_stats(await build_pool(), season)
     return web.json_response({
         "season": season and {"id": season["id"], "name": season["name"], "format": season["format"],
-                              "roster_size": fantasy.roster_size(season)},
+                              "roster_size": fantasy.roster_size(season),
+                              "max_per_player": fantasy.max_per_player(season)},
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
     })
@@ -188,12 +202,10 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError):
         return web.json_response({"error": "bad_request"}, status=400)
 
-    size = fantasy.roster_size(season)
-    if not isinstance(refs, list) or len(refs) != size or len(set(refs)) != size:
-        return web.json_response({"error": "invalid_roster", "expected": size}, status=400)
     pool_refs = {p["ref"] for p in await build_pool()}
-    if any(r not in pool_refs for r in refs):
-        return web.json_response({"error": "unknown_player"}, status=400)
+    err = fantasy.validate_roster(season, refs, pool_refs)
+    if err:
+        return web.json_response({"error": err, "expected": fantasy.roster_size(season)}, status=400)
 
     week_start = fantasy.week_start_of(date.today()).isoformat()
     res = fantasy.save_roster(uid, season["id"], week_start, refs)

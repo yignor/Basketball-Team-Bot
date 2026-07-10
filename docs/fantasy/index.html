@@ -25,20 +25,30 @@
       background: var(--secondary-bg); color: var(--text); font-weight: 600;
       cursor: pointer; border: none; font-size: 15px; }
     .tab.active { background: var(--button); color: var(--button-text); }
-    .counter { padding: 4px 16px 8px; color: var(--hint); font-size: 14px; }
+    .bar { display: flex; align-items: center; gap: 10px; padding: 4px 16px 8px; }
+    .counter { color: var(--hint); font-size: 14px; flex: 1; }
+    select { background: var(--secondary-bg); color: var(--text); border: none;
+      border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
     .list { padding: 0 12px; }
-    .card { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+    .card { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
       background: var(--secondary-bg); border-radius: 12px; margin: 8px 0;
       cursor: pointer; border: 2px solid transparent; }
     .card.sel { border-color: var(--button); }
     .card.disabled { opacity: .45; }
     .num { min-width: 34px; height: 34px; border-radius: 8px; background: var(--bg);
-      display: flex; align-items: center; justify-content: center; font-weight: 700; color: var(--hint); }
+      display: flex; align-items: center; justify-content: center; font-weight: 700;
+      color: var(--hint); flex-shrink: 0; }
     .card.sel .num { background: var(--button); color: var(--button-text); }
-    .pname { flex: 1; font-weight: 600; }
-    .pteam { color: var(--hint); font-size: 12px; }
-    .check { color: var(--button); font-weight: 700; font-size: 18px; opacity: 0; }
-    .card.sel .check { opacity: 1; }
+    .info { flex: 1; min-width: 0; }
+    .pname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pstat { color: var(--hint); font-size: 12px; margin-top: 2px; }
+    .ctrl { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .step { width: 30px; height: 30px; border-radius: 8px; border: none; font-size: 18px;
+      font-weight: 700; line-height: 1; background: var(--bg); color: var(--button);
+      cursor: pointer; padding: 0; }
+    .step:disabled { opacity: .3; cursor: default; }
+    .cnt { min-width: 22px; text-align: center; font-weight: 700; }
+    .cnt.zero { color: var(--hint); font-weight: 400; }
     .banner { margin: 10px 16px; padding: 12px; border-radius: 10px;
       background: var(--secondary-bg); color: var(--hint); font-size: 14px; text-align: center; }
     .rank { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
@@ -56,12 +66,25 @@
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
   </div>
   <div id="draft">
-    <div class="counter" id="counter"></div>
+    <div class="bar">
+      <div class="counter" id="counter"></div>
+      <select id="sort" aria-label="Сортировка">
+        <option value="fp">Фэнтези-очки</option>
+        <option value="fp_avg">Очки за игру</option>
+        <option value="games">Игры</option>
+        <option value="pts">Очки</option>
+        <option value="reb">Подборы</option>
+        <option value="ast">Передачи</option>
+        <option value="stl">Перехваты</option>
+        <option value="blk">Блоки</option>
+        <option value="name">Имя</option>
+      </select>
+    </div>
     <div id="lockBanner" class="banner hidden">🔒 Состав заблокирован до конца недели</div>
     <div class="list" id="pool"></div>
   </div>
   <div id="table" class="hidden">
-    <div class="counter" id="weekLabel"></div>
+    <div class="bar"><div class="counter" id="weekLabel"></div></div>
     <div class="list" id="standings"></div>
   </div>
   <div id="msg">Загрузка…</div>
@@ -71,94 +94,233 @@
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
 
-  let D = null, rosterSize = 3, selected = [], locked = false, pool = [];
+  // Живой бэкенд (Tailscale Funnel). Пусто -> только запасной режим.
+  const API = 'https://botpc.tail5ed4ef.ts.net';
 
-  function msg(t){ const m=document.getElementById('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
+  let live = false, rosterSize = 3, maxPer = 3, locked = false;
+  let pool = [], counts = {}, standings = [], weekStart = '';
+
+  const $ = id => document.getElementById(id);
+  function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
   function haptic(t){ try{ tg.HapticFeedback.impactOccurred(t); }catch(e){} }
   function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  const total = () => Object.values(counts).reduce((a,b)=>a+b, 0);
 
-  // Данные приходят в URL: #d=base64url(JSON) — бот кладёт их при открытии.
-  function readData() {
+  // ─── источники данных ──────────────────────────────────────────────────────
+
+  async function api(path, opts) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 7000);
+    try {
+      const r = await fetch(API + path, Object.assign({
+        signal: ctl.signal,
+        headers: Object.assign({'X-Init-Data': (tg && tg.initData) || ''},
+                               (opts && opts.body) ? {'Content-Type':'application/json'} : {}),
+      }, opts || {}));
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { const e = new Error('HTTP ' + r.status); e.data = data; throw e; }
+      return data;
+    } finally { clearTimeout(timer); }
+  }
+
+  // Запасной режим: бот кладёт данные в URL — #d=base64url(JSON).
+  function readHashData() {
     const m = (location.hash || '').match(/[#&]d=([^&]+)/);
     if (!m) return null;
     try {
       let b = m[1].replace(/-/g,'+').replace(/_/g,'/');
       while (b.length % 4) b += '=';
-      const bin = atob(b);
-      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+      const bytes = Uint8Array.from(atob(b), c => c.charCodeAt(0));
       return JSON.parse(new TextDecoder('utf-8').decode(bytes));
     } catch (e) { return null; }
   }
 
+  const ZERO = {games:0,pts:0,reb:0,ast:0,stl:0,blk:0,tur:0,fp:0,fp_avg:0};
+
+  // Приводим оба формата к одному виду. В запасном режиме ключи сокращены,
+  // чтобы URL Mini App не разрастался.
+  function fromHash(D) {
+    rosterSize = D.season.roster_size || 3;
+    maxPer = D.season.max_per_player || rosterSize;
+    locked = !!D.locked;
+    weekStart = D.week_start || '';
+    standings = D.standings || [];
+    pool = (D.pool || []).map(p => {
+      const s = p.s || {};
+      return { ref: p.r, name: p.m || p.r, number: '', team: '',
+        st: {games:s.g||0, pts:s.p||0, reb:s.rb||0, ast:s.a||0,
+             stl:s.s||0, blk:s.b||0, tur:s.t||0, fp:s.f||0,
+             fp_avg: s.g ? Math.round((s.f||0)/s.g*10)/10 : 0} };
+    });
+    for (const r of (D.roster || [])) counts[r] = (counts[r] || 0) + 1;
+    $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
+  }
+
+  async function fromApi() {
+    const [p, r, s] = await Promise.all([
+      api('/fantasy/pool'), api('/fantasy/roster'), api('/fantasy/standings'),
+    ]);
+    if (!p.season) { msg('Сейчас нет активного сезона фэнтези.'); return false; }
+    if (!p.member) { msg('Фэнтези доступна только игрокам команды.'); return false; }
+    rosterSize = p.season.roster_size || 3;
+    maxPer = p.season.max_per_player || rosterSize;
+    locked = !!r.locked;
+    weekStart = r.week_start || s.week_start || '';
+    standings = s.standings || [];
+    pool = (p.pool || []).map(x => ({
+      ref: x.ref, name: x.name || x.ref, number: x.number || '', team: x.team || '',
+      st: Object.assign({}, ZERO, x.stats || {}),
+    }));
+    for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
+    $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
+    return true;
+  }
+
+  // ─── отрисовка ─────────────────────────────────────────────────────────────
+
+  function sortPool() {
+    const key = $('sort').value;
+    pool.sort((a, b) => key === 'name'
+      ? a.name.localeCompare(b.name, 'ru')
+      : (b.st[key] || 0) - (a.st[key] || 0) || a.name.localeCompare(b.name, 'ru'));
+  }
+
+  function statLine(st) {
+    if (!st.games) return 'нет сыгранных игр';
+    return `${st.games} игр · ${st.fp} FP (${st.fp_avg}/игра) · ` +
+           `${st.pts} очк · ${st.reb} подб · ${st.ast} пас`;
+  }
+
   function renderPool() {
-    const el = document.getElementById('pool'); el.innerHTML = '';
+    sortPool();
+    const el = $('pool'); el.innerHTML = '';
+    const full = total() >= rosterSize;
     for (const p of pool) {
-      const sel = selected.includes(p.r);
-      const full = !sel && selected.length >= rosterSize;
+      const n = counts[p.ref] || 0;
+      const canAdd = !locked && !full && n < maxPer;
       const c = document.createElement('div');
-      c.className = 'card' + (sel?' sel':'') + ((full||locked)?' disabled':'');
-      c.innerHTML = '<div class="num">'+(p.n||'—')+'</div>'+
-        '<div class="pname">'+esc(p.m||p.r)+'<div class="pteam">'+esc(p.t||'')+'</div></div>'+
-        '<div class="check">✓</div>';
-      if (!locked) c.onclick = () => toggle(p.r, full);
+      c.className = 'card' + (n ? ' sel' : '') + ((locked || (!n && full)) ? ' disabled' : '');
+      c.innerHTML =
+        `<div class="num">${esc(p.number || '—')}</div>` +
+        `<div class="info"><div class="pname">${esc(p.name)}</div>` +
+        `<div class="pstat">${esc(statLine(p.st))}</div></div>` +
+        `<div class="ctrl">` +
+          `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
+          `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
+          `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>` +
+        `</div>`;
+      c.querySelector('[data-act=inc]').onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
+      c.querySelector('[data-act=dec]').onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
+      if (!locked) c.onclick = () => bump(p.ref, +1);
       el.appendChild(c);
     }
     updateCounter();
   }
-  function toggle(ref, full) {
-    const i = selected.indexOf(ref);
-    if (i>=0){ selected.splice(i,1); haptic('light'); }
-    else if(!full){ selected.push(ref); haptic('medium'); }
-    else return;
+
+  function bump(ref, delta) {
+    const n = counts[ref] || 0;
+    if (delta > 0) {
+      if (locked || total() >= rosterSize || n >= maxPer) return;
+      counts[ref] = n + 1; haptic('medium');
+    } else {
+      if (locked || !n) return;
+      if (n === 1) delete counts[ref]; else counts[ref] = n - 1;
+      haptic('light');
+    }
     renderPool(); syncButton();
   }
-  function updateCounter(){ document.getElementById('counter').textContent = 'Выбрано: '+selected.length+' / '+rosterSize; }
+
+  function updateCounter() {
+    const hint = maxPer < rosterSize ? ` · до ${maxPer} на игрока` : '';
+    $('counter').textContent = `Выбрано: ${total()} / ${rosterSize}${hint}`;
+  }
+
   function syncButton() {
     if (!tg || !tg.MainButton) return;
-    if (locked){ tg.MainButton.hide(); return; }
-    if (selected.length === rosterSize){ tg.MainButton.setText('Сохранить состав'); tg.MainButton.show(); tg.MainButton.enable(); }
-    else tg.MainButton.hide();
+    if (locked || total() !== rosterSize) { tg.MainButton.hide(); return; }
+    tg.MainButton.setText('Сохранить состав');
+    tg.MainButton.show(); tg.MainButton.enable();
   }
-  function saveRoster() {
+
+  // Состав как плоский список с повторами — порядок пула, чтобы был стабилен.
+  function selectedRefs() {
+    const out = [];
+    for (const p of pool) for (let i = 0; i < (counts[p.ref] || 0); i++) out.push(p.ref);
+    return out;
+  }
+
+  const SAVE_ERRORS = {
+    invalid_roster: 'Неверное число игроков.',
+    unknown_player: 'В составе есть игрок не из пула.',
+    too_many_copies: 'Слишком много копий одного игрока.',
+    locked: 'Состав уже заблокирован до конца недели.',
+    not_a_member: 'Фэнтези доступна только игрокам команды.',
+  };
+
+  async function saveRoster() {
     haptic('heavy');
-    // Отправляем состав боту через Telegram — сервер наружу не светим.
-    tg.sendData(JSON.stringify({ refs: selected }));
-    // Telegram сам закроет приложение после sendData.
+    const refs = selectedRefs();
+    if (!live) { tg.sendData(JSON.stringify({ refs })); return; }  // Telegram сам закроет
+    tg.MainButton.showProgress();
+    try {
+      await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs }) });
+      tg.MainButton.hideProgress();
+      tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
+                                   buttons:[{type:'close'}]}, () => tg.close())
+                   : tg.close();
+    } catch (e) {
+      tg.MainButton.hideProgress();
+      const text = (e.data && SAVE_ERRORS[e.data.error]) || 'Не удалось сохранить. Попробуй ещё раз.';
+      tg.showAlert ? tg.showAlert(text) : alert(text);
+    }
   }
-  function showTab(name) {
-    document.getElementById('draft').classList.toggle('hidden', name!=='draft');
-    document.getElementById('table').classList.toggle('hidden', name!=='table');
-    document.getElementById('tab-draft').classList.toggle('active', name==='draft');
-    document.getElementById('tab-table').classList.toggle('active', name==='table');
-    if (name==='draft') syncButton(); else if (tg&&tg.MainButton) tg.MainButton.hide();
-  }
-  window.showTab = showTab;
 
   function renderStandings() {
-    const el = document.getElementById('standings'); el.innerHTML='';
-    const st = (D && D.standings) || [];
-    document.getElementById('weekLabel').textContent = D && D.week_start ? ('Неделя с '+D.week_start) : '';
-    if (!st.length){ el.innerHTML='<div class="banner">Пока нет очков</div>'; return; }
-    st.forEach((row,i)=>{
-      const medal = ['🥇','🥈','🥉'][i] || (i+1)+'.';
-      const div=document.createElement('div'); div.className='rank';
-      div.innerHTML='<div class="place">'+medal+'</div><div class="pname">'+esc(row.name||'Участник')+'</div><div class="pts">'+row.points+'</div>';
+    const el = $('standings'); el.innerHTML = '';
+    $('weekLabel').textContent = weekStart ? ('Неделя с ' + weekStart) : '';
+    if (!standings.length) { el.innerHTML = '<div class="banner">Пока нет очков</div>'; return; }
+    standings.forEach((row, i) => {
+      const medal = ['🥇','🥈','🥉'][i] || (i + 1) + '.';
+      const div = document.createElement('div'); div.className = 'rank';
+      div.innerHTML = `<div class="place">${medal}</div>` +
+        `<div class="info"><div class="pname">${esc(row.name || 'Участник')}</div></div>` +
+        `<div class="pts">${row.points}</div>`;
       el.appendChild(div);
     });
   }
 
-  function init() {
-    D = readData();
-    if (!D) { msg('Открой фэнтези через кнопку в боте (/fantasy).'); return; }
-    if (!D.season) { msg('Сейчас нет активного сезона фэнтези.'); return; }
-    rosterSize = D.season.roster_size || 3;
-    pool = D.pool || [];
-    selected = (D.roster || []).slice();
-    locked = !!D.locked;
-    document.getElementById('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
-    document.getElementById('lockBanner').classList.toggle('hidden', !locked);
-    if (!pool.length){ msg('Пул игроков пуст — попробуй позже.'); return; }
+  function showTab(name) {
+    $('draft').classList.toggle('hidden', name !== 'draft');
+    $('table').classList.toggle('hidden', name !== 'table');
+    $('tab-draft').classList.toggle('active', name === 'draft');
+    $('tab-table').classList.toggle('active', name === 'table');
+    if (name === 'draft') syncButton(); else if (tg && tg.MainButton) tg.MainButton.hide();
+  }
+  window.showTab = showTab;
+
+  // ─── старт ─────────────────────────────────────────────────────────────────
+
+  async function init() {
+    // Живой режим — если бэкенд доступен. Он даёт свежую статистику и позволяет
+    // открывать приложение кнопкой меню (там sendData недоступен).
+    if (API && tg && tg.initData) {
+      try {
+        // Сервер ответил — значит решение за ним: либо работаем вживую, либо он
+        // нас отверг (нет сезона / не игрок) и откат бессмыслен.
+        if (!await fromApi()) return;
+        live = true;
+      } catch (e) { live = false; }  // не достучались — запасной режим
+    }
+    if (!live) {
+      const D = readHashData();
+      if (!D) { msg('Не удалось связаться с ботом. Открой фэнтези командой /fantasy.'); return; }
+      if (!D.season) { msg('Сейчас нет активного сезона фэнтези.'); return; }
+      fromHash(D);
+    }
+    if (!pool.length) { msg('Пул игроков пуст — попробуй позже.'); return; }
+    $('lockBanner').classList.toggle('hidden', !locked);
     msg('');
+    $('sort').onchange = renderPool;
     renderPool(); renderStandings();
     if (tg && tg.MainButton) tg.MainButton.onClick(saveRoster);
     syncButton();

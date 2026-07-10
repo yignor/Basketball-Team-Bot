@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS fantasy_seasons (
     format        TEXT NOT NULL DEFAULT '3x3',
     status        TEXT NOT NULL DEFAULT 'active',   -- active | ended
     scoring_json  TEXT NOT NULL DEFAULT '',
+    settings_json TEXT NOT NULL DEFAULT '',         -- правила сезона (max_per_player и т.п.)
     started_at    TEXT NOT NULL DEFAULT '',
     ended_at      TEXT NOT NULL DEFAULT ''
 );
@@ -344,6 +345,7 @@ def init_db() -> None:
     with _connection() as conn:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "attendance", "dirty", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "fantasy_seasons", "settings_json", "TEXT NOT NULL", "''")
         conn.commit()
 
 

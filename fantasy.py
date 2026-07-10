@@ -107,7 +107,58 @@ def season_weights(season: Dict[str, Any]) -> Dict[str, float]:
         return fantasy_stats.DEFAULT_WEIGHTS
 
 
+def season_settings(season: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        s = json.loads(season.get("settings_json") or "")
+        return s if isinstance(s, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def max_per_player(season: Dict[str, Any]) -> int:
+    """Сколько раз один игрок может входить в состав. По умолчанию — сколько
+    угодно (до размера состава): участник вправе поставить всё на одного, и
+    тогда очки этого игрока умножаются на число занятых слотов."""
+    size = roster_size(season)
+    raw = season_settings(season).get("max_per_player")
+    try:
+        return max(1, min(int(raw), size))
+    except (TypeError, ValueError):
+        return size
+
+
+def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    if not season:
+        return False
+    settings = season_settings(season)
+    settings["max_per_player"] = int(n)
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE fantasy_seasons SET settings_json=? WHERE id=?",
+                     (json.dumps(settings, ensure_ascii=False), season["id"]))
+        conn.commit()
+    return True
+
+
 # ─────────────────────────── Составы ─────────────────────────────────────────
+
+def validate_roster(season: Dict[str, Any], refs: Any,
+                    pool_refs: Optional[Any] = None) -> Optional[str]:
+    """Проверяет состав по правилам сезона. Возвращает код ошибки или None.
+    Одна точка правды: зовут и HTTP-API, и приём состава из Mini App."""
+    size = roster_size(season)
+    if not isinstance(refs, list) or len(refs) != size:
+        return "invalid_roster"
+    if pool_refs is not None and any(r not in pool_refs for r in refs):
+        return "unknown_player"
+    limit = max_per_player(season)
+    if limit < size:
+        counts: Dict[str, int] = {}
+        for r in refs:
+            counts[r] = counts.get(r, 0) + 1
+        if max(counts.values()) > limit:
+            return "too_many_copies"
+    return None
 
 def save_roster(user_id: str, season_id: int, week_start: str,
                 refs: List[str], lock: bool = False) -> Dict[str, Any]:

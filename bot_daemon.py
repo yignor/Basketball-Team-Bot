@@ -14,7 +14,7 @@ import signal
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from telegram import (
@@ -59,21 +59,32 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     from datetime import date
     import fantasy
     import fantasy_api
+    import fantasy_stats
     season = fantasy.get_active_season()
     if not season:
         return None
     pool = await fantasy_api.build_pool()
+    agg = fantasy_stats.player_aggregates(fantasy.season_weights(season))
     week_start = fantasy.week_start_of(date.today()).isoformat()
     r = fantasy.get_roster(user_id, season["id"], week_start)
     table = fantasy.weekly_standings(season["id"], week_start)
     names = fantasy.display_names([row["user_id"] for row in table])
     standings = [{"name": names.get(str(row["user_id"]), "Участник"), "points": row["points"]} for row in table]
+    def _short_stats(ref: str) -> Dict[str, Any]:
+        src, pid = fantasy_stats.parse_ref(ref)
+        a = agg.get(f"{src}:{pid}")
+        if not a:
+            return {}
+        return {"g": a["games"], "p": a["pts"], "rb": a["reb"], "a": a["ast"],
+                "s": a["stl"], "b": a["blk"], "t": a["tur"], "f": a["fp"]}
+
     data = {
         "season": {"name": season["name"], "format": season["format"],
-                   "roster_size": fantasy.roster_size(season)},
+                   "roster_size": fantasy.roster_size(season),
+                   "max_per_player": fantasy.max_per_player(season)},
         # компактно: номер (пустой у SLPRO-ростера) и команда (одна) опускаем,
         # чтобы URL Mini App не разрастался
-        "pool": [{"r": p["ref"], "m": p["name"]} for p in pool],
+        "pool": [{"r": p["ref"], "m": p["name"], "s": _short_stats(p["ref"])} for p in pool],
         "roster": r["refs"] if r else [],
         "locked": bool(r["locked"]) if r else False,
         "week_start": week_start,
@@ -425,16 +436,20 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
     if not season:
         await msg.reply_text("Сейчас нет активного сезона.")
         return
-    size = fantasy.roster_size(season)
-    if not isinstance(refs, list) or len(refs) != size or len(set(refs)) != size:
-        await msg.reply_text(f"Нужно выбрать ровно {size} игроков.")
-        return
     try:
         pool_refs = {p["ref"] for p in await fantasy_api.build_pool()}
     except Exception:
-        pool_refs = set()
-    if pool_refs and any(r not in pool_refs for r in refs):
-        await msg.reply_text("В составе есть игрок не из пула. Открой заново.")
+        pool_refs = None  # пул недоступен — не заваливаем сохранение из-за этого
+    err = fantasy.validate_roster(season, refs, pool_refs or None)
+    if err:
+        size = fantasy.roster_size(season)
+        problems = {
+            "invalid_roster": f"Нужно выбрать ровно {size} игроков.",
+            "unknown_player": "В составе есть игрок не из пула. Открой заново.",
+            "too_many_copies": f"Одного игрока можно взять не больше "
+                               f"{fantasy.max_per_player(season)} раз(а).",
+        }
+        await msg.reply_text(problems.get(err, "Состав не прошёл проверку."))
         return
 
     from datetime import date
