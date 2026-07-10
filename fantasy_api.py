@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl
 from datetime import date
 
@@ -34,39 +34,67 @@ log = logging.getLogger(__name__)
 
 # ─────────────────────────── initData auth ───────────────────────────────────
 
-def verify_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400) -> Optional[Dict[str, Any]]:
-    """Проверяет подпись Telegram WebApp initData. Возвращает dict пользователя
-    ({id, username, first_name, ...}) или None. Алгоритм: secret =
-    HMAC_SHA256(key="WebAppData", msg=bot_token); hash = HMAC_SHA256(key=secret,
-    msg=data_check_string)."""
-    if not init_data or not bot_token:
-        return None
+def verify_init_data_detailed(init_data: str, bot_token: str,
+                              max_age_sec: int = 86400) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Проверяет подпись Telegram WebApp initData. Возвращает (пользователь,
+    причина отказа). Алгоритм: secret = HMAC_SHA256(key="WebAppData",
+    msg=bot_token); hash = HMAC_SHA256(key=secret, msg=data_check_string).
+
+    Причина возвращается отдельно, чтобы в логе было видно, что именно не
+    сошлось: пустой заголовок, подпись или срок годности — это разные болезни."""
+    if not init_data:
+        return None, "заголовка нет"
+    bot_token = (bot_token or "").strip()
+    if not bot_token:
+        return None, "у сервера нет токена бота"
     try:
         pairs = dict(parse_qsl(init_data, keep_blank_values=True))
     except (ValueError, TypeError):
-        return None
+        return None, "не разобрать как query string"
     received_hash = pairs.pop("hash", None)
     if not received_hash:
-        return None
-    # `signature` (Ed25519 для сторонней проверки) появился в Bot API 7.10 и в
-    # data_check_string не входит — иначе HMAC не сойдётся.
-    pairs.pop("signature", None)
-    data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
+        return None, "нет поля hash"
+
+    # Bot API 7.10 добавил поле `signature` (Ed25519 для сторонней проверки).
+    # Входит ли оно в data_check_string — вопрос версии клиента, поэтому
+    # проверяем обе строки. Подделать HMAC без токена всё равно нельзя.
+    signature = pairs.pop("signature", None)
+    candidates = [("без signature", pairs)]
+    if signature is not None:
+        candidates.append(("с signature", {**pairs, "signature": signature}))
+
     secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    calc = hmac.new(secret, data_check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(calc, received_hash):
-        return None
-    # свежесть
+    matched = ""
+    for label, fields in candidates:
+        dcs = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
+        calc = hmac.new(secret, dcs.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc, received_hash):
+            matched = label
+            break
+    if not matched:
+        bot_id = bot_token.split(":", 1)[0]
+        return None, (f"подпись не сошлась ни без signature, ни с ним; "
+                      f"поля: {', '.join(sorted(pairs))}; бот {bot_id}")
+    log.debug("initData: подпись сошлась в варианте «%s»", matched)
     try:
         auth_date = int(pairs.get("auth_date", "0"))
-        if max_age_sec and (time.time() - auth_date) > max_age_sec:
-            return None
     except (ValueError, TypeError):
-        return None
+        return None, "auth_date не число"
+    age = time.time() - auth_date
+    if max_age_sec and age > max_age_sec:
+        return None, f"подпись устарела на {int(age - max_age_sec)}с"
     try:
-        return json.loads(pairs.get("user", "null"))
+        user = json.loads(pairs.get("user", "null"))
     except (json.JSONDecodeError, TypeError):
-        return None
+        return None, "поле user не разобрать"
+    if not user:
+        return None, "в initData нет пользователя"
+    return user, ""
+
+
+def verify_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400) -> Optional[Dict[str, Any]]:
+    """Совместимая обёртка: только пользователь, без причины отказа."""
+    return verify_init_data_detailed(init_data, bot_token, max_age_sec)[0]
 
 
 def _is_team_member(telegram_id: Any, username: str = "") -> bool:
@@ -150,11 +178,10 @@ def _auth_user(request: web.Request) -> Optional[Dict[str, Any]]:
     целиком, а initData — это ключ доступа, действующий сутки."""
     bot_token = request.app["bot_token"]
     raw = request.headers.get("X-Init-Data", "")
-    user = verify_init_data(raw, bot_token)
+    user, reason = verify_init_data_detailed(raw, bot_token)
     if user is None:
-        # Само значение не пишем — это ключ доступа. Только факт и длина.
-        reason = "заголовка нет" if not raw else f"подпись не сошлась или устарела ({len(raw)} симв.)"
-        log.warning(f"фэнтези-API 401: {request.method} {request.path} — {reason}")
+        # Само значение не пишем — это ключ доступа. Только длина и причина.
+        log.warning(f"фэнтези-API 401: {request.method} {request.path} — {reason} ({len(raw)} симв.)")
     return user
 
 
