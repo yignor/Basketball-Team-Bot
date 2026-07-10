@@ -258,6 +258,61 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "week_start": week_start})
 
 
+_teams_cache: Dict[str, Any] = {"at": 0.0, "key": "", "data": {}}
+
+
+async def _team_names(scope: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """team_id -> название, транзитно из публичной таблицы лиги. В нашу базу
+    названия не пишем (там только id), поэтому подтягиваем на лету и кешируем."""
+    if not scope or scope.get("source") != fantasy_stats.SOURCE_SLPRO:
+        return {}
+    key = f"{scope.get('season_id')}:{scope.get('stage_id')}"
+    now = time.time()
+    if _teams_cache["key"] == key and (now - _teams_cache["at"]) < _POOL_TTL:
+        return _teams_cache["data"]
+    names: Dict[str, str] = {}
+    try:
+        from slpro_client import SlproClient
+        client = SlproClient()
+        # В scope нет division_id — восстанавливаем его по стадии.
+        for st in await client.iter_stages():
+            if (str(st["season_id"]) == str(scope.get("season_id"))
+                    and str(st["stage_id"]) == str(scope.get("stage_id"))):
+                for t in await client.get_standings(st):
+                    names[str(t.get("team_id"))] = t.get("name", "")
+                break
+    except Exception as e:
+        log.warning(f"фэнтези-API: не удалось получить названия команд: {e}")
+        return {}
+    _teams_cache.update(at=now, key=key, data=names)
+    return names
+
+
+async def handle_player(request: web.Request) -> web.Response:
+    """Карточка игрока: посещаемость, пропуски, статистика за турнир, журнал."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    ref = request.query.get("ref", "")
+    pool = await build_pool()
+    entry = next((p for p in pool if p["ref"] == ref), None)
+    if not entry:
+        return web.json_response({"error": "unknown_player"}, status=404)
+
+    season = fantasy.get_active_season()
+    weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
+    scope = fantasy.season_scope(season) if season else None
+    profile = fantasy_stats.player_profile(ref, scope, weights)
+
+    names = await _team_names(scope)
+    if profile.get("last") and profile["last"].get("opponent_id") is not None:
+        profile["last"]["opponent"] = names.get(str(profile["last"]["opponent_id"]), "Соперник")
+    profile["name"] = entry["name"]          # транзитно, как и в пуле
+    profile["number"] = entry.get("number", "")
+    profile["tournament"] = fantasy.scope_title(scope) if scope else ""
+    return web.json_response(profile)
+
+
 async def handle_standings(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
@@ -283,6 +338,7 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/pool", handle_pool),
         web.get("/fantasy/roster", handle_get_roster),
         web.post("/fantasy/roster", handle_save_roster),
+        web.get("/fantasy/player", handle_player),
         web.get("/fantasy/standings", handle_standings),
         web.get("/health", lambda r: web.json_response({"ok": True})),
     ])

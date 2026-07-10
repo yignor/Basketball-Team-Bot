@@ -57,6 +57,26 @@
     .pts { font-weight: 700; }
     .hidden { display: none; }
     #msg { text-align: center; color: var(--hint); padding: 40px 16px; }
+    .info { cursor: pointer; }
+    .chev { color: var(--hint); font-size: 12px; margin-left: 4px; }
+    /* Экран игрока */
+    #player { position: fixed; inset: 0; background: var(--bg); overflow-y: auto;
+      padding-bottom: 30px; z-index: 10; }
+    .phead { display: flex; align-items: center; gap: 10px; padding: 14px 16px 4px; }
+    .back { background: none; border: none; color: var(--button); font-size: 16px;
+      cursor: pointer; padding: 4px 0; }
+    .ptitle { font-size: 19px; font-weight: 700; }
+    .warn { margin: 10px 16px; padding: 10px 12px; border-radius: 10px;
+      background: var(--secondary-bg); font-size: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 12px; }
+    .stat { background: var(--secondary-bg); border-radius: 12px; padding: 10px; text-align: center; }
+    .stat b { display: block; font-size: 19px; }
+    .stat span { color: var(--hint); font-size: 12px; }
+    .sect { padding: 14px 16px 6px; font-weight: 600; color: var(--hint); font-size: 13px;
+      text-transform: uppercase; letter-spacing: .3px; }
+    .row { display: flex; justify-content: space-between; padding: 9px 14px; margin: 6px 12px;
+      background: var(--secondary-bg); border-radius: 10px; font-size: 14px; }
+    .row .d { color: var(--hint); }
   </style>
 </head>
 <body>
@@ -87,6 +107,19 @@
     <div class="bar"><div class="counter" id="weekLabel"></div></div>
     <div class="list" id="standings"></div>
   </div>
+  <div id="player" class="hidden">
+    <div class="phead">
+      <button class="back" onclick="closePlayer()">‹ Назад</button>
+      <div class="ptitle" id="pTitle"></div>
+    </div>
+    <div class="sub" style="padding: 0 16px 6px" id="pSub"></div>
+    <div class="tabs">
+      <button class="tab active" id="ptab-last" onclick="showSlice('last')">Последняя игра</button>
+      <button class="tab" id="ptab-season" onclick="showSlice('season')">Весь турнир</button>
+    </div>
+    <div id="pBody"></div>
+  </div>
+
   <div id="msg">Загрузка…</div>
 
 <script>
@@ -215,7 +248,8 @@
       c.className = 'card' + (n ? ' sel' : '') + ((locked || (!n && full)) ? ' disabled' : '');
       c.innerHTML =
         `<div class="num">${esc(p.number || '—')}</div>` +
-        `<div class="info"><div class="pname">${esc(p.name)}</div>` +
+        `<div class="info"><div class="pname">${esc(p.name)}` +
+        (live ? '<span class="chev">›</span>' : '') + `</div>` +
         `<div class="pstat">${esc(statLine(p.st))}</div></div>` +
         `<div class="ctrl">` +
           `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
@@ -224,7 +258,9 @@
         `</div>`;
       c.querySelector('[data-act=inc]').onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
       c.querySelector('[data-act=dec]').onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
-      if (!locked) c.onclick = () => bump(p.ref, +1);
+      // Тап по имени — профиль игрока; состав набирается кнопками ±, иначе одно
+      // касание значило бы две разные вещи.
+      c.querySelector('.info').onclick = () => openPlayer(p.ref);
       el.appendChild(c);
     }
     updateCounter();
@@ -286,6 +322,106 @@
       const text = (e.data && SAVE_ERRORS[e.data.error]) || 'Не удалось сохранить. Попробуй ещё раз.';
       tg.showAlert ? tg.showAlert(text) : alert(text);
     }
+  }
+
+  // ─── экран игрока ──────────────────────────────────────────────────────────
+
+  let P = null, slice = 'last';
+
+  async function openPlayer(ref) {
+    if (!live) { tg && tg.showAlert ? tg.showAlert('Статистика игрока доступна только при связи с ботом.') : 0; return; }
+    haptic('light');
+    $('player').classList.remove('hidden');
+    $('pTitle').textContent = 'Загрузка…';
+    $('pSub').textContent = '';
+    $('pBody').innerHTML = '';
+    if (tg && tg.MainButton) tg.MainButton.hide();
+    if (tg && tg.BackButton) { tg.BackButton.show(); tg.BackButton.onClick(closePlayer); }
+    try {
+      P = await api('/fantasy/player?ref=' + encodeURIComponent(ref));
+    } catch (e) {
+      $('pTitle').textContent = 'Не удалось загрузить';
+      return;
+    }
+    slice = 'last';
+    renderPlayer();
+  }
+
+  function closePlayer() {
+    $('player').classList.add('hidden');
+    if (tg && tg.BackButton) tg.BackButton.hide();
+    syncButton();
+  }
+  window.closePlayer = closePlayer;
+
+  function showSlice(name) {
+    slice = name;
+    $('ptab-last').classList.toggle('active', name === 'last');
+    $('ptab-season').classList.toggle('active', name === 'season');
+    renderPlayer();
+  }
+  window.showSlice = showSlice;
+
+  function statCard(value, label) {
+    return `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
+  }
+
+  // «5 игр» / «2 игры» / «1 игра» — иначе текст выглядит машинным.
+  function games(n) {
+    const t = Math.abs(n) % 100, o = t % 10;
+    if (t > 10 && t < 20) return n + ' игр';
+    if (o === 1) return n + ' игра';
+    if (o >= 2 && o <= 4) return n + ' игры';
+    return n + ' игр';
+  }
+
+  function renderPlayer() {
+    const s = P.season;
+    $('pTitle').textContent = (P.number ? '№' + P.number + ' ' : '') + P.name;
+    $('pSub').textContent = P.tournament || '';
+    const b = $('pBody');
+
+    // Посещаемость и пропуски показываем в обоих срезах: без них непонятно,
+    // за сколько матчей набраны очки.
+    let html = `<div class="warn">Сыграл <b>${s.games}</b> из ${games(s.team_games)} команды` +
+      (s.missed_streak ? ` · пропустил ${games(s.missed_streak)} подряд` : '') + `</div>`;
+
+    if (slice === 'last') {
+      const l = P.last;
+      if (!l) {
+        html += '<div class="banner">В этом турнире ещё не играл</div>';
+      } else {
+        html += `<div class="sect">${l.game_date} · ${l.home ? 'дома' : 'в гостях'} с ` +
+          `${esc(l.opponent || 'соперником')} · ${l.our_score}:${l.their_score}</div>` +
+          '<div class="grid">' +
+          statCard(l.fp, 'фэнтези-очки') + statCard(l.pts, 'очки') + statCard(l.reb, 'подборы') +
+          statCard(l.ast, 'передачи') + statCard(l.stl, 'перехваты') + statCard(l.blk, 'блоки') +
+          statCard(l.tur, 'потери') + statCard(l.fgm + '/' + l.fga, 'броски') +
+          statCard(l.tpm + '/' + l.tpa, 'трёхочковые') +
+          '</div>';
+      }
+    } else {
+      const a = s.avg, pct = v => v === null || v === undefined ? '—' : v + '%';
+      html += '<div class="grid">' +
+        statCard(s.fp, 'фэнтези-очки') + statCard(s.fp_avg, 'FP за игру') + statCard(s.games, 'сыграно') +
+        '</div><div class="sect">В среднем за игру</div><div class="grid">' +
+        statCard(a.pts ?? 0, 'очки') + statCard(a.reb ?? 0, 'подборы') + statCard(a.ast ?? 0, 'передачи') +
+        statCard(a.stl ?? 0, 'перехваты') + statCard(a.blk ?? 0, 'блоки') + statCard(a.tur ?? 0, 'потери') +
+        '</div><div class="sect">Реализация</div><div class="grid">' +
+        statCard(pct(s.fg_pct), 'с игры') + statCard(pct(s.tp_pct), 'трёхочковые') +
+        statCard(pct(s.ft_pct), 'штрафные') +
+        '</div>';
+    }
+
+    if (P.log && P.log.length) {
+      html += '<div class="sect">Последние игры</div>';
+      for (const g of P.log) {
+        html += `<div class="row"><span class="d">${g.game_date}</span>` +
+          `<span>${g.pts} очк · ${g.reb} подб · ${g.ast} пас</span>` +
+          `<b>${g.fp}</b></div>`;
+      }
+    }
+    b.innerHTML = html;
   }
 
   function renderStandings() {

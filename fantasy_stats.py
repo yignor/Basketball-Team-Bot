@@ -265,6 +265,15 @@ def parse_ref(ref: str) -> Tuple[str, str]:
     return src, player_id
 
 
+def parse_ref_full(ref: str) -> Tuple[str, str, str]:
+    """"slpro:707:12684" -> (source, team_id, player_id). Команда нужна, чтобы
+    сравнить игры игрока с играми его команды (посещаемость)."""
+    parts = str(ref).split(":")
+    src, pid = parse_ref(ref)
+    team = parts[1] if len(parts) >= 3 else ""
+    return src, team, pid
+
+
 def scope_where(scope: Optional[Dict[str, Any]]) -> Tuple[str, List[Any]]:
     """Условие «считать только этот турнир»: {source, season_id, stage_id}.
 
@@ -349,3 +358,88 @@ def player_aggregates(weights: Optional[Dict[str, float]] = None,
             agg["fp_avg"] = round(agg["fp"] / games, 2) if games else 0.0
             out[f"{r['source']}:{r['player_id']}"] = agg
     return out
+
+
+def _pct(made: int, attempted: int) -> Optional[float]:
+    return round(made * 100.0 / attempted, 1) if attempted else None
+
+
+def _game_line(row: Dict[str, Any], weights: Dict[str, float]) -> Dict[str, Any]:
+    """Строка одной игры игрока: сухие цифры + фэнтези-очки за неё."""
+    line = {k: int(row.get(k, 0) or 0) for k in AGG_COLUMNS}
+    line["game_id"] = row["game_id"]
+    line["game_date"] = row["game_date"]
+    line["fp"] = fantasy_points(row, weights)
+    return line
+
+
+def player_profile(ref: str, scope: Optional[Dict[str, Any]] = None,
+                   weights: Optional[Dict[str, float]] = None,
+                   log_size: int = 8) -> Dict[str, Any]:
+    """Карточка игрока в рамках турнира (scope).
+
+    Считает посещаемость (игры игрока против игр его команды), серию
+    пропущенных последних матчей, суммы/средние за турнир, проценты бросков,
+    последнюю сыгранную игру и журнал последних игр с очками за каждую."""
+    sheets_cache.init_db()
+    w = weights or DEFAULT_WEIGHTS
+    src, team_id, pid = parse_ref_full(ref)
+    scope_sql, scope_params = scope_where(scope)
+
+    with sheets_cache.get_connection() as conn:
+        team_games = [dict(r) for r in conn.execute(
+            "SELECT game_id, game_date, home_team_id, guest_team_id, home_score, guest_score "
+            "FROM game_meta WHERE source = ? AND (home_team_id = ? OR guest_team_id = ?)"
+            + scope_sql + " ORDER BY game_date, game_id",
+            [src, team_id, team_id] + scope_params).fetchall()]
+        player_rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM game_player_stats WHERE source = ? AND player_id = ?"
+            + scope_sql + " ORDER BY game_date, game_id",
+            [src, pid] + scope_params).fetchall()]
+
+    played_ids = {str(r["game_id"]) for r in player_rows}
+
+    # Сколько матчей команды подряд, начиная с последнего, игрок пропустил.
+    missed_streak = 0
+    for g in reversed(team_games):
+        if str(g["game_id"]) in played_ids:
+            break
+        missed_streak += 1
+
+    totals = {c: sum(int(r.get(c, 0) or 0) for r in player_rows) for c in AGG_COLUMNS}
+    games = len(player_rows)
+    fp_total = round(sum(float(totals.get(k, 0)) * coeff for k, coeff in w.items()), 2)
+
+    season = {
+        "games": games,
+        "team_games": len(team_games),
+        "missed_streak": missed_streak,
+        "fp": fp_total,
+        "fp_avg": round(fp_total / games, 2) if games else 0.0,
+        "totals": totals,
+        "avg": {c: round(totals[c] / games, 1) for c in AGG_COLUMNS} if games else {},
+        "fg_pct": _pct(totals["fgm"], totals["fga"]),
+        "tp_pct": _pct(totals["tpm"], totals["tpa"]),
+        "ft_pct": _pct(totals["ftm"], totals["fta"]),
+    }
+
+    last = None
+    if player_rows:
+        row = player_rows[-1]
+        last = _game_line(row, w)
+        meta = next((g for g in team_games if str(g["game_id"]) == str(row["game_id"])), None)
+        if meta:
+            we_home = str(meta["home_team_id"]) == team_id
+            last.update({
+                "opponent_id": meta["guest_team_id"] if we_home else meta["home_team_id"],
+                "our_score": meta["home_score"] if we_home else meta["guest_score"],
+                "their_score": meta["guest_score"] if we_home else meta["home_score"],
+                "home": we_home,
+            })
+
+    return {
+        "ref": ref, "team_id": team_id,
+        "season": season,
+        "last": last,
+        "log": [_game_line(r, w) for r in player_rows[-log_size:]][::-1],
+    }
