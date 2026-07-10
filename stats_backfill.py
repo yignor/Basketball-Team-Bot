@@ -139,14 +139,33 @@ async def backfill_slpro(client, scope: str = "league", team_names: Optional[Lis
 
 # ─────────────────────────── Infobasket ──────────────────────────────────────
 
+IB_CALENDAR_TIMEOUT = 90       # календарь сезона — до 2 МБ
+IB_CALENDAR_RETRIES = 3
+
+
+def _ib_session() -> aiohttp.ClientSession:
+    """Соединение не переиспользуем: reg.infobasket.su не держит keep-alive так,
+    как ожидает aiohttp — второй запрос в сессии виснет до таймаута."""
+    return aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
+
+
 async def _ib_calendar(session: aiohttp.ClientSession, comp_id: int) -> List[Dict[str, Any]]:
     url = f"{IB_API}/Comp/GetCalendar/?comps={comp_id}&format=json"
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
-        if r.status != 200:
-            log.warning("бэкфилл infobasket: календарь %s -> HTTP %s", comp_id, r.status)
-            return []
-        data = await r.json(content_type=None)
-    return data if isinstance(data, list) else []
+    for attempt in range(1, IB_CALENDAR_RETRIES + 1):
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=IB_CALENDAR_TIMEOUT)) as r:
+                if r.status != 200:
+                    log.warning("бэкфилл infobasket: календарь %s -> HTTP %s", comp_id, r.status)
+                    return []
+                data = await r.json(content_type=None)
+            return data if isinstance(data, list) else []
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.warning("бэкфилл infobasket: календарь %s, попытка %d/%d — %s",
+                        comp_id, attempt, IB_CALENDAR_RETRIES, type(e).__name__)
+            if attempt == IB_CALENDAR_RETRIES:
+                return []
+            await asyncio.sleep(2.0 * attempt)
+    return []
 
 
 async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
@@ -158,7 +177,7 @@ async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
     st = BackfillStats()
     todo: List[Tuple[str, int]] = []
 
-    async with aiohttp.ClientSession() as session:
+    async with _ib_session() as session:
         for comp_id in comp_ids:
             for g in await _ib_calendar(session, comp_id):
                 if g.get("GameStatus") != IB_FINISHED:
@@ -183,10 +202,22 @@ async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
         st.fetched = len(todo)
         return st
 
+    async def _game_data(parser, gid: str) -> Optional[Dict[str, Any]]:
+        """Одна игра, с повторами: сеть до лиги капризная, а ронять из-за
+        одного таймаута весь ночной прогон незачем."""
+        for attempt in range(1, 3):
+            data = await parser.get_game_data_from_api(gid, IB_API)
+            if data:
+                return data
+            if attempt == 2:
+                return None
+            await asyncio.sleep(2.0)
+        return None
+
     async with EnhancedGameParser() as parser:
         for gid, comp_id in todo:
             try:
-                api_data = await parser.get_game_data_from_api(gid, IB_API)
+                api_data = await _game_data(parser, gid)
                 info = await parser.parse_game_info(api_data) if api_data else None
                 if info:
                     info["player_stats"] = parser.extract_player_statistics(api_data)
@@ -207,17 +238,22 @@ async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
 # ─────────────────────────── Сводка ──────────────────────────────────────────
 
 def local_summary() -> Dict[str, Any]:
-    """Что уже лежит в локальной копии — для отчёта в админке."""
+    """Что уже лежит в локальной копии — для отчёта в админке.
+
+    Источник правды по играм — game_stats_fetched: он вёлся и до появления
+    game_meta, поэтому по нему видно всё скачанное, а не только новое."""
     sheets_cache.init_db()
     out: Dict[str, Any] = {}
     with sheets_cache.get_connection() as conn:
         for row in conn.execute(
             """SELECT source, COUNT(*) games, MIN(game_date) first, MAX(game_date) last
-               FROM game_meta GROUP BY source"""
+               FROM game_stats_fetched GROUP BY source"""
         ):
             out[row["source"]] = dict(row)
         for row in conn.execute(
             "SELECT source, COUNT(*) rows, COUNT(DISTINCT player_id) players FROM game_player_stats GROUP BY source"
         ):
             out.setdefault(row["source"], {}).update(rows=row["rows"], players=row["players"])
+        for row in conn.execute("SELECT source, COUNT(*) with_meta FROM game_meta GROUP BY source"):
+            out.setdefault(row["source"], {}).update(with_meta=row["with_meta"])
     return out

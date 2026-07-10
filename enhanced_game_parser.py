@@ -63,7 +63,10 @@ class EnhancedGameParser:
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        # force_close: reg.infobasket.su непредсказуемо роняет переиспользуемое
+        # keep-alive соединение после крупного ответа, и следующий запрос в той
+        # же сессии виснет до таймаута. Свежее TCP на запрос — дёшево и надёжно.
+        connector = aiohttp.TCPConnector(ssl=ssl_context, force_close=True)
         self.session = aiohttp.ClientSession(connector=connector)
         return self
     

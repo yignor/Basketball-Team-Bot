@@ -67,8 +67,9 @@ async def main() -> int:
         print("Локальная копия статистики:")
         for source, s in sorted(summary.items()):
             print(f"  {source:12} игр {s.get('games', 0):>5}  "
+                  f"(со счётом {s.get('with_meta', 0):>5})  "
                   f"строк {s.get('rows', 0):>6}  игроков {s.get('players', 0):>5}  "
-                  f"период {s.get('first', '?')} … {s.get('last', '?')}")
+                  f"период {s.get('first') or '?'} … {s.get('last') or '?'}")
         return 0
 
     rc = 0
