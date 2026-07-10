@@ -48,6 +48,9 @@ def verify_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400) -
     received_hash = pairs.pop("hash", None)
     if not received_hash:
         return None
+    # `signature` (Ed25519 для сторонней проверки) появился в Bot API 7.10 и в
+    # data_check_string не входит — иначе HMAC не сойдётся.
+    pairs.pop("signature", None)
     data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
     secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
     calc = hmac.new(secret, data_check_string.encode(), hashlib.sha256).hexdigest()
