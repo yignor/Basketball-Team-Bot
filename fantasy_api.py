@@ -17,6 +17,7 @@ HTTP-API фэнтези для Mini App (aiohttp). Живёт в процесс�
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,8 @@ from aiohttp import web
 import sheets_cache
 import fantasy
 import fantasy_stats
+
+log = logging.getLogger(__name__)
 
 # ─────────────────────────── initData auth ───────────────────────────────────
 
@@ -132,6 +135,10 @@ async def cors_middleware(request: web.Request, handler):
     if request.method == "OPTIONS":
         return _cors(web.Response())
     resp = await handler(request)
+    # Логируем только свои пути и только метод+путь+код (без строки запроса,
+    # где могла бы оказаться подпись). Шум от сканеров сюда не попадает.
+    if request.path.startswith("/fantasy/"):
+        log.info(f"фэнтези-API: {request.method} {request.path} -> {resp.status}")
     return _cors(resp)
 
 
@@ -139,7 +146,13 @@ def _auth_user(request: web.Request) -> Optional[Dict[str, Any]]:
     """Подпись принимаем ТОЛЬКО заголовком: строка запроса попадает в access-log
     целиком, а initData — это ключ доступа, действующий сутки."""
     bot_token = request.app["bot_token"]
-    return verify_init_data(request.headers.get("X-Init-Data", ""), bot_token)
+    raw = request.headers.get("X-Init-Data", "")
+    user = verify_init_data(raw, bot_token)
+    if user is None:
+        # Само значение не пишем — это ключ доступа. Только факт и длина.
+        reason = "заголовка нет" if not raw else f"подпись не сошлась или устарела ({len(raw)} симв.)"
+        log.warning(f"фэнтези-API 401: {request.method} {request.path} — {reason}")
+    return user
 
 
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:

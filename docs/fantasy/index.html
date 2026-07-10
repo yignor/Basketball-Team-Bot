@@ -110,7 +110,7 @@
 
   async function api(path, opts) {
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 7000);
+    const timer = setTimeout(() => ctl.abort(), 15000);  // мобильная сеть бывает медленной
     try {
       const r = await fetch(API + path, Object.assign({
         signal: ctl.signal,
@@ -303,17 +303,26 @@
   async function init() {
     // Живой режим — если бэкенд доступен. Он даёт свежую статистику и позволяет
     // открывать приложение кнопкой меню (там sendData недоступен).
-    if (API && tg && tg.initData) {
+    let why = '';
+    if (!API) why = 'бэкенд не настроен';
+    else if (!tg) why = 'вне Telegram';
+    else if (!tg.initData) why = 'Telegram не передал подпись';
+    else {
       try {
         // Сервер ответил — значит решение за ним: либо работаем вживую, либо он
         // нас отверг (нет сезона / не игрок) и откат бессмыслен.
         if (!await fromApi()) return;
         live = true;
-      } catch (e) { live = false; }  // не достучались — запасной режим
+      } catch (e) {
+        live = false;  // не достучались — запасной режим
+        why = e.name === 'AbortError' ? 'сервер не ответил за 15 с'
+            : e.data ? ('сервер ответил: ' + (e.data.error || e.message))
+            : ('сеть: ' + e.message);
+      }
     }
     if (!live) {
       const D = readHashData();
-      if (!D) { msg('Не удалось связаться с ботом. Открой фэнтези командой /fantasy.'); return; }
+      if (!D) { msg('Живой режим недоступен (' + why + '). Открой фэнтези командой /fantasy.'); return; }
       if (!D.season) { msg('Сейчас нет активного сезона фэнтези.'); return; }
       fromHash(D);
     }

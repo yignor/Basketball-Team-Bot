@@ -96,6 +96,19 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+_WEBAPP_VERSION = str(int(time.time()))
+
+
+def _webapp_url() -> str:
+    """URL Mini App с версией. GitHub Pages и Telegram кешируют страницу; версия
+    меняется при каждом перезапуске демона, поэтому после деплоя пользователь
+    гарантированно получает свежий фронт, а не старый JS."""
+    if not FANTASY_WEBAPP_URL:
+        return ""
+    sep = "&" if "?" in FANTASY_WEBAPP_URL else "?"
+    return f"{FANTASY_WEBAPP_URL}{sep}v={_WEBAPP_VERSION}"
+
+
 async def _setup_menu_button(app) -> None:
     """Кнопка «Открыть» слева от поля ввода. Ставим её только вместе с живым
     API: из кнопки меню Telegram не даёт `sendData`, и без бэкенда приложение
@@ -104,7 +117,7 @@ async def _setup_menu_button(app) -> None:
         if FANTASY_WEBAPP_URL and FANTASY_API_ENABLED:
             await app.bot.set_chat_menu_button(
                 menu_button=MenuButtonWebApp(text="Фэнтези",
-                                             web_app=WebAppInfo(url=FANTASY_WEBAPP_URL)))
+                                             web_app=WebAppInfo(url=_webapp_url())))
             log.info("Кнопка меню: Mini App фэнтези")
         else:
             await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
@@ -121,8 +134,7 @@ async def _fantasy_webapp_markup(user_id: str) -> Optional[ReplyKeyboardMarkup]:
     payload = await _fantasy_payload(user_id)
     if payload is None:
         return None
-    sep = "&" if "#" in FANTASY_WEBAPP_URL else "#"
-    url = f"{FANTASY_WEBAPP_URL}{sep}d={payload}"
+    url = f"{_webapp_url()}#d={payload}"
     return ReplyKeyboardMarkup(
         [[KeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]],
         resize_keyboard=True,
