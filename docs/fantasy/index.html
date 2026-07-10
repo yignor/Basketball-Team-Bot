@@ -108,9 +108,22 @@
 
   // ─── источники данных ──────────────────────────────────────────────────────
 
-  async function api(path, opts) {
+  // Быстрая проверка достижимости: без неё недоступный бэкенд заставлял ждать
+  // полный таймаут, а причину («не доходит» или «отвечает, но отказывает»)
+  // было не отличить.
+  // Намеренно без заголовка X-Init-Data: это «простой» запрос, браузер не шлёт
+  // предзапрос. Провал здесь означает именно сеть или DNS, а не CORS.
+  async function reachable() {
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), 15000);  // мобильная сеть бывает медленной
+    const timer = setTimeout(() => ctl.abort(), 5000);
+    try { await fetch(API + '/health', {signal: ctl.signal}); return true; }
+    catch (e) { return false; }
+    finally { clearTimeout(timer); }
+  }
+
+  async function api(path, opts, timeoutMs) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs || 15000);  // мобильная сеть бывает медленной
     try {
       const r = await fetch(API + path, Object.assign({
         signal: ctl.signal,
@@ -304,9 +317,11 @@
     // Живой режим — если бэкенд доступен. Он даёт свежую статистику и позволяет
     // открывать приложение кнопкой меню (там sendData недоступен).
     let why = '';
+    const host = API.replace(/^https?:\/\//, '');
     if (!API) why = 'бэкенд не настроен';
     else if (!tg) why = 'вне Telegram';
     else if (!tg.initData) why = 'Telegram не передал подпись';
+    else if (!await reachable()) why = 'не открывается ' + host;
     else {
       try {
         // Сервер ответил — значит решение за ним: либо работаем вживую, либо он
@@ -315,7 +330,7 @@
         live = true;
       } catch (e) {
         live = false;  // не достучались — запасной режим
-        why = e.name === 'AbortError' ? 'сервер не ответил за 15 с'
+        why = e.name === 'AbortError' ? 'сервер молчит дольше 15 с'
             : e.data ? ('сервер ответил: ' + (e.data.error || e.message))
             : ('сеть: ' + e.message);
       }
