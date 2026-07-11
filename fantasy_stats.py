@@ -274,21 +274,33 @@ def parse_ref_full(ref: str) -> Tuple[str, str, str]:
     return src, team, pid
 
 
-def scope_where(scope: Optional[Dict[str, Any]]) -> Tuple[str, List[Any]]:
-    """Условие «считать только этот турнир»: {source, season_id, stage_id}.
+def scope_where(scopes: Any) -> Tuple[str, List[Any]]:
+    """Условие «считать только эти турниры». Принимает список scope-словарей
+    {source, season_id, stage_id} ИЛИ один словарь (обратная совместимость).
+    Несколько турниров объединяются по ИЛИ — команда играет сразу в двух лигах.
 
-    Без него очки игрока суммировались бы по всем турнирам сразу — а в базе
-    лежит вся лига за четыре сезона. Пустой scope = считать всё (так было
-    исторически, пока в базе жили только наши игры)."""
-    if not scope:
+    Пусто/None = считать всё (так было исторически, пока в базе жили только
+    наши игры; после бэкфилла это опасно — попадёт вся лига за все сезоны)."""
+    if not scopes:
         return "", []
-    sql, params = "", []
-    for column in ("source", "season_id", "stage_id"):
-        value = scope.get(column)
-        if value not in (None, ""):
-            sql += f" AND {column} = ?"
-            params.append(str(value))
-    return sql, params
+    if isinstance(scopes, dict):
+        scopes = [scopes]
+    ors: List[str] = []
+    params: List[Any] = []
+    for sc in scopes:
+        if not isinstance(sc, dict) or not sc:
+            continue
+        conds = []
+        for column in ("source", "season_id", "stage_id"):
+            value = sc.get(column)
+            if value not in (None, ""):
+                conds.append(f"{column} = ?")
+                params.append(str(value))
+        if conds:
+            ors.append("(" + " AND ".join(conds) + ")")
+    if not ors:
+        return "", []
+    return " AND (" + " OR ".join(ors) + ")", params
 
 
 def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,

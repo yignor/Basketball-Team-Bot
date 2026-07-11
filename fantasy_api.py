@@ -190,7 +190,7 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
     статистика меняется после каждого ingest."""
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    agg = fantasy_stats.player_aggregates(weights, scope=fantasy.season_scope(season) if season else None)
+    agg = fantasy_stats.player_aggregates(weights, scope=fantasy.season_scopes(season) if season else [])
     enriched = []
     for p in pool:
         src, pid = fantasy_stats.parse_ref(p["ref"])
@@ -261,12 +261,14 @@ async def handle_save_roster(request: web.Request) -> web.Response:
 _teams_cache: Dict[str, Any] = {"at": 0.0, "key": "", "data": {}}
 
 
-async def _team_names(scope: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    """team_id -> название, транзитно из публичной таблицы лиги. В нашу базу
-    названия не пишем (там только id), поэтому подтягиваем на лету и кешируем."""
-    if not scope or scope.get("source") != fantasy_stats.SOURCE_SLPRO:
+async def _team_names(scopes: List[Dict[str, Any]]) -> Dict[str, str]:
+    """team_id -> название, транзитно из публичных таблиц SLPRO-стадий в scope.
+    В нашу базу названия не пишем (там только id) — подтягиваем на лету и
+    кешируем на TTL пула."""
+    slpro = [s for s in (scopes or []) if s.get("source") == fantasy_stats.SOURCE_SLPRO]
+    if not slpro:
         return {}
-    key = f"{scope.get('season_id')}:{scope.get('stage_id')}"
+    key = ";".join(sorted(f"{s.get('season_id')}:{s.get('stage_id')}" for s in slpro))
     now = time.time()
     if _teams_cache["key"] == key and (now - _teams_cache["at"]) < _POOL_TTL:
         return _teams_cache["data"]
@@ -274,13 +276,14 @@ async def _team_names(scope: Optional[Dict[str, Any]]) -> Dict[str, str]:
     try:
         from slpro_client import SlproClient
         client = SlproClient()
-        # В scope нет division_id — восстанавливаем его по стадии.
-        for st in await client.iter_stages():
-            if (str(st["season_id"]) == str(scope.get("season_id"))
-                    and str(st["stage_id"]) == str(scope.get("stage_id"))):
-                for t in await client.get_standings(st):
-                    names[str(t.get("team_id"))] = t.get("name", "")
-                break
+        stages = await client.iter_stages()      # в scope нет division_id — по стадии
+        for sc in slpro:
+            for st in stages:
+                if (str(st["season_id"]) == str(sc.get("season_id"))
+                        and str(st["stage_id"]) == str(sc.get("stage_id"))):
+                    for t in await client.get_standings(st):
+                        names[str(t.get("team_id"))] = t.get("name", "")
+                    break
     except Exception as e:
         log.warning(f"фэнтези-API: не удалось получить названия команд: {e}")
         return {}
@@ -301,15 +304,15 @@ async def handle_player(request: web.Request) -> web.Response:
 
     season = fantasy.get_active_season()
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    scope = fantasy.season_scope(season) if season else None
-    profile = fantasy_stats.player_profile(ref, scope, weights)
+    scopes = fantasy.season_scopes(season) if season else []
+    profile = fantasy_stats.player_profile(ref, scopes, weights)
 
-    names = await _team_names(scope)
+    names = await _team_names(scopes)
     if profile.get("last") and profile["last"].get("opponent_id") is not None:
         profile["last"]["opponent"] = names.get(str(profile["last"]["opponent_id"]), "Соперник")
     profile["name"] = entry["name"]          # транзитно, как и в пуле
     profile["number"] = entry.get("number", "")
-    profile["tournament"] = fantasy.scope_title(scope) if scope else ""
+    profile["tournament"] = fantasy.scopes_title(scopes)
     return web.json_response(profile)
 
 

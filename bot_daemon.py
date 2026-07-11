@@ -67,7 +67,7 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
         return None
     pool = await fantasy_api.build_pool()
     agg = fantasy_stats.player_aggregates(fantasy.season_weights(season),
-                                          scope=fantasy.season_scope(season))
+                                          scope=fantasy.season_scopes(season))
     week_start = fantasy.week_start_of(date.today()).isoformat()
     r = fantasy.get_roster(user_id, season["id"], week_start)
     table = fantasy.weekly_standings(season["id"], week_start)
@@ -575,50 +575,102 @@ def _fantasy_menu_text() -> str:
         return "🏆 Фэнтези лига\n\nАктивного сезона нет."
     return (f"🏆 Фэнтези лига\n\nСезон: «{season['name']}»\n"
             f"Формат: {season.get('format', '3x3')}\n"
-            f"Турнир подсчёта: {fantasy.scope_title(fantasy.season_scope(season))}\n"
+            f"Турниры подсчёта: {fantasy.scopes_title(fantasy.season_scopes(season))}\n"
             f"Старт: {season.get('started_at', '')[:10]}")
 
 
 async def _fantasy_scope_markup() -> InlineKeyboardMarkup:
-    """Список турниров: стадии SLPRO (активные — первыми) и сезоны Infobasket."""
-    import stats_backfill
-    rows: List[List[InlineKeyboardButton]] = []
+    """Мультивыбор турниров подсчёта: стадии SLPRO + сезоны Инфобаскета (comp_id
+    из Конфига). Выбранные помечены ✅. Первой — авто-настройка по поиску игр."""
+    import fantasy
+    season = fantasy.get_active_season()
+    scopes = fantasy.season_scopes(season) if season else []
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("🎯 По настройкам поиска игр", callback_data="admin:fscope:auto")],
+    ]
     try:
         from slpro_client import SlproClient
         stages = await SlproClient().iter_stages()
     except Exception as e:
         log.warning(f"Не удалось получить стадии SLPRO: {e}")
         stages = []
-    for s in stages:
+    for s in stages[:12]:   # активные первыми; ограничим, чтобы меню не разрослось
         division = s.get("division_name") or s.get("division") or "?"
-        mark = "🟢" if s.get("active") else "⚪"
+        sc = {"source": "slpro", "season_id": str(s["season_id"]), "stage_id": str(s["stage_id"])}
+        mark = "✅" if fantasy.scope_in(sc, scopes) else ("🟢" if s.get("active") else "⚪")
         label = f"{mark} SLPRO {s.get('season')} · {division}"
         rows.append([InlineKeyboardButton(
             label[:64], callback_data=f"admin:fscope:slpro:{s['season_id']}:{s['stage_id']}")])
-    for comp, title in stats_backfill.IB_COMPS.items():
-        rows.append([InlineKeyboardButton(f"🏀 Инфобаскет {title}",
+    for comp in _config_comp_ids():
+        sc = {"source": "infobasket", "season_id": str(comp)}
+        mark = "✅" if fantasy.scope_in(sc, scopes) else "⚪"
+        rows.append([InlineKeyboardButton(f"{mark} Инфобаскет · comp {comp}",
                                           callback_data=f"admin:fscope:ib:{comp}")])
-    rows.append([InlineKeyboardButton("🌐 Все турниры (не рекомендуется)",
-                                      callback_data="admin:fscope:all")])
+    rows.append([InlineKeyboardButton("🧹 Очистить (все турниры)", callback_data="admin:fscope:clear")])
     rows.append(_back_button("admin:menu:fantasy"))
     return InlineKeyboardMarkup(rows)
 
 
+def _config_comp_ids() -> List[int]:
+    """comp_id Инфобаскета из Конфига — те же лиги, что использует поиск игр."""
+    try:
+        from enhanced_duplicate_protection import duplicate_protection
+        return [int(c) for c in (duplicate_protection.get_config_ids().get("comp_ids") or [])
+                if str(c).isdigit()]
+    except Exception as e:
+        log.warning(f"Не удалось прочитать comp_ids из Конфига: {e}")
+        return []
+
+
+async def _derive_scopes() -> List[Dict[str, Any]]:
+    """Собирает турниры подсчёта из настроек поиска игр: активная стадия SLPRO
+    нашей команды + comp_id Инфобаскета из Конфига. Названия — транзитно."""
+    scopes: List[Dict[str, Any]] = []
+    try:
+        from slpro_client import SlproClient
+        names = [n.strip() for n in os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",")
+                 if n.strip()]
+        ctx = await SlproClient().discover_context(names)
+        if ctx and ctx.get("stage_id") is not None:
+            scopes.append({"source": "slpro", "season_id": str(ctx["season_id"]),
+                           "stage_id": str(ctx["stage_id"]),
+                           "name": f"SLPRO {ctx.get('season')} · "
+                                   f"{ctx.get('division_name') or ctx.get('division')}"})
+    except Exception as e:
+        log.warning(f"derive SLPRO scope: {e}")
+    for comp in _config_comp_ids():
+        name = f"Инфобаскет comp {comp}"
+        try:
+            import stats_backfill
+            async with stats_backfill._ib_session() as sess:
+                cal = await stats_backfill._ib_calendar(sess, comp)
+            comp_name = (cal[0].get("CompNameRu") if cal else "") or ""
+            if comp_name:
+                name = f"Инфобаскет · {comp_name}"
+        except Exception as e:
+            log.warning(f"derive comp {comp} name: {e}")
+        scopes.append({"source": "infobasket", "season_id": str(comp), "name": name})
+    return scopes
+
+
 async def _handle_fantasy_scope(query, parts: List[str]) -> None:
-    """Сохраняет турнир подсчёта. Имя турнира восстанавливаем по id, чтобы не
-    тащить его через callback_data (там 64 байта)."""
+    """Мультивыбор турниров подсчёта. Тумблеры ✅/⬜; auto — по поиску игр;
+    clear — считать всё. Имя турнира восстанавливаем по id (в callback_data
+    только 64 байта)."""
     import fantasy
-    import stats_backfill
     kind = parts[2] if len(parts) > 2 else ""
     if not fantasy.get_active_season():
         await query.edit_message_text("Активного сезона нет.", reply_markup=_fantasy_menu_markup())
         return
 
-    if kind == "all":
-        fantasy.set_season_scope(None)
+    if kind == "clear":
+        fantasy.set_season_scopes([])
+    elif kind == "auto":
+        await query.edit_message_text("⏳ Собираю турниры по настройкам поиска игр…")
+        fantasy.set_season_scopes(await _derive_scopes())
     elif kind == "slpro" and len(parts) > 4:
         season_id, stage_id = parts[3], parts[4]
-        name = f"SLPRO, сезон {season_id}"
+        name = f"SLPRO сезон {season_id}"
         try:
             from slpro_client import SlproClient
             for s in await SlproClient().iter_stages():
@@ -627,14 +679,19 @@ async def _handle_fantasy_scope(query, parts: List[str]) -> None:
                     break
         except Exception:
             pass
-        fantasy.set_season_scope({"source": "slpro", "season_id": season_id,
-                                  "stage_id": stage_id, "name": name})
+        fantasy.toggle_season_scope({"source": "slpro", "season_id": season_id,
+                                     "stage_id": stage_id, "name": name})
     elif kind == "ib" and len(parts) > 3:
         comp = parts[3]
-        title = stats_backfill.IB_COMPS.get(int(comp), comp) if comp.isdigit() else comp
-        fantasy.set_season_scope({"source": "infobasket", "season_id": comp,
-                                  "name": f"Инфобаскет {title}"})
-    await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+        fantasy.toggle_season_scope({"source": "infobasket", "season_id": comp,
+                                     "name": f"Инфобаскет comp {comp}"})
+
+    current = fantasy.scopes_title(fantasy.season_scopes(fantasy.get_active_season()))
+    await query.edit_message_text(
+        "🎯 По каким турнирам считать очки?\n\nМожно выбрать несколько — команда играет "
+        "в нескольких лигах. ✅ — выбрано, 🟢 — идёт сейчас.\n\n"
+        f"Сейчас: {current}",
+        reply_markup=await _fantasy_scope_markup())
 
 
 def _back_button(target: str = "admin:menu:main") -> List[InlineKeyboardButton]:
@@ -797,10 +854,13 @@ async def _handle_fantasy_action(query, action: str) -> None:
         await query.edit_message_text(
             f"🔀 Формат изменён на {new_fmt}.", reply_markup=_fantasy_menu_markup())
     elif action == "scope":
+        current = fantasy.scopes_title(fantasy.season_scopes(fantasy.get_active_season()))
         await query.edit_message_text(
-            "🎯 По какому турниру считать очки?\n\n"
-            "В базе лежит вся лига за несколько сезонов. Без выбора игрок принесёт "
-            "очки и за чужой турнир.\n🟢 — идёт сейчас.",
+            "🎯 По каким турнирам считать очки?\n\n"
+            "Можно выбрать несколько — команда играет в нескольких лигах. "
+            "✅ — выбрано, 🟢 — идёт сейчас.\n"
+            "«По настройкам поиска игр» подставит те же лиги, что бот ищет для расписания.\n\n"
+            f"Сейчас: {current}",
             reply_markup=await _fantasy_scope_markup())
     elif action == "ingest":
         await query.edit_message_text("⏳ Пересчёт статистики фэнтези...")

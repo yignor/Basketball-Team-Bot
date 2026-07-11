@@ -27,15 +27,23 @@ DEFAULT_IB_COMPS = list(stats_backfill.IB_COMPS)
 
 
 def _ib_comps() -> list:
+    # 1) явный список из env (для разовых прогонов старых сезонов)
     raw = os.getenv("INFOBASKET_COMP_IDS", "").strip()
-    if not raw:
-        return DEFAULT_IB_COMPS
-    out = []
-    for part in raw.split(","):
-        part = part.strip()
-        if part.isdigit():
-            out.append(int(part))
-    return out or DEFAULT_IB_COMPS
+    if raw:
+        out = [int(p.strip()) for p in raw.split(",") if p.strip().isdigit()]
+        if out:
+            return out
+    # 2) comp_id из Конфига — те же лиги, что ищет расписание (напр. 140825).
+    try:
+        from enhanced_duplicate_protection import duplicate_protection
+        cfg = [int(c) for c in (duplicate_protection.get_config_ids().get("comp_ids") or [])
+               if str(c).isdigit()]
+        if cfg:
+            return cfg
+    except Exception:
+        pass
+    # 3) запасной хардкод (старые сезоны)
+    return DEFAULT_IB_COMPS
 
 
 def _team_names() -> list:

@@ -142,24 +142,60 @@ def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
     return _update_settings(season, max_per_player=int(n)) if season else False
 
 
-def season_scope(season: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Турнир, по которому считаются очки: {source, season_id, stage_id, name}.
+def season_scopes(season: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Список турниров подсчёта очков. Команда играет сразу в нескольких лигах
+    (напр. SLPRO Летний Кубок + Инфобаскет квалификация), поэтому scope —
+    список, а не один турнир. [] — считать по всем (опасно после бэкфилла).
 
-    None — считать по всем турнирам. Это опасный режим: в базе лежит вся лига
-    за четыре сезона, и игрок принесёт очки за чужой турнир тоже."""
-    scope = season_settings(season).get("scope")
-    return scope if isinstance(scope, dict) and scope else None
+    Обратная совместимость: старый одиночный `scope` оборачиваем в список."""
+    s = season_settings(season)
+    scopes = s.get("scopes")
+    if isinstance(scopes, list):
+        return [x for x in scopes if isinstance(x, dict) and x]
+    legacy = s.get("scope")
+    return [legacy] if isinstance(legacy, dict) and legacy else []
 
 
-def set_season_scope(scope: Optional[Dict[str, Any]], season_id: Optional[int] = None) -> bool:
+def set_season_scopes(scopes: List[Dict[str, Any]], season_id: Optional[int] = None) -> bool:
     season = get_active_season() if season_id is None else _get_season(season_id)
-    return _update_settings(season, scope=scope or {}) if season else False
+    if not season:
+        return False
+    # Чистим legacy-ключ, чтобы не мешал.
+    return _update_settings(season, scopes=list(scopes or []), scope={})
 
 
-def scope_title(scope: Optional[Dict[str, Any]]) -> str:
-    if not scope:
-        return "⚠️ не задан — считаются все турниры"
-    return scope.get("name") or f"{scope.get('source', '?')} / сезон {scope.get('season_id', '?')}"
+def _scope_key(sc: Dict[str, Any]) -> Tuple[str, str, str]:
+    return (str(sc.get("source", "")), str(sc.get("season_id", "")), str(sc.get("stage_id", "")))
+
+
+def toggle_season_scope(scope: Dict[str, Any],
+                        season_id: Optional[int] = None) -> Tuple[bool, List[Dict[str, Any]]]:
+    """Добавляет турнир в scope или убирает, если уже есть.
+    Возвращает (добавлен?, новый список)."""
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    if not season:
+        return False, []
+    scopes = season_scopes(season)
+    key = _scope_key(scope)
+    present = any(_scope_key(s) == key for s in scopes)
+    if present:
+        scopes = [s for s in scopes if _scope_key(s) != key]
+    else:
+        scopes = scopes + [scope]
+    set_season_scopes(scopes, season["id"])
+    return (not present), scopes
+
+
+def scope_in(scope: Dict[str, Any], scopes: List[Dict[str, Any]]) -> bool:
+    key = _scope_key(scope)
+    return any(_scope_key(s) == key for s in scopes)
+
+
+def scopes_title(scopes: List[Dict[str, Any]]) -> str:
+    if not scopes:
+        return "⚠️ не задано — считаются все турниры"
+    return " + ".join(
+        s.get("name") or f"{s.get('source', '?')}/{s.get('season_id', '?')}" for s in scopes)
 
 
 # ─────────────────────────── Составы ─────────────────────────────────────────
@@ -254,13 +290,13 @@ def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:
     """Таблица участников за неделю: [{user_id, points, refs}], по убыванию."""
     season = _get_season(season_id)
     weights = season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    scope = season_scope(season) if season else None
+    scopes = season_scopes(season) if season else []
     d_from, d_to = week_bounds(week_start)
     rosters = get_week_rosters(season_id, week_start)
     table = []
     for r in rosters:
         pts = fantasy_stats.player_points(r["refs"], weights, date_from=d_from, date_to=d_to,
-                                          scope=scope)
+                                          scope=scopes)
         table.append({"user_id": r["user_id"], "points": pts, "refs": r["refs"]})
     table.sort(key=lambda x: x["points"], reverse=True)
     return table
