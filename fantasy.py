@@ -31,6 +31,31 @@ def week_bounds(week_start: str) -> Tuple[str, str]:
     return start.isoformat(), (start + timedelta(days=6)).isoformat()
 
 
+# ─────────────── Окно набора состава (привязка к расписанию) ─────────────────
+# Набор состава открыт не по календарю, а по играм: закрывается на первом анонсе
+# «игра сегодня» недели и открывается на следующую неделю после статистики по
+# последней игре. Состояние ведёт fantasy_schedule.py, здесь — только чтение.
+
+def get_sched(season: Dict[str, Any]) -> Dict[str, Any]:
+    s = season_settings(season).get("sched")
+    return s if isinstance(s, dict) else {}
+
+
+def set_sched(sched: Dict[str, Any], season_id: Optional[int] = None) -> bool:
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    return _update_settings(season, sched=sched) if season else False
+
+
+def active_selection(season: Optional[Dict[str, Any]]) -> Tuple[str, bool]:
+    """(неделя_для_набора ISO, заблокирован ли). Пока расписание не посчитано —
+    календарная неделя, открыта (обратная совместимость)."""
+    if not season:
+        return week_start_of(date.today()).isoformat(), False
+    sched = get_sched(season)
+    week = sched.get("active_week") or week_start_of(date.today()).isoformat()
+    return week, bool(sched.get("locked"))
+
+
 # ─────────────────────────── Сезоны ──────────────────────────────────────────
 
 def get_active_season() -> Optional[Dict[str, Any]]:

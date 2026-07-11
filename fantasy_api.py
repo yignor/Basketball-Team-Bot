@@ -220,11 +220,12 @@ async def handle_get_roster(request: web.Request) -> web.Response:
     season = fantasy.get_active_season()
     if not season:
         return web.json_response({"roster": None, "week_start": None})
-    week_start = fantasy.week_start_of(date.today()).isoformat()
+    week_start, locked = fantasy.active_selection(season)
     r = fantasy.get_roster(str(user["id"]), season["id"], week_start)
     return web.json_response({
         "roster": r["refs"] if r else [],
-        "locked": bool(r["locked"]) if r else False,
+        # блокировка — по окну набора (расписание), даже если своей записи ещё нет
+        "locked": locked or (bool(r["locked"]) if r else False),
         "week_start": week_start,
     })
 
@@ -246,12 +247,15 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError):
         return web.json_response({"error": "bad_request"}, status=400)
 
+    week_start, locked = fantasy.active_selection(season)
+    if locked:
+        return web.json_response({"error": "locked"}, status=409)
+
     pool_refs = {p["ref"] for p in await build_pool()}
     err = fantasy.validate_roster(season, refs, pool_refs)
     if err:
         return web.json_response({"error": err, "expected": fantasy.roster_size(season)}, status=400)
 
-    week_start = fantasy.week_start_of(date.today()).isoformat()
     res = fantasy.save_roster(uid, season["id"], week_start, refs)
     if not res.get("ok"):
         return web.json_response({"error": res.get("error", "save_failed")}, status=409)

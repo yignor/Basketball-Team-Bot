@@ -68,9 +68,12 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     pool = await fantasy_api.build_pool()
     agg = fantasy_stats.player_aggregates(fantasy.season_weights(season),
                                           scope=fantasy.season_scopes(season))
-    week_start = fantasy.week_start_of(date.today()).isoformat()
+    week_start, sched_locked = fantasy.active_selection(season)
     r = fantasy.get_roster(user_id, season["id"], week_start)
-    table = fantasy.weekly_standings(season["id"], week_start)
+    # Таблица — по текущей календарной неделе (её игры сейчас идут/сыграны),
+    # а не по неделе набора (она может уже указывать на следующий тур).
+    table_week = fantasy.week_start_of(date.today()).isoformat()
+    table = fantasy.weekly_standings(season["id"], table_week)
     names = fantasy.display_names([row["user_id"] for row in table])
     standings = [{"name": names.get(str(row["user_id"]), "Участник"), "points": row["points"]} for row in table]
     def _short_stats(ref: str) -> Dict[str, Any]:
@@ -89,7 +92,7 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
         # чтобы URL Mini App не разрастался
         "pool": [{"r": p["ref"], "m": p["name"], "s": _short_stats(p["ref"])} for p in pool],
         "roster": r["refs"] if r else [],
-        "locked": bool(r["locked"]) if r else False,
+        "locked": sched_locked or (bool(r["locked"]) if r else False),
         "week_start": week_start,
         "standings": standings,
     }
@@ -468,6 +471,10 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
     if not season:
         await msg.reply_text("Сейчас нет активного сезона.")
         return
+    week_start, sched_locked = fantasy.active_selection(season)
+    if sched_locked:
+        await msg.reply_text("🔒 Набор на этот тур уже закрыт — игры начались.")
+        return
     try:
         pool_refs = {p["ref"] for p in await fantasy_api.build_pool()}
     except Exception:
@@ -484,11 +491,9 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
         await msg.reply_text(problems.get(err, "Состав не прошёл проверку."))
         return
 
-    from datetime import date
-    week_start = fantasy.week_start_of(date.today()).isoformat()
     res = fantasy.save_roster(uid, season["id"], week_start, refs)
     if not res.get("ok"):
-        reason = "состав уже заблокирован до конца недели" if res.get("error") == "locked" else "не удалось сохранить"
+        reason = "набор на этот тур уже закрыт" if res.get("error") == "locked" else "не удалось сохранить"
         await msg.reply_text(f"⚠️ {reason.capitalize()}.")
         return
     await msg.reply_text("✅ Состав сохранён! Удачи в туре 🏀")

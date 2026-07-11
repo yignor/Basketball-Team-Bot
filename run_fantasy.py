@@ -2,8 +2,9 @@
 """
 Оркестрация фэнтези-лиги (cron/админка).
 
---only ingest   — только выкачать статистику завершённых игр в кеш
---only weekly   — только понедельничный подсчёт + рассылка таблицы
+--only ingest    — только выкачать статистику завершённых игр в кеш
+--only weekly    — только понедельничный подсчёт + рассылка таблицы
+--only schedule  — пересчёт окна набора (блокировка/открытие по расписанию)
 (без флага — сначала ingest, затем weekly)
 
 Понедельничная рассылка: считает очки за ПРОШЕДШУЮ неделю, блокирует её
@@ -75,6 +76,30 @@ class FantasyRunner:
         print(f"📊 Фэнтези weekly: таблица в {len(chat_ids)} чат(ов), в личку {sent_dm}/{len(participants)}")
         return True
 
+    async def schedule(self) -> bool:
+        """Пересчитывает окно набора по расписанию: закрывает набор на первом
+        анонсе недели, открывает следующий тур после статистики последней игры.
+        Сообщения о закрытии/открытии рассылает участникам и в общий чат."""
+        import fantasy_schedule
+        season = fantasy.get_active_season()
+        if not season:
+            return False
+        announce_hhmm = str(
+            (self.gsm._get_automation_entry(self._ann_key) or {}).get("notify_time")
+            or fantasy_schedule.DEFAULT_ANNOUNCE_HHMM
+        )
+        state, events = fantasy_schedule.tick(announce_hhmm=announce_hhmm)
+        print(f"🗓️ Фэнтези окно набора: неделя {state.get('active_week')}, "
+              f"заблокирован={state.get('locked')}, событий={len(events)}")
+        for kind, text in events:
+            chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
+            await self._send_to_chats(chat_ids, text, self.gsm.game_announcement_topic_id)
+            participants = [r["user_id"] for r in fantasy.get_week_rosters(
+                season["id"], state.get("active_week") or "")]
+            await self._send_dms(participants, text)
+            print(f"📣 Фэнтези: разослано событие «{kind}»")
+        return True
+
     async def _send_to_chats(self, chat_ids: List[str], text: str, topic: Optional[int]) -> None:
         if not self.bot:
             print("⚠️ Бот не настроен")
@@ -110,6 +135,8 @@ class FantasyRunner:
     async def run(self, only: Optional[str] = None) -> None:
         if only in (None, "ingest"):
             await self.ingest()
+        if only == "schedule":
+            await self.schedule()
         if only in (None, "weekly"):
             await self.weekly()
 
@@ -127,6 +154,6 @@ async def main(only: Optional[str]) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", choices=["ingest", "weekly"], default=None)
+    ap.add_argument("--only", choices=["ingest", "weekly", "schedule"], default=None)
     args = ap.parse_args()
     asyncio.run(main(args.only))
