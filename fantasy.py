@@ -327,6 +327,56 @@ def lock_week(season_id: int, week_start: str) -> int:
     return cur.rowcount
 
 
+def season_participants(season_id: int) -> List[str]:
+    """Все, кто хоть раз собирал состав в этом сезоне — аудитория личных
+    уведомлений о наборе."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT user_id FROM fantasy_rosters WHERE season_id=?", (season_id,)
+        ).fetchall()
+    return [r["user_id"] for r in rows]
+
+
+# ─────────────── Личные настройки уведомлений о наборе ───────────────────────
+
+def get_notify_prefs(user_id: str) -> Dict[str, bool]:
+    """{open: bool, lock: bool}. Нет строки → уведомляем (оба True)."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT notify_open, notify_lock FROM fantasy_notify_prefs WHERE user_id=?",
+            (str(user_id),)).fetchone()
+    if not row:
+        return {"open": True, "lock": True}
+    return {"open": bool(row["notify_open"]), "lock": bool(row["notify_lock"])}
+
+
+def set_notify_pref(user_id: str, kind: str, value: bool) -> Dict[str, bool]:
+    """Меняет один тумблер (open/lock) и возвращает актуальные настройки."""
+    prefs = get_notify_prefs(user_id)
+    if kind in prefs:
+        prefs[kind] = value
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO fantasy_notify_prefs (user_id, notify_open, notify_lock, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   notify_open=excluded.notify_open, notify_lock=excluded.notify_lock,
+                   updated_at=excluded.updated_at""",
+            (str(user_id), 1 if prefs["open"] else 0, 1 if prefs["lock"] else 0,
+             sheets_cache.now_iso()))
+        conn.commit()
+    return prefs
+
+
+def notify_audience(season_id: int, kind: str) -> List[str]:
+    """user_id участников, которых надо уведомить о событии kind (open/lock)."""
+    return [u for u in season_participants(season_id)
+            if get_notify_prefs(u).get(kind, True)]
+
+
 # ─────────────────────────── Таблицы ─────────────────────────────────────────
 
 def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:

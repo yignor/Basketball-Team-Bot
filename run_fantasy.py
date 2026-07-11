@@ -116,10 +116,10 @@ class FantasyRunner:
         for kind, text in events:
             chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
             await self._send_to_chats(chat_ids, text, self.gsm.game_announcement_topic_id)
-            participants = [r["user_id"] for r in fantasy.get_week_rosters(
-                season["id"], state.get("active_week") or "")]
-            await self._send_dms(participants, text)
-            print(f"📣 Фэнтези: разослано событие «{kind}»")
+            # Личка — участникам сезона, кто НЕ отписался от этого типа события.
+            audience = fantasy.notify_audience(season["id"], kind)
+            sent = await self._send_dms(audience, text)
+            print(f"📣 Фэнтези: событие «{kind}» — в чат + личка {sent}/{len(audience)}")
         return True
 
     async def _send_to_chats(self, chat_ids: List[str], text: str, topic: Optional[int]) -> None:

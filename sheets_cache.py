@@ -305,6 +305,15 @@ CREATE TABLE IF NOT EXISTS fantasy_weekly_scores (
     PRIMARY KEY (user_id, season_id, week_start)
 );
 CREATE INDEX IF NOT EXISTS idx_fantasy_scores_season ON fantasy_weekly_scores(season_id);
+
+-- Личные настройки уведомлений фэнтези. По умолчанию (нет строки) — уведомляем.
+-- open — «открыт набор», lock — «набор закрыт».
+CREATE TABLE IF NOT EXISTS fantasy_notify_prefs (
+    user_id      TEXT PRIMARY KEY,
+    notify_open  INTEGER NOT NULL DEFAULT 1,
+    notify_lock  INTEGER NOT NULL DEFAULT 1,
+    updated_at   TEXT NOT NULL DEFAULT ''
+);
 """
 
 # Порядок колонок в листе "Сервисный" — должен совпадать с SERVICE_HEADER
