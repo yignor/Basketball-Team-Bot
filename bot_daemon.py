@@ -66,8 +66,9 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     if not season:
         return None
     pool = await fantasy_api.build_pool()
-    agg = fantasy_stats.player_aggregates(fantasy.season_weights(season),
-                                          scope=fantasy.effective_scopes(season))
+    _scopes = fantasy.effective_scopes(season)
+    agg = fantasy_stats.player_aggregates(fantasy.season_weights(season), scope=_scopes)
+    last = fantasy_stats.player_last_fp(fantasy.season_weights(season), scope=_scopes)
     week_start, sched_locked = fantasy.active_selection(season)
     r = fantasy.get_roster(user_id, season["id"], week_start)
     # Таблица — по текущей календарной неделе (её игры сейчас идут/сыграны),
@@ -81,8 +82,10 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
         a = agg.get(f"{src}:{pid}")
         if not a:
             return {}
+        lg = last.get(f"{src}:{pid}") or {}
         return {"g": a["games"], "p": a["pts"], "rb": a["reb"], "a": a["ast"],
-                "s": a["stl"], "b": a["blk"], "t": a["tur"], "f": a["fp"]}
+                "s": a["stl"], "b": a["blk"], "t": a["tur"], "f": a["fp"],
+                "lf": lg.get("fp"), "ld": lg.get("date")}
 
     data = {
         "season": {"name": season["name"], "format": season["format"],

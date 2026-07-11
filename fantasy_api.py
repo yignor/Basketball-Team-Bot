@@ -238,11 +238,14 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
     статистика меняется после каждого ingest."""
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    agg = fantasy_stats.player_aggregates(weights, scope=fantasy.effective_scopes(season) if season else [])
+    scopes = fantasy.effective_scopes(season) if season else []
+    agg = fantasy_stats.player_aggregates(weights, scope=scopes)
+    last = fantasy_stats.player_last_fp(weights, scope=scopes)
     enriched = []
     for p in pool:
         src, pid = fantasy_stats.parse_ref(p["ref"])
-        enriched.append({**p, "stats": agg.get(f"{src}:{pid}", {})})
+        key = f"{src}:{pid}"
+        enriched.append({**p, "stats": agg.get(key, {}), "last": last.get(key, {})})
     return enriched
 
 
@@ -364,7 +367,11 @@ async def handle_player(request: web.Request) -> web.Response:
         profile["last"]["opponent"] = names.get(str(profile["last"]["opponent_id"]), "Соперник")
     profile["name"] = entry["name"]          # транзитно, как и в пуле
     profile["number"] = entry.get("number", "")
-    profile["tournament"] = fantasy.scopes_title(scopes)
+    # Турнир в шапке — только по источнику игрока (SLPRO-игроку не пишем
+    # Инфобаскет и наоборот).
+    psrc = fantasy_stats.parse_ref(ref)[0]
+    own = [s for s in scopes if s.get("source") == psrc]
+    profile["tournament"] = fantasy.scopes_title(own or scopes)
     return web.json_response(profile)
 
 

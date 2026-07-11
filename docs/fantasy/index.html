@@ -196,7 +196,8 @@
       return { ref: p.r, name: p.m || p.r, number: '', team: '',
         st: {games:s.g||0, pts:s.p||0, reb:s.rb||0, ast:s.a||0,
              stl:s.s||0, blk:s.b||0, tur:s.t||0, fp:s.f||0,
-             fp_avg: s.g ? Math.round((s.f||0)/s.g*10)/10 : 0} };
+             fp_avg: s.g ? Math.round((s.f||0)/s.g*10)/10 : 0},
+        last: {fp: s.lf, date: s.ld} };
     });
     for (const r of (D.roster || [])) counts[r] = (counts[r] || 0) + 1;
     $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
@@ -216,6 +217,7 @@
     pool = (p.pool || []).map(x => ({
       ref: x.ref, name: x.name || x.ref, number: x.number || '', team: x.team || '',
       st: Object.assign({}, ZERO, x.stats || {}),
+      last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
     }));
     for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
@@ -231,10 +233,14 @@
       : (b.st[key] || 0) - (a.st[key] || 0) || a.name.localeCompare(b.name, 'ru'));
   }
 
-  function statLine(st) {
-    if (!st.games) return 'нет сыгранных игр';
-    return `${st.games} игр · ${st.fp} FP (${st.fp_avg}/игра) · ` +
-           `${st.pts} очк · ${st.reb} подб · ${st.ast} пас`;
+  // Под фамилией — очки за последнюю игру + подсказка тапнуть за подробностями.
+  function statLine(p) {
+    if (!p.st.games) return 'нет сыгранных игр';
+    const lf = p.last && p.last.fp;
+    const head = (lf === null || lf === undefined)
+      ? `${p.st.games} игр · ${p.st.fp} FP`
+      : `Посл. игра: ${lf} FP`;
+    return live ? `${head} · нажми для деталей ›` : head;
   }
 
   function renderPool() {
@@ -250,7 +256,7 @@
         `<div class="num">${esc(p.number || '—')}</div>` +
         `<div class="info"><div class="pname">${esc(p.name)}` +
         (live ? '<span class="chev">›</span>' : '') + `</div>` +
-        `<div class="pstat">${esc(statLine(p.st))}</div></div>` +
+        `<div class="pstat">${esc(statLine(p))}</div></div>` +
         `<div class="ctrl">` +
           `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
           `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +

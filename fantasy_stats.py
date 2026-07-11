@@ -372,6 +372,33 @@ def player_aggregates(weights: Optional[Dict[str, float]] = None,
     return out
 
 
+def player_last_fp(weights: Optional[Dict[str, float]] = None,
+                   scope: Optional[Any] = None) -> Dict[str, Dict[str, Any]]:
+    """Последняя игра каждого игрока: {"source:player_id": {date, fp, pts}}.
+    Для строки «под фамилией» в пуле."""
+    sheets_cache.init_db()
+    w = weights or DEFAULT_WEIGHTS
+    scope_sql, scope_params = scope_where(scope)
+    # Берём по каждому игроку строку с максимальной датой игры.
+    query = (
+        "SELECT gps.* FROM game_player_stats gps WHERE gps.game_date = ("
+        "  SELECT MAX(g2.game_date) FROM game_player_stats g2"
+        "  WHERE g2.source=gps.source AND g2.player_id=gps.player_id" + scope_sql +
+        ")" + scope_sql
+    )
+    params = list(scope_params) + list(scope_params)
+    out: Dict[str, Dict[str, Any]] = {}
+    with sheets_cache.get_connection() as conn:
+        for row in conn.execute(query, params).fetchall():
+            r = dict(row)
+            key = f"{r['source']}:{r['player_id']}"
+            if key in out:
+                continue  # если в один день две игры — берём любую
+            out[key] = {"date": r["game_date"], "fp": fantasy_points(r, w),
+                        "pts": int(r.get("pts", 0) or 0)}
+    return out
+
+
 def _pct(made: int, attempted: int) -> Optional[float]:
     return round(made * 100.0 / attempted, 1) if attempted else None
 
