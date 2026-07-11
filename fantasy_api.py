@@ -190,7 +190,7 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
     статистика меняется после каждого ingest."""
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    agg = fantasy_stats.player_aggregates(weights, scope=fantasy.season_scopes(season) if season else [])
+    agg = fantasy_stats.player_aggregates(weights, scope=fantasy.effective_scopes(season) if season else [])
     enriched = []
     for p in pool:
         src, pid = fantasy_stats.parse_ref(p["ref"])
@@ -308,7 +308,7 @@ async def handle_player(request: web.Request) -> web.Response:
 
     season = fantasy.get_active_season()
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    scopes = fantasy.season_scopes(season) if season else []
+    scopes = fantasy.effective_scopes(season) if season else []
     profile = fantasy_stats.player_profile(ref, scopes, weights)
 
     names = await _team_names(scopes)

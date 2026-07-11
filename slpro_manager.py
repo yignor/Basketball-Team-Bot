@@ -334,6 +334,10 @@ class SlproManager:
             if box.video_vk:
                 lines.append(f"📹 Видео: {box.video_vk}")
 
+        # Ссылка на протокол игры — как в Infobasket. Публичная страница SLPRO.
+        gid = game.get("game_id")
+        if gid is not None:
+            lines.append(f'🔗 <a href="https://slpro.basketstat.ru/game/{gid}">Протокол</a>')
         lines.append(f"📅 {date_ddmm}")
         lines.append(f"🏀 SLPRO · {ctx.get('division_name', '')}")
         text = "\n".join(lines)

@@ -76,6 +76,27 @@ class FantasyRunner:
         print(f"📊 Фэнтези weekly: таблица в {len(chat_ids)} чат(ов), в личку {sent_dm}/{len(participants)}")
         return True
 
+    async def _refresh_auto_scopes(self, season: Any) -> None:
+        """Обновляет «лиги, в которых команда играет сейчас» — SLPRO активная
+        стадия + comp_id Инфобаскета из Конфига. Это дефолт для подсчёта очков,
+        когда админ не выбрал турниры вручную (fantasy.effective_scopes)."""
+        scopes: List[dict] = []
+        try:
+            ctx = await self.client.discover_context(fantasy_env_team_names())
+            if ctx and ctx.get("stage_id") is not None:
+                scopes.append({"source": "slpro", "season_id": str(ctx["season_id"]),
+                               "stage_id": str(ctx["stage_id"]),
+                               "name": f"SLPRO {ctx.get('season')} · "
+                                       f"{ctx.get('division_name') or ctx.get('division')}"})
+        except Exception as e:
+            print(f"⚠️ auto-scope SLPRO: {e}")
+        for comp in (self.gsm.config_comp_ids or []):
+            scopes.append({"source": "infobasket", "season_id": str(comp),
+                           "name": f"Инфобаскет comp {comp}"})
+        if scopes:
+            fantasy.set_auto_scopes(scopes, season["id"])
+            print(f"🎯 Авто-лиги подсчёта: {fantasy.scopes_title(scopes)}")
+
     async def schedule(self) -> bool:
         """Пересчитывает окно набора по расписанию: закрывает набор на первом
         анонсе недели, открывает следующий тур после статистики последней игры.
@@ -84,6 +105,7 @@ class FantasyRunner:
         season = fantasy.get_active_season()
         if not season:
             return False
+        await self._refresh_auto_scopes(season)
         announce_hhmm = str(
             (self.gsm._get_automation_entry(self._ann_key) or {}).get("notify_time")
             or fantasy_schedule.DEFAULT_ANNOUNCE_HHMM

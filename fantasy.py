@@ -189,6 +189,24 @@ def set_season_scopes(scopes: List[Dict[str, Any]], season_id: Optional[int] = N
     return _update_settings(season, scopes=list(scopes or []), scope={})
 
 
+def set_auto_scopes(scopes: List[Dict[str, Any]], season_id: Optional[int] = None) -> bool:
+    """Кеш лиг «в которых команда играет сейчас» — выводится из настроек поиска
+    игр периодической задачей. Используется, когда админ не выбрал турниры явно."""
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    return _update_settings(season, auto_scopes=list(scopes or [])) if season else False
+
+
+def effective_scopes(season: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Турниры, по которым реально считаем очки: явный выбор админа, а если его
+    нет — авто-лиги (в которых команда участвует сейчас). Пусто → считаем всё
+    (историческое поведение)."""
+    explicit = season_scopes(season)
+    if explicit:
+        return explicit
+    auto = season_settings(season).get("auto_scopes")
+    return [x for x in auto if isinstance(x, dict) and x] if isinstance(auto, list) else []
+
+
 def _scope_key(sc: Dict[str, Any]) -> Tuple[str, str, str]:
     return (str(sc.get("source", "")), str(sc.get("season_id", "")), str(sc.get("stage_id", "")))
 
@@ -315,7 +333,7 @@ def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:
     """Таблица участников за неделю: [{user_id, points, refs}], по убыванию."""
     season = _get_season(season_id)
     weights = season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    scopes = season_scopes(season) if season else []
+    scopes = effective_scopes(season) if season else []
     d_from, d_to = week_bounds(week_start)
     rosters = get_week_rosters(season_id, week_start)
     table = []

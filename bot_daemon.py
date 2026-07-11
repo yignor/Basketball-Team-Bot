@@ -67,7 +67,7 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
         return None
     pool = await fantasy_api.build_pool()
     agg = fantasy_stats.player_aggregates(fantasy.season_weights(season),
-                                          scope=fantasy.season_scopes(season))
+                                          scope=fantasy.effective_scopes(season))
     week_start, sched_locked = fantasy.active_selection(season)
     r = fantasy.get_roster(user_id, season["id"], week_start)
     # Таблица — по текущей календарной неделе (её игры сейчас идут/сыграны),
