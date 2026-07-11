@@ -171,6 +171,36 @@ async def _ib_calendar(session: aiohttp.ClientSession, comp_id: int) -> List[Dic
     return []
 
 
+async def fetch_infobasket_roster(team_id: Any, comp_id: Any) -> List[Dict[str, Any]]:
+    """Ростер команды Инфобаскета: [{player_id, number, name, active}]. Имена —
+    транзитно (в наших таблицах не храним). Widget/TeamRoster/<team>?compId=<comp>."""
+    url = f"{IB_API}/Widget/TeamRoster/{team_id}?compId={comp_id}&format=json&lang=ru"
+    out: List[Dict[str, Any]] = []
+    try:
+        async with _ib_session() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    log.warning("ростер infobasket %s/%s -> HTTP %s", team_id, comp_id, r.status)
+                    return []
+                data = await r.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        log.warning("ростер infobasket %s/%s — %s", team_id, comp_id, type(e).__name__)
+        return []
+    for p in (data or {}).get("Players", []):
+        pid = p.get("PersonID")
+        if not pid:
+            continue
+        pi = p.get("PersonInfo") or {}
+        name = f"{pi.get('PersonLastNameRu', '')} {pi.get('PersonFirstNameRu', '')}".strip()
+        out.append({
+            "player_id": pid,
+            "number": str(p.get("DisplayNumber", "") or ""),
+            "name": name,                    # транзитно
+            "active": bool(p.get("IsActive")),
+        })
+    return out
+
+
 async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
                               delay: float = DEFAULT_DELAY, dry_run: bool = False) -> BackfillStats:
     """Качает статистику игроков завершённых игр Infobasket по календарям

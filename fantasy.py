@@ -196,6 +196,41 @@ def set_auto_scopes(scopes: List[Dict[str, Any]], season_id: Optional[int] = Non
     return _update_settings(season, auto_scopes=list(scopes or [])) if season else False
 
 
+def pool_teams(season: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Команды, чьи ростеры образуют пул фэнтези: [{source, team_id, comp_id?,
+    name}]. Пусто → build_pool соберёт дефолт (команды из настроек поиска игр:
+    SLPRO-команда + команда Инфобаскета)."""
+    tp = season_settings(season).get("pool_teams")
+    return [x for x in tp if isinstance(x, dict) and x] if isinstance(tp, list) else []
+
+
+def set_pool_teams(teams: List[Dict[str, Any]], season_id: Optional[int] = None) -> bool:
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    return _update_settings(season, pool_teams=list(teams or [])) if season else False
+
+
+def _team_key(t: Dict[str, Any]) -> Tuple[str, str]:
+    return (str(t.get("source", "")), str(t.get("team_id", "")))
+
+
+def toggle_pool_team(team: Dict[str, Any],
+                     season_id: Optional[int] = None) -> Tuple[bool, List[Dict[str, Any]]]:
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    if not season:
+        return False, []
+    teams = pool_teams(season)
+    key = _team_key(team)
+    present = any(_team_key(t) == key for t in teams)
+    teams = [t for t in teams if _team_key(t) != key] if present else teams + [team]
+    set_pool_teams(teams, season["id"])
+    return (not present), teams
+
+
+def team_in_pool(team: Dict[str, Any], teams: List[Dict[str, Any]]) -> bool:
+    key = _team_key(team)
+    return any(_team_key(t) == key for t in teams)
+
+
 def effective_scopes(season: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Турниры, по которым реально считаем очки: явный выбор админа, а если его
     нет — авто-лиги (в которых команда участвует сейчас). Пусто → считаем всё

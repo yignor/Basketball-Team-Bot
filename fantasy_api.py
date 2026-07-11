@@ -121,32 +121,80 @@ _pool_cache: Dict[str, Any] = {"at": 0.0, "data": None}
 _POOL_TTL = 3600.0
 
 
+async def derive_pool_teams() -> List[Dict[str, Any]]:
+    """Кандидаты для пула из настроек поиска игр: SLPRO-команда (по имени) +
+    команда(ы) Инфобаскета (team_id × comp_id из Конфига)."""
+    teams: List[Dict[str, Any]] = []
+    try:
+        from slpro_client import SlproClient
+        names = [n.strip() for n in os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",") if n.strip()]
+        ctx = await SlproClient().discover_context(names)
+        if ctx and ctx.get("team_id"):
+            teams.append({"source": "slpro", "team_id": ctx["team_id"],
+                          "name": ctx.get("team_name", "SLPRO")})
+    except Exception as e:
+        log.warning(f"пул: SLPRO-команда — {e}")
+    try:
+        from enhanced_duplicate_protection import duplicate_protection
+        cfg = duplicate_protection.get_config_ids()
+        comps = cfg.get("comp_ids") or []
+        comp = comps[0] if comps else None
+        for tid in (cfg.get("team_ids") or []):
+            teams.append({"source": "infobasket", "team_id": tid, "comp_id": comp,
+                          "name": "Инфобаскет"})
+    except Exception as e:
+        log.warning(f"пул: команды Инфобаскета — {e}")
+    return teams
+
+
+async def _resolve_pool_teams() -> List[Dict[str, Any]]:
+    """Команды пула: явный выбор админа (fantasy.pool_teams) или дефолт —
+    все кандидаты из настроек поиска игр."""
+    season = fantasy.get_active_season()
+    explicit = fantasy.pool_teams(season) if season else []
+    return explicit if explicit else await derive_pool_teams()
+
+
 async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
-    """Пул драфта: игроки Pull Up Farm (SLPRO) [+ основа Infobasket — позже].
-    Ref = source:team:player_id. Имя — транзитно из публичного ростера,
+    """Пул драфта: игроки команд из fantasy.pool_teams (SLPRO + Инфобаскет).
+    Ref = source:team_id:player_id. Имя — транзитно из публичного ростера,
     в наших таблицах не хранится. Кешируется в памяти (TTL 1ч)."""
     now = time.time()
     if not force and _pool_cache["data"] is not None and (now - _pool_cache["at"]) < _POOL_TTL:
         return _pool_cache["data"]
 
-    from slpro_client import SlproClient
-    client = SlproClient()
     pool: List[Dict[str, Any]] = []
-    team_names = os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",")
-    ctx = await client.discover_context([n.strip() for n in team_names if n.strip()])
-    if ctx and ctx.get("team_id"):
-        tid = ctx["team_id"]
-        for p in await client.get_roster(tid):
-            pid = p.get("player_id")
-            if pid is None:
+    seen = set()
+    for team in await _resolve_pool_teams():
+        src = team.get("source")
+        tid = team.get("team_id")
+        if tid is None:
+            continue
+        try:
+            if src == "slpro":
+                from slpro_client import SlproClient
+                roster = await SlproClient().get_roster(tid)
+                players = [{"pid": p.get("player_id"), "number": p.get("number", ""),
+                            "name": f"{p.get('surname', '')} {p.get('name', '')}".strip()}
+                           for p in roster]
+            else:  # infobasket
+                import stats_backfill
+                roster = await stats_backfill.fetch_infobasket_roster(tid, team.get("comp_id"))
+                players = [{"pid": p["player_id"], "number": p["number"], "name": p["name"]}
+                           for p in roster if p.get("active", True)]
+        except Exception as e:
+            log.warning(f"пул: ростер {src}:{tid} — {e}")
+            continue
+        pref = "slpro" if src == "slpro" else "ib"
+        for p in players:
+            if p["pid"] is None:
                 continue
-            pool.append({
-                "ref": f"slpro:{tid}:{pid}",
-                "number": str(p.get("number", "") or ""),
-                "name": f"{p.get('surname', '')} {p.get('name', '')}".strip(),  # транзитно
-                "team": ctx.get("team_name", "Pull Up Farm"),
-            })
-    # TODO(F1): добавить ростер основы (Infobasket) по связке ID из «Игроки».
+            ref = f"{pref}:{tid}:{p['pid']}"
+            if ref in seen:
+                continue
+            seen.add(ref)
+            pool.append({"ref": ref, "number": str(p["number"] or ""),
+                         "name": p["name"], "team": team.get("name", "")})
     _pool_cache["data"] = pool
     _pool_cache["at"] = now
     return pool

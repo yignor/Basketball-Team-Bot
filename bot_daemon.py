@@ -606,6 +606,7 @@ def _fantasy_menu_markup() -> InlineKeyboardMarkup:
         fmt = season.get("format", "3x3")
         other = "5x5" if str(fmt).startswith("3") else "3x3"
         rows.append([InlineKeyboardButton(f"🔀 Формат: {fmt} → {other}", callback_data="admin:fantasy:format")])
+        rows.append([InlineKeyboardButton("👥 Составы в пуле", callback_data="admin:fantasy:pool")])
         rows.append([InlineKeyboardButton("🎯 Турнир подсчёта", callback_data="admin:fantasy:scope")])
         rows.append([InlineKeyboardButton("📥 Пересчитать статистику", callback_data="admin:fantasy:ingest")])
         rows.append([InlineKeyboardButton("🏁 Завершить сезон", callback_data="admin:fantasy:end")])
@@ -696,6 +697,52 @@ async def _derive_scopes() -> List[Dict[str, Any]]:
             log.warning(f"derive comp {comp} name: {e}")
         scopes.append({"source": "infobasket", "season_id": str(comp), "name": name})
     return scopes
+
+
+async def _fantasy_pool_markup() -> InlineKeyboardMarkup:
+    """Тумблеры команд, чьи ростеры входят в пул. Пусто в настройках = все
+    кандидаты включены (дефолт)."""
+    import fantasy
+    import fantasy_api
+    season = fantasy.get_active_season()
+    explicit = fantasy.pool_teams(season) if season else []
+    candidates = await fantasy_api.derive_pool_teams()
+    rows: List[List[InlineKeyboardButton]] = []
+    for t in candidates:
+        on = (not explicit) or fantasy.team_in_pool(t, explicit)
+        mark = "✅" if on else "⬜"
+        src = "SLPRO" if t.get("source") == "slpro" else "Инфобаскет"
+        label = f"{mark} {src}: {t.get('name', '')} (id {t.get('team_id')})"
+        rows.append([InlineKeyboardButton(
+            label[:64], callback_data=f"admin:fpool:{t.get('source')}:{t.get('team_id')}")])
+    if not candidates:
+        rows.append([InlineKeyboardButton("⚠️ Команды не найдены в поиске игр", callback_data="admin:menu:fantasy")])
+    rows.append(_back_button("admin:menu:fantasy"))
+    return InlineKeyboardMarkup(rows)
+
+
+async def _handle_fantasy_pool(query, parts: List[str]) -> None:
+    """Тумблер команды в пуле. Из пустого (дефолт=все) при первом выключении
+    материализуем полный список кандидатов, затем убираем выбранную."""
+    import fantasy
+    import fantasy_api
+    if not fantasy.get_active_season():
+        await query.edit_message_text("Активного сезона нет.", reply_markup=_fantasy_menu_markup())
+        return
+    src = parts[2] if len(parts) > 2 else ""
+    team_id = parts[3] if len(parts) > 3 else ""
+    candidates = await fantasy_api.derive_pool_teams()
+    target = next((t for t in candidates
+                   if str(t.get("source")) == src and str(t.get("team_id")) == team_id), None)
+    if target:
+        if not fantasy.pool_teams(fantasy.get_active_season()):
+            fantasy.set_pool_teams(candidates)  # материализуем дефолт «все»
+        fantasy.toggle_pool_team(target)
+        fantasy_api._pool_cache["data"] = None  # сбросить кеш пула
+    await query.edit_message_text(
+        "👥 Чьи ростеры в пуле фэнтези?\n\nОтмечай команды — их игроков можно "
+        "будет ставить в состав. ✅ — в пуле.",
+        reply_markup=await _fantasy_pool_markup())
 
 
 async def _handle_fantasy_scope(query, parts: List[str]) -> None:
@@ -898,6 +945,11 @@ async def _handle_fantasy_action(query, action: str) -> None:
         fantasy.set_format(new_fmt)
         await query.edit_message_text(
             f"🔀 Формат изменён на {new_fmt}.", reply_markup=_fantasy_menu_markup())
+    elif action == "pool":
+        await query.edit_message_text(
+            "👥 Чьи ростеры в пуле фэнтези?\n\nОтмечай команды — их игроков можно "
+            "будет ставить в состав. ✅ — в пуле.",
+            reply_markup=await _fantasy_pool_markup())
     elif action == "scope":
         current = fantasy.scopes_title(fantasy.season_scopes(fantasy.get_active_season()))
         await query.edit_message_text(
@@ -1048,6 +1100,9 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif parts[1] == "fscope":
             await _handle_fantasy_scope(query, parts)
+
+        elif parts[1] == "fpool":
+            await _handle_fantasy_pool(query, parts)
 
         elif parts[1] == "run":
             action = parts[2]
