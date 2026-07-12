@@ -167,26 +167,36 @@ def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
     return _update_settings(season, max_per_player=int(n)) if season else False
 
 
-def pool_excluded(season: Dict[str, Any]) -> List[str]:
-    """Лиговые ссылки (slpro:.. / ib:..), убранные админом из пула фэнтези.
-    Сравнение по одиночной лиговой ссылке — до склейки составных карточек."""
-    ex = season_settings(season).get("pool_exclude")
+def norm_player_name(name: str) -> str:
+    """Нормализованное ФИО — ключ и склейки карточек, и исключения из пула."""
+    return " ".join((name or "").lower().replace("ё", "е").split())
+
+
+def pool_excluded_names(season: Dict[str, Any]) -> List[str]:
+    """Нормализованные ФИО игроков, убранных админом из пула фэнтези.
+    Исключаем по имени, а не по id: устойчиво к склейке лиг и смене id."""
+    ex = season_settings(season).get("pool_exclude_names")
     return [str(x) for x in ex] if isinstance(ex, list) else []
 
 
-def toggle_pool_exclude(ref: str, season_id: Optional[int] = None) -> Tuple[bool, List[str]]:
-    """Убирает лиговую ссылку из пула или возвращает. (исключён_теперь?, список)."""
+def is_excluded(season: Dict[str, Any], name: str) -> bool:
+    return norm_player_name(name) in set(pool_excluded_names(season))
+
+
+def toggle_pool_exclude_name(name: str, season_id: Optional[int] = None) -> Tuple[bool, List[str]]:
+    """Убирает игрока (по ФИО) из пула или возвращает. (исключён_теперь?, список)."""
     season = get_active_season() if season_id is None else _get_season(season_id)
     if not season:
         return False, []
-    ex = pool_excluded(season)
-    if ref in ex:
-        ex = [x for x in ex if x != ref]
+    key = norm_player_name(name)
+    ex = pool_excluded_names(season)
+    if key in ex:
+        ex = [x for x in ex if x != key]
         now_excluded = False
     else:
-        ex = ex + [ref]
+        ex = ex + [key]
         now_excluded = True
-    _update_settings(season, pool_exclude=ex)
+    _update_settings(season, pool_exclude_names=ex)
     return now_excluded, ex
 
 

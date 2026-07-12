@@ -163,7 +163,6 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
     if not force and _pool_cache["data"] is not None and (now - _pool_cache["at"]) < _POOL_TTL:
         return _pool_cache["data"]
 
-    excluded = set(fantasy.pool_excluded(fantasy.get_active_season() or {}))
     pool: List[Dict[str, Any]] = []
     seen = set()
     for team in await _resolve_pool_teams():
@@ -191,7 +190,7 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
             if p["pid"] is None:
                 continue
             ref = f"{pref}:{tid}:{p['pid']}"
-            if ref in seen or ref in excluded:  # админ убрал из пула
+            if ref in seen:
                 continue
             seen.add(ref)
             pool.append({"ref": ref, "number": str(p["number"] or ""),
@@ -266,6 +265,16 @@ def _auth_user(request: web.Request) -> Optional[Dict[str, Any]]:
     return user
 
 
+def _is_admin(user: Optional[Dict[str, Any]]) -> bool:
+    """Админ Mini App — тот же список, что у бота (ADMIN_USER_IDS в .env).
+    Подпись initData уже проверена, id подделать нельзя."""
+    if not user:
+        return False
+    admins = {x.strip() for x in
+              os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
+    return str(user.get("id")) in admins
+
+
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Дополняет пул суммарной статистикой игрока за всё время (для сортировки
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
@@ -274,6 +283,7 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     scopes = fantasy.effective_scopes(season) if season else []
     agg = fantasy_stats.player_aggregates(weights, scope=scopes)
     last = fantasy_stats.player_last_fp(weights, scope=scopes)
+    excluded = set(fantasy.pool_excluded_names(season or {}))
     enriched = []
     for p in pool:
         keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
@@ -281,7 +291,8 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         combined = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], weights)
         lasts = [last[k] for k in keys if last.get(k)]
         last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
-        enriched.append({**p, "stats": combined, "last": last_one})
+        enriched.append({**p, "stats": combined, "last": last_one,
+                         "excluded": fantasy.norm_player_name(p["name"]) in excluded})
     return enriched
 
 
@@ -297,7 +308,27 @@ async def handle_pool(request: web.Request) -> web.Response:
                               "max_per_player": fantasy.max_per_player(season)},
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
+        "admin": _is_admin(user),
     })
+
+
+async def handle_exclude(request: web.Request) -> web.Response:
+    """Админ убирает/возвращает игрока в пул (по ФИО из пула). Только админ."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _is_admin(user):
+        return web.json_response({"error": "forbidden"}, status=403)
+    try:
+        body = await request.json()
+        ref = str(body.get("ref") or "")
+    except (json.JSONDecodeError, TypeError):
+        return web.json_response({"error": "bad_request"}, status=400)
+    entry = next((p for p in await build_pool() if p["ref"] == ref), None)
+    if not entry:
+        return web.json_response({"error": "unknown_player"}, status=404)
+    now_excluded, _ = fantasy.toggle_pool_exclude_name(entry["name"])
+    return web.json_response({"ok": True, "ref": ref, "excluded": now_excluded})
 
 
 async def handle_get_roster(request: web.Request) -> web.Response:
@@ -338,10 +369,16 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     if locked:
         return web.json_response({"error": "locked"}, status=409)
 
-    pool_refs = {p["ref"] for p in await build_pool()}
+    all_pool = await build_pool()
+    pool_refs = {p["ref"] for p in all_pool}
     err = fantasy.validate_roster(season, refs, pool_refs)
     if err:
         return web.json_response({"error": err, "expected": fantasy.roster_size(season)}, status=400)
+    # Убранных админом игроков брать нельзя.
+    excluded_names = set(fantasy.pool_excluded_names(season))
+    by_ref = {p["ref"]: p for p in all_pool}
+    if any(fantasy.norm_player_name(by_ref.get(r, {}).get("name", "")) in excluded_names for r in refs):
+        return web.json_response({"error": "excluded_player"}, status=400)
 
     res = fantasy.save_roster(uid, season["id"], week_start, refs)
     if not res.get("ok"):
@@ -435,6 +472,7 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/pool", handle_pool),
         web.get("/fantasy/roster", handle_get_roster),
         web.post("/fantasy/roster", handle_save_roster),
+        web.post("/fantasy/exclude", handle_exclude),
         web.get("/fantasy/player", handle_player),
         web.get("/fantasy/standings", handle_standings),
         web.get("/health", lambda r: web.json_response({"ok": True})),

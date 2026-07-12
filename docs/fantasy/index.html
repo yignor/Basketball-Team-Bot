@@ -52,6 +52,8 @@
       font-weight: 700; line-height: 1; background: var(--bg); color: var(--button);
       cursor: pointer; padding: 0; }
     .step:disabled { opacity: .3; cursor: default; }
+    .step.wide { width: auto; padding: 0 12px; font-size: 14px; }
+    .step.del { color: var(--hint); font-size: 15px; }
     .cnt { min-width: 22px; text-align: center; font-weight: 700; }
     .cnt.zero { color: var(--hint); font-weight: 400; }
     .banner { margin: 10px 16px; padding: 12px; border-radius: 10px;
@@ -142,7 +144,7 @@
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false;
   let pool = [], counts = {}, standings = [], weekStart = '';
-  let search = '', playedOnly = false;
+  let search = '', playedOnly = false, isAdmin = false;
 
   const $ = id => document.getElementById(id);
   function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
@@ -222,6 +224,7 @@
     if (!p.member) { msg('Фэнтези доступна только игрокам команды.'); return false; }
     rosterSize = p.season.roster_size || 3;
     maxPer = p.season.max_per_player || rosterSize;
+    isAdmin = !!p.admin;
     locked = !!r.locked;
     weekStart = r.week_start || s.week_start || '';
     standings = s.standings || [];
@@ -229,6 +232,7 @@
       ref: x.ref, name: x.name || x.ref, number: x.number || '', team: x.team || '',
       st: Object.assign({}, ZERO, x.stats || {}),
       last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
+      excluded: !!x.excluded,
     }));
     for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
@@ -255,12 +259,28 @@
   }
 
   function passesFilter(p) {
+    // Убранных админом показываем только админу (чтобы вернуть); остальным — нет.
+    if (p.excluded && !isAdmin) return false;
     // Выбранных всегда показываем, чтобы не терять свой состав из виду.
     if (counts[p.ref]) return true;
     if (search && p.name.toLowerCase().indexOf(search) < 0) return false;
     if (playedOnly && !(p.st && p.st.games)) return false;
     return true;
   }
+
+  async function toggleExclude(ref) {
+    if (!live) return;
+    haptic('medium');
+    try {
+      const res = await api('/fantasy/exclude', { method: 'POST', body: JSON.stringify({ ref }) });
+      const p = pool.find(x => x.ref === ref);
+      if (p) p.excluded = !!res.excluded;
+      renderPool();
+    } catch (e) {
+      tg && tg.showAlert ? tg.showAlert('Не удалось изменить пул.') : 0;
+    }
+  }
+  window.toggleExclude = toggleExclude;
 
   function renderPool() {
     sortPool();
@@ -270,24 +290,27 @@
     $('poolEmpty').classList.toggle('hidden', visible.length > 0);
     for (const p of visible) {
       const n = counts[p.ref] || 0;
-      const canAdd = !locked && !full && n < maxPer;
+      const canAdd = !locked && !full && n < maxPer && !p.excluded;
       const c = document.createElement('div');
-      c.className = 'card' + (n ? ' sel' : '') + ((locked || (!n && full)) ? ' disabled' : '');
+      c.className = 'card' + (n ? ' sel' : '') + ((locked || p.excluded || (!n && full)) ? ' disabled' : '');
+      const ctrl = p.excluded
+        ? (isAdmin ? `<button class="step wide" data-act="restore">Вернуть</button>` : '')
+        : `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
+          `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
+          `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>` +
+          (isAdmin ? `<button class="step del" data-act="remove" title="Убрать из пула">✕</button>` : '');
       c.innerHTML =
         `<div class="num">${esc(p.number || '—')}</div>` +
         `<div class="info"><div class="pname">${esc(p.name)}` +
-        (live ? '<span class="chev">›</span>' : '') + `</div>` +
+        (p.excluded ? ' <span class="pteam">(убран)</span>' : (live ? '<span class="chev">›</span>' : '')) + `</div>` +
         `<div class="pstat">${esc(statLine(p))}</div></div>` +
-        `<div class="ctrl">` +
-          `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
-          `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
-          `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>` +
-        `</div>`;
-      c.querySelector('[data-act=inc]').onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
-      c.querySelector('[data-act=dec]').onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
-      // Тап по имени — профиль игрока; состав набирается кнопками ±, иначе одно
-      // касание значило бы две разные вещи.
-      c.querySelector('.info').onclick = () => openPlayer(p.ref);
+        `<div class="ctrl">${ctrl}</div>`;
+      const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
+      const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
+      const rm = c.querySelector('[data-act=remove]'); if (rm) rm.onclick = e => { e.stopPropagation(); toggleExclude(p.ref); };
+      const rs = c.querySelector('[data-act=restore]'); if (rs) rs.onclick = e => { e.stopPropagation(); toggleExclude(p.ref); };
+      // Тап по имени — профиль игрока (у исключённых тоже можно посмотреть).
+      c.querySelector('.info').onclick = () => { if (!p.excluded) openPlayer(p.ref); };
       el.appendChild(c);
     }
     updateCounter();
