@@ -163,6 +163,7 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
     if not force and _pool_cache["data"] is not None and (now - _pool_cache["at"]) < _POOL_TTL:
         return _pool_cache["data"]
 
+    excluded = set(fantasy.pool_excluded(fantasy.get_active_season() or {}))
     pool: List[Dict[str, Any]] = []
     seen = set()
     for team in await _resolve_pool_teams():
@@ -190,7 +191,7 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
             if p["pid"] is None:
                 continue
             ref = f"{pref}:{tid}:{p['pid']}"
-            if ref in seen:
+            if ref in seen or ref in excluded:  # админ убрал из пула
                 continue
             seen.add(ref)
             pool.append({"ref": ref, "number": str(p["number"] or ""),

@@ -29,6 +29,11 @@
     .counter { color: var(--hint); font-size: 14px; flex: 1; }
     select { background: var(--secondary-bg); color: var(--text); border: none;
       border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
+    #search { flex: 1; background: var(--secondary-bg); color: var(--text); border: none;
+      border-radius: 10px; padding: 10px 12px; font-size: 15px; font-family: inherit; -webkit-appearance: none; }
+    .chip { background: var(--secondary-bg); color: var(--hint); border: none;
+      border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap; }
+    .chip.on { background: var(--button); color: var(--button-text); }
     .list { padding: 0 12px; }
     .card { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
       background: var(--secondary-bg); border-radius: 12px; margin: 8px 0;
@@ -87,7 +92,11 @@
   </div>
   <div id="draft">
     <div class="bar">
+      <input id="search" type="search" placeholder="🔎 Поиск по фамилии" autocomplete="off">
+    </div>
+    <div class="bar">
       <div class="counter" id="counter"></div>
+      <button class="chip" id="playedChip" onclick="togglePlayed()">Только с играми</button>
       <select id="sort" aria-label="Сортировка">
         <option value="fp">Фэнтези-очки</option>
         <option value="fp_avg">Очки за игру</option>
@@ -102,6 +111,7 @@
     </div>
     <div id="lockBanner" class="banner hidden">🔒 Набор на этот тур закрыт — игры начались. Открою на следующий тур после игр недели.</div>
     <div class="list" id="pool"></div>
+    <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
   </div>
   <div id="table" class="hidden">
     <div class="bar"><div class="counter" id="weekLabel"></div></div>
@@ -132,6 +142,7 @@
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false;
   let pool = [], counts = {}, standings = [], weekStart = '';
+  let search = '', playedOnly = false;
 
   const $ = id => document.getElementById(id);
   function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
@@ -243,11 +254,21 @@
     return live ? `${head} · нажми для деталей ›` : head;
   }
 
+  function passesFilter(p) {
+    // Выбранных всегда показываем, чтобы не терять свой состав из виду.
+    if (counts[p.ref]) return true;
+    if (search && p.name.toLowerCase().indexOf(search) < 0) return false;
+    if (playedOnly && !(p.st && p.st.games)) return false;
+    return true;
+  }
+
   function renderPool() {
     sortPool();
     const el = $('pool'); el.innerHTML = '';
     const full = total() >= rosterSize;
-    for (const p of pool) {
+    const visible = pool.filter(passesFilter);
+    $('poolEmpty').classList.toggle('hidden', visible.length > 0);
+    for (const p of visible) {
       const n = counts[p.ref] || 0;
       const canAdd = !locked && !full && n < maxPer;
       const c = document.createElement('div');
@@ -453,6 +474,13 @@
   }
   window.showTab = showTab;
 
+  function togglePlayed() {
+    playedOnly = !playedOnly;
+    $('playedChip').classList.toggle('on', playedOnly);
+    renderPool();
+  }
+  window.togglePlayed = togglePlayed;
+
   // ─── старт ─────────────────────────────────────────────────────────────────
 
   async function init() {
@@ -496,6 +524,7 @@
     $('lockBanner').classList.toggle('hidden', !locked);
     msg('');
     $('sort').onchange = renderPool;
+    $('search').oninput = e => { search = (e.target.value || '').trim().toLowerCase(); renderPool(); };
     renderPool(); renderStandings();
     if (tg && tg.MainButton) tg.MainButton.onClick(saveRoster);
     syncButton();

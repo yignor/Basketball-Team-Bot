@@ -167,6 +167,29 @@ def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
     return _update_settings(season, max_per_player=int(n)) if season else False
 
 
+def pool_excluded(season: Dict[str, Any]) -> List[str]:
+    """Лиговые ссылки (slpro:.. / ib:..), убранные админом из пула фэнтези.
+    Сравнение по одиночной лиговой ссылке — до склейки составных карточек."""
+    ex = season_settings(season).get("pool_exclude")
+    return [str(x) for x in ex] if isinstance(ex, list) else []
+
+
+def toggle_pool_exclude(ref: str, season_id: Optional[int] = None) -> Tuple[bool, List[str]]:
+    """Убирает лиговую ссылку из пула или возвращает. (исключён_теперь?, список)."""
+    season = get_active_season() if season_id is None else _get_season(season_id)
+    if not season:
+        return False, []
+    ex = pool_excluded(season)
+    if ref in ex:
+        ex = [x for x in ex if x != ref]
+        now_excluded = False
+    else:
+        ex = ex + [ref]
+        now_excluded = True
+    _update_settings(season, pool_exclude=ex)
+    return now_excluded, ex
+
+
 def season_scopes(season: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Список турниров подсчёта очков. Команда играет сразу в нескольких лигах
     (напр. SLPRO Летний Кубок + Инфобаскет квалификация), поэтому scope —
