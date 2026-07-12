@@ -195,9 +195,41 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
             seen.add(ref)
             pool.append({"ref": ref, "number": str(p["number"] or ""),
                          "name": p["name"], "team": team.get("name", "")})
+
+    # Один физический игрок может быть в ДВУХ лигах (SLPRO Farm + Инфобаскет) с
+    # разными id. Склеиваем по ФИО в одну карточку с составной ссылкой
+    # «slpro:..+ib:..» — очки суммируются, а не задваиваются.
+    pool = _merge_pool_by_name(pool)
     _pool_cache["data"] = pool
     _pool_cache["at"] = now
     return pool
+
+
+def _norm_name(name: str) -> str:
+    return " ".join((name or "").lower().replace("ё", "е").split())
+
+
+def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_name: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for p in pool:
+        key = _norm_name(p["name"])
+        if not key:
+            key = p["ref"]  # без имени — не склеиваем
+        if key not in by_name:
+            by_name[key] = {"refs": [p["ref"]], "number": p["number"],
+                            "name": p["name"], "team": p["team"]}
+            order.append(key)
+        else:
+            by_name[key]["refs"].append(p["ref"])
+            if not by_name[key]["number"]:
+                by_name[key]["number"] = p["number"]
+    merged = []
+    for key in order:
+        e = by_name[key]
+        merged.append({"ref": "+".join(sorted(e["refs"])), "number": e["number"],
+                       "name": e["name"], "team": e["team"]})
+    return merged
 
 
 # ─────────────────────────── Хендлеры ────────────────────────────────────────
@@ -243,9 +275,12 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     last = fantasy_stats.player_last_fp(weights, scope=scopes)
     enriched = []
     for p in pool:
-        src, pid = fantasy_stats.parse_ref(p["ref"])
-        key = f"{src}:{pid}"
-        enriched.append({**p, "stats": agg.get(key, {}), "last": last.get(key, {})})
+        keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
+                for lr in fantasy_stats.expand_refs([p["ref"]])]
+        combined = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], weights)
+        lasts = [last[k] for k in keys if last.get(k)]
+        last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
+        enriched.append({**p, "stats": combined, "last": last_one})
     return enriched
 
 
@@ -367,10 +402,9 @@ async def handle_player(request: web.Request) -> web.Response:
         profile["last"]["opponent"] = names.get(str(profile["last"]["opponent_id"]), "Соперник")
     profile["name"] = entry["name"]          # транзитно, как и в пуле
     profile["number"] = entry.get("number", "")
-    # Турнир в шапке — только по источнику игрока (SLPRO-игроку не пишем
-    # Инфобаскет и наоборот).
-    psrc = fantasy_stats.parse_ref(ref)[0]
-    own = [s for s in scopes if s.get("source") == psrc]
+    # Турнир в шапке — только по источникам игрока (у составного игрока их два).
+    psrcs = {fantasy_stats.parse_ref(lr)[0] for lr in fantasy_stats.expand_refs([ref])}
+    own = [s for s in scopes if s.get("source") in psrcs]
     profile["tournament"] = fantasy.scopes_title(own or scopes)
     return web.json_response(profile)
 

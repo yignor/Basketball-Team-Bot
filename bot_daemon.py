@@ -78,11 +78,13 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     names = fantasy.display_names([row["user_id"] for row in table])
     standings = [{"name": names.get(str(row["user_id"]), "Участник"), "points": row["points"]} for row in table]
     def _short_stats(ref: str) -> Dict[str, Any]:
-        src, pid = fantasy_stats.parse_ref(ref)
-        a = agg.get(f"{src}:{pid}")
+        keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
+                for lr in fantasy_stats.expand_refs([ref])]
+        a = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], fantasy.season_weights(season))
         if not a:
             return {}
-        lg = last.get(f"{src}:{pid}") or {}
+        lasts = [last[k] for k in keys if last.get(k)]
+        lg = max(lasts, key=lambda x: x.get("date", ""), default={})
         return {"g": a["games"], "p": a["pts"], "rb": a["reb"], "a": a["ast"],
                 "s": a["stl"], "b": a["blk"], "t": a["tur"], "f": a["fp"],
                 "lf": lg.get("fp"), "ld": lg.get("date")}

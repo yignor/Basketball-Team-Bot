@@ -303,11 +303,41 @@ def scope_where(scopes: Any) -> Tuple[str, List[Any]]:
     return " AND (" + " OR ".join(ors) + ")", params
 
 
+def expand_refs(refs: Any) -> List[str]:
+    """Разворачивает составные ссылки. Один физический игрок, играющий в двух
+    лигах, кодируется одной composite-ссылкой «slpro:..+ib:..» — его очки надо
+    складывать, а не задваивать. Здесь режем по «+» в плоский список лиговых
+    ссылок. Обычная одиночная ссылка возвращается как есть."""
+    out: List[str] = []
+    for r in (refs or []):
+        out.extend(str(r).split("+"))
+    return out
+
+
+def combine_agg(parts: List[Dict[str, Any]], weights: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """Складывает агрегаты нескольких лиг одного игрока в один (для пула)."""
+    w = weights or DEFAULT_WEIGHTS
+    parts = [p for p in parts if p]
+    if not parts:
+        return {}
+    out: Dict[str, Any] = {"games": 0}
+    for c in AGG_COLUMNS:
+        out[c] = 0
+    for a in parts:
+        out["games"] += int(a.get("games", 0) or 0)
+        for c in AGG_COLUMNS:
+            out[c] += int(a.get(c, 0) or 0)
+    out["fp"] = round(sum(float(out.get(k, 0)) * coeff for k, coeff in w.items()), 2)
+    out["fp_avg"] = round(out["fp"] / out["games"], 2) if out["games"] else 0.0
+    return out
+
+
 def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
                   date_from: Optional[str] = None, date_to: Optional[str] = None,
                   scope: Optional[Dict[str, Any]] = None) -> float:
     """Сумма очков игрока за период по всем его связанным ID (агрегация
-    SLPRO + Infobasket). refs — список ссылок вида source:team:player_id.
+    SLPRO + Infobasket). refs — список ссылок вида source:team:player_id
+    (или составных «slpro:..+ib:..» — один игрок в двух лигах).
     Повторы в refs умножают очки: можно поставить всё на одного.
     Период — ISO-даты включительно, scope — турнир подсчёта."""
     sheets_cache.init_db()
@@ -315,7 +345,7 @@ def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
     scope_sql, scope_params = scope_where(scope)
     total = 0.0
     with sheets_cache.get_connection() as conn:
-        for ref in refs:
+        for ref in expand_refs(refs):
             src, pid = parse_ref(ref)
             query = "SELECT * FROM game_player_stats WHERE source = ? AND player_id = ?"
             params: List[Any] = [src, pid]
@@ -422,26 +452,37 @@ def player_profile(ref: str, scope: Optional[Dict[str, Any]] = None,
     последнюю сыгранную игру и журнал последних игр с очками за каждую."""
     sheets_cache.init_db()
     w = weights or DEFAULT_WEIGHTS
-    src, team_id, pid = parse_ref_full(ref)
     scope_sql, scope_params = scope_where(scope)
+    # Игрок может быть в двух лигах (составная ссылка) — объединяем игры по всем.
+    triples = [parse_ref_full(lr) for lr in expand_refs([ref])]
+    primary_team = triples[0][1] if triples else ""
 
+    team_games: List[Dict[str, Any]] = []
+    player_rows: List[Dict[str, Any]] = []
     with sheets_cache.get_connection() as conn:
-        team_games = [dict(r) for r in conn.execute(
-            "SELECT game_id, game_date, home_team_id, guest_team_id, home_score, guest_score "
-            "FROM game_meta WHERE source = ? AND (home_team_id = ? OR guest_team_id = ?)"
-            + scope_sql + " ORDER BY game_date, game_id",
-            [src, team_id, team_id] + scope_params).fetchall()]
-        player_rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM game_player_stats WHERE source = ? AND player_id = ?"
-            + scope_sql + " ORDER BY game_date, game_id",
-            [src, pid] + scope_params).fetchall()]
+        for src, team_id, pid in triples:
+            for r in conn.execute(
+                "SELECT game_id, game_date, home_team_id, guest_team_id, home_score, guest_score "
+                "FROM game_meta WHERE source = ? AND (home_team_id = ? OR guest_team_id = ?)"
+                + scope_sql + " ORDER BY game_date, game_id",
+                [src, team_id, team_id] + scope_params).fetchall():
+                d = dict(r); d["source"] = src; d["_team"] = team_id
+                team_games.append(d)
+            for r in conn.execute(
+                "SELECT * FROM game_player_stats WHERE source = ? AND player_id = ?"
+                + scope_sql + " ORDER BY game_date, game_id",
+                [src, pid] + scope_params).fetchall():
+                d = dict(r); d["_team"] = team_id
+                player_rows.append(d)
+    team_games.sort(key=lambda g: (g["game_date"], str(g["game_id"])))
+    player_rows.sort(key=lambda r: (r["game_date"], str(r["game_id"])))
 
-    played_ids = {str(r["game_id"]) for r in player_rows}
+    played_ids = {(r["source"], str(r["game_id"])) for r in player_rows}
 
     # Сколько матчей команды подряд, начиная с последнего, игрок пропустил.
     missed_streak = 0
     for g in reversed(team_games):
-        if str(g["game_id"]) in played_ids:
+        if (g["source"], str(g["game_id"])) in played_ids:
             break
         missed_streak += 1
 
@@ -466,9 +507,10 @@ def player_profile(ref: str, scope: Optional[Dict[str, Any]] = None,
     if player_rows:
         row = player_rows[-1]
         last = _game_line(row, w)
-        meta = next((g for g in team_games if str(g["game_id"]) == str(row["game_id"])), None)
+        meta = next((g for g in team_games if g["source"] == row["source"]
+                     and str(g["game_id"]) == str(row["game_id"])), None)
         if meta:
-            we_home = str(meta["home_team_id"]) == team_id
+            we_home = str(meta["home_team_id"]) == str(row["_team"])
             last.update({
                 "opponent_id": meta["guest_team_id"] if we_home else meta["home_team_id"],
                 "our_score": meta["home_score"] if we_home else meta["guest_score"],
@@ -477,7 +519,7 @@ def player_profile(ref: str, scope: Optional[Dict[str, Any]] = None,
             })
 
     return {
-        "ref": ref, "team_id": team_id,
+        "ref": ref, "team_id": primary_team,
         "season": season,
         "last": last,
         "log": [_game_line(r, w) for r in player_rows[-log_size:]][::-1],
