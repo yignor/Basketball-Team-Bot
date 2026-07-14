@@ -71,12 +71,11 @@ async def _fantasy_payload(user_id: str) -> Optional[str]:
     last = fantasy_stats.player_last_fp(fantasy.season_weights(season), scope=_scopes)
     week_start, sched_locked = fantasy.active_selection(season)
     r = fantasy.get_roster(user_id, season["id"], week_start)
-    # Таблица — по текущей календарной неделе (её игры сейчас идут/сыграны),
-    # а не по неделе набора (она может уже указывать на следующий тур).
-    table_week = fantasy.week_start_of(date.today()).isoformat()
-    table = fantasy.weekly_standings(season["id"], table_week)
+    # Таблица — суммарные очки за всю лигу (+история по турам для тапа).
+    table = fantasy.season_standings_live(season["id"])
     names = fantasy.display_names([row["user_id"] for row in table])
-    standings = [{"name": names.get(str(row["user_id"]), "Участник"), "points": row["points"]} for row in table]
+    standings = [{"name": names.get(str(row["user_id"]), "Участник"),
+                  "points": row["points"], "history": row.get("history", [])} for row in table]
     def _short_stats(ref: str) -> Dict[str, Any]:
         keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
                 for lr in fantasy_stats.expand_refs([ref])]

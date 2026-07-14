@@ -484,17 +484,28 @@
     b.innerHTML = html;
   }
 
+  let openRank = -1;   // раскрытая история участника
   function renderStandings() {
     const el = $('standings'); el.innerHTML = '';
-    $('weekLabel').textContent = weekStart ? ('Неделя с ' + weekStart) : '';
+    $('weekLabel').textContent = 'Общий зачёт лиги';
     if (!standings.length) { el.innerHTML = '<div class="banner">Пока нет очков</div>'; return; }
     standings.forEach((row, i) => {
       const medal = ['🥇','🥈','🥉'][i] || (i + 1) + '.';
       const div = document.createElement('div'); div.className = 'rank';
       div.innerHTML = `<div class="place">${medal}</div>` +
-        `<div class="info"><div class="pname">${esc(row.name || 'Участник')}</div></div>` +
+        `<div class="info"><div class="pname">${esc(row.name || 'Участник')}` +
+        ((row.history && row.history.length) ? '<span class="chev">›</span>' : '') + `</div></div>` +
         `<div class="pts">${row.points}</div>`;
+      div.onclick = () => { openRank = (openRank === i ? -1 : i); renderStandings(); };
       el.appendChild(div);
+      // История по турам — раскрывается под участником.
+      if (openRank === i && row.history && row.history.length) {
+        for (const h of row.history.slice().reverse()) {
+          const hr = document.createElement('div'); hr.className = 'row';
+          hr.innerHTML = `<span class="d">Тур с ${h.week}</span><b>${h.points}</b>`;
+          el.appendChild(hr);
+        }
+      }
     });
   }
 

@@ -514,6 +514,32 @@ def season_standings(season_id: int) -> List[Dict[str, Any]]:
     return [{"user_id": r["user_id"], "points": round(r["total"], 2), "weeks": r["weeks"]} for r in rows]
 
 
+def season_standings_live(season_id: int) -> List[Dict[str, Any]]:
+    """Живая таблица лиги: суммарные очки участника за ВСЕ его недели + разбивка
+    по турам (для истории при тапе). Считается из составов, а не из кеша, —
+    обновляется сразу после каждой сыгранной игры. Так таблица не «пропадает»
+    при смене недели: всегда виден общий зачёт."""
+    sheets_cache.init_db()
+    season = _get_season(season_id)
+    weights = season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
+    scope = effective_scopes(season) if season else []
+    with sheets_cache.get_connection() as conn:
+        weeks = [r["week_start"] for r in conn.execute(
+            "SELECT DISTINCT week_start FROM fantasy_rosters WHERE season_id=? ORDER BY week_start",
+            (season_id,))]
+    totals: Dict[str, Dict[str, Any]] = {}
+    for wk in weeks:
+        d_from, d_to = week_bounds(wk)
+        for r in get_week_rosters(season_id, wk):
+            pts = fantasy_stats.player_points(r["refs"], weights, date_from=d_from,
+                                              date_to=d_to, scope=scope)
+            uid = str(r["user_id"])
+            e = totals.setdefault(uid, {"user_id": uid, "points": 0.0, "history": []})
+            e["points"] = round(e["points"] + pts, 2)
+            e["history"].append({"week": wk, "points": pts})
+    return sorted(totals.values(), key=lambda x: x["points"], reverse=True)
+
+
 def _get_season(season_id: int) -> Optional[Dict[str, Any]]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:

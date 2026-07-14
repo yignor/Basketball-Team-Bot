@@ -471,15 +471,13 @@ async def handle_standings(request: web.Request) -> web.Response:
     season = _season(request)
     if not season:
         return web.json_response({"standings": []})
-    week_start = fantasy.week_start_of(date.today()).isoformat()
-    table = fantasy.weekly_standings(season["id"], week_start)
-    # user_id -> отображаемое имя (из players, транзитно — в таблицах фэнтези
-    # ФИО не храним; здесь только показываем).
+    # Таблица — суммарные очки за всю лигу (не за неделю): не «пропадает» при
+    # смене недели. История по турам — в каждой строке, для тапа.
+    table = fantasy.season_standings_live(season["id"])
     names = fantasy.display_names([r["user_id"] for r in table])
     for r in table:
         r["name"] = names.get(str(r["user_id"]), "")
-        r.pop("refs", None)
-    return web.json_response({"week_start": week_start, "standings": table})
+    return web.json_response({"standings": table})
 
 
 def create_app(bot_token: str) -> web.Application:
