@@ -91,13 +91,16 @@ def _announce_dt(day: _dt.date, hhmm: str) -> _dt.datetime:
 
 
 def tick(now: Optional[_dt.datetime] = None,
-         announce_hhmm: str = DEFAULT_ANNOUNCE_HHMM) -> Tuple[Dict[str, Any], List[Tuple[str, str]]]:
-    """Пересчитывает окно набора и возвращает (состояние, события-к-рассылке).
+         announce_hhmm: str = DEFAULT_ANNOUNCE_HHMM,
+         season: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], List[Tuple[str, str]]]:
+    """Пересчитывает окно набора конкретного сезона (или последнего активного)
+    и возвращает (состояние, события-к-рассылке).
 
     События — список (тип, текст) для отправки участникам. На ПЕРВОМ прогоне
     (пустой sched) ничего не рассылается — только инициализируем состояние,
     чтобы деплой в середине недели не выстрелил рассылкой задним числом."""
-    season = fantasy.get_active_season()
+    if season is None:
+        season = fantasy.get_active_season()
     if not season:
         return {"active_week": None, "locked": False}, []
 

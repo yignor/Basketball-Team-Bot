@@ -48,32 +48,32 @@ class FantasyRunner:
         return n
 
     async def weekly(self) -> bool:
-        season = fantasy.get_active_season()
-        if not season:
-            print("ℹ️ Фэнтези weekly: активного сезона нет, пропускаю")
+        seasons = fantasy.active_seasons()
+        if not seasons:
+            print("ℹ️ Фэнтези weekly: активных сезонов нет, пропускаю")
             return False
 
         # Прошедшая неделя (при запуске в понедельник — прошлый пн–вс).
         today = get_moscow_time().date()
         report_week = (fantasy.week_start_of(today) - timedelta(days=7)).isoformat()
-        print(f"🏆 Фэнтези weekly: сезон «{season['name']}», отчётная неделя {report_week}")
 
-        # Свежая статистика перед подсчётом.
+        # Свежая статистика перед подсчётом — один раз на все лиги.
         await self.ingest()
 
-        fantasy.lock_week(season["id"], report_week)
-        fantasy.save_weekly_scores(season["id"], report_week)
-        text = fantasy.format_weekly_table(season["id"], report_week)
-
-        # Общий чат
+        single = len(seasons) == 1
         chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
         topic = self.gsm.game_announcement_topic_id
-        await self._send_to_chats(chat_ids, text, topic)
-
-        # Личка участникам недели
-        participants = [r["user_id"] for r in fantasy.get_week_rosters(season["id"], report_week)]
-        sent_dm = await self._send_dms(participants, text)
-        print(f"📊 Фэнтези weekly: таблица в {len(chat_ids)} чат(ов), в личку {sent_dm}/{len(participants)}")
+        for season in seasons:
+            print(f"🏆 Фэнтези weekly: «{season['name']}», неделя {report_week}")
+            fantasy.lock_week(season["id"], report_week)
+            fantasy.save_weekly_scores(season["id"], report_week)
+            text = fantasy.format_weekly_table(season["id"], report_week)
+            if not single:
+                text = f"🏆 {season['name']}\n{text}"
+            await self._send_to_chats(chat_ids, text, topic)
+            participants = [r["user_id"] for r in fantasy.get_week_rosters(season["id"], report_week)]
+            sent_dm = await self._send_dms(participants, text)
+            print(f"📊 «{season['name']}»: таблица в {len(chat_ids)} чат(ов), личка {sent_dm}/{len(participants)}")
         return True
 
     async def _refresh_auto_scopes(self, season: Any) -> None:
@@ -98,28 +98,33 @@ class FantasyRunner:
             print(f"🎯 Авто-лиги подсчёта: {fantasy.scopes_title(scopes)}")
 
     async def schedule(self) -> bool:
-        """Пересчитывает окно набора по расписанию: закрывает набор на первом
-        анонсе недели, открывает следующий тур после статистики последней игры.
-        Сообщения о закрытии/открытии рассылает участникам и в общий чат."""
+        """Пересчитывает окно набора КАЖДОГО активного сезона (их может быть
+        несколько — параллельные лиги). Закрывает набор на первом анонсе недели,
+        открывает следующий тур после статистики последней игры."""
         import fantasy_schedule
-        season = fantasy.get_active_season()
-        if not season:
+        seasons = fantasy.active_seasons()
+        if not seasons:
             return False
-        await self._refresh_auto_scopes(season)
+        # Авто-лиги ставим только если сезон один; при нескольких параллельных
+        # турниры у каждого свои — админ задаёт их явно.
+        single = len(seasons) == 1
         announce_hhmm = str(
             (self.gsm._get_automation_entry(self._ann_key) or {}).get("notify_time")
             or fantasy_schedule.DEFAULT_ANNOUNCE_HHMM
         )
-        state, events = fantasy_schedule.tick(announce_hhmm=announce_hhmm)
-        print(f"🗓️ Фэнтези окно набора: неделя {state.get('active_week')}, "
-              f"заблокирован={state.get('locked')}, событий={len(events)}")
-        for kind, text in events:
-            chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
-            await self._send_to_chats(chat_ids, text, self.gsm.game_announcement_topic_id)
-            # Личка — участникам сезона, кто НЕ отписался от этого типа события.
-            audience = fantasy.notify_audience(season["id"], kind)
-            sent = await self._send_dms(audience, text)
-            print(f"📣 Фэнтези: событие «{kind}» — в чат + личка {sent}/{len(audience)}")
+        for season in seasons:
+            if single:
+                await self._refresh_auto_scopes(season)
+            state, events = fantasy_schedule.tick(announce_hhmm=announce_hhmm, season=season)
+            print(f"🗓️ Фэнтези «{season['name']}»: неделя {state.get('active_week')}, "
+                  f"заблокирован={state.get('locked')}, событий={len(events)}")
+            for kind, text in events:
+                label = text if single else f"[{season['name']}] {text}"
+                chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
+                await self._send_to_chats(chat_ids, label, self.gsm.game_announcement_topic_id)
+                audience = fantasy.notify_audience(season["id"], kind)
+                sent = await self._send_dms(audience, label)
+                print(f"📣 Фэнтези «{season['name']}»: событие «{kind}» — личка {sent}/{len(audience)}")
         return True
 
     async def _send_to_chats(self, chat_ids: List[str], text: str, topic: Optional[int]) -> None:

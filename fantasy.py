@@ -58,22 +58,33 @@ def active_selection(season: Optional[Dict[str, Any]]) -> Tuple[str, bool]:
 
 # ─────────────────────────── Сезоны ──────────────────────────────────────────
 
-def get_active_season() -> Optional[Dict[str, Any]]:
+def active_seasons() -> List[Dict[str, Any]]:
+    """Все активные сезоны. Их может быть несколько одновременно (летний турнир
+    и основной сезон идут параллельно) — у каждого свой пул/таблица/окно."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
-        row = conn.execute(
-            "SELECT * FROM fantasy_seasons WHERE status = 'active' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-    return dict(row) if row else None
+        rows = conn.execute(
+            "SELECT * FROM fantasy_seasons WHERE status = 'active' ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_active_season() -> Optional[Dict[str, Any]]:
+    """Последний активный сезон (для одиночного контекста/совместимости).
+    Новый код, поддерживающий несколько лиг, ходит через active_seasons()."""
+    seasons = active_seasons()
+    return seasons[0] if seasons else None
 
 
 def start_season(name: str, fmt: str = "3x3",
                  weights: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-    """Создаёт активный сезон. Если уже есть активный — возвращает его
-    (нельзя два активных одновременно)."""
-    existing = get_active_season()
-    if existing:
-        return existing
+    """Создаёт активный сезон. Несколько активных допускаются (параллельные
+    лиги) — админ управляет закрытием старых вручную. Идемпотентно по имени:
+    если активный сезон с таким названием уже есть, возвращаем его (защита от
+    двойного клика «Старт»)."""
+    for s in active_seasons():
+        if s.get("name") == name:
+            return s
     sheets_cache.init_db()
     scoring_json = json.dumps(weights or fantasy_stats.DEFAULT_WEIGHTS, ensure_ascii=False)
     with sheets_cache.get_connection() as conn:
