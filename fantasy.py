@@ -514,6 +514,35 @@ def season_standings(season_id: int) -> List[Dict[str, Any]]:
     return [{"user_id": r["user_id"], "points": round(r["total"], 2), "weeks": r["weeks"]} for r in rows]
 
 
+def apply_game_result(source: str, game_id: Any, game_date_iso: str) -> Dict[str, Any]:
+    """Вызывается ПОСЛЕ сохранения box-score сыгранной игры (по результату в
+    чат). Сверяет игроков матча с составами фэнтези и пересчитывает очки той
+    недели по всем активным лигам (обновляет кеш недельных очков). Таблица и
+    так живая, но так кеш и понедельничная рассылка сразу консистентны.
+    Возвращает сводку: кого из участников затронула игра."""
+    sheets_cache.init_db()
+    try:
+        wk = week_start_of(date.fromisoformat(game_date_iso)).isoformat()
+    except (ValueError, TypeError):
+        wk = week_start_of(date.today()).isoformat()
+    with sheets_cache.get_connection() as conn:
+        played = {str(r["player_id"]) for r in conn.execute(
+            "SELECT player_id FROM game_player_stats WHERE source=? AND game_id=?",
+            (source, str(game_id)))}
+    out: List[Dict[str, Any]] = []
+    for season in active_seasons():
+        save_weekly_scores(season["id"], wk)          # обновляем кеш недели
+        affected = []
+        for r in get_week_rosters(season["id"], wk):
+            for ref in fantasy_stats.expand_refs(r["refs"]):
+                src, pid = fantasy_stats.parse_ref(ref)
+                if src == source and pid in played:
+                    affected.append(str(r["user_id"]))
+                    break
+        out.append({"season_id": season["id"], "affected": affected})
+    return {"week": wk, "played": len(played), "seasons": out}
+
+
 def season_standings_live(season_id: int) -> List[Dict[str, Any]]:
     """Живая таблица лиги: суммарные очки участника за ВСЕ его недели + разбивка
     по турам (для истории при тапе). Считается из составов, а не из кеша, —

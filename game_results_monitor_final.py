@@ -347,8 +347,15 @@ class GameResultsMonitorFinal:
                         parsed['game_id'] = parsed.get('game_id') or game_id
                         comp_id = (api_data.get('game') or {}).get('CompID') or ''
                         fantasy_stats.store_infobasket_game(parsed, str(comp_id))
+                        # Пересчёт фэнтези по этой игре: сверка составов + очки.
+                        import fantasy
+                        gdate = fantasy_stats._to_iso_date(parsed.get('date') or '')
+                        summary = fantasy.apply_game_result("infobasket", parsed['game_id'], gdate)
+                        affected = sum(len(s["affected"]) for s in summary["seasons"])
+                        print(f"🏆 Фэнтези обновлено по игре {parsed['game_id']} "
+                              f"(затронуто участников {affected})")
                 except Exception as e:
-                    print(f"⚠️ Статистика игры {game_id} не сохранена в базу: {e}")
+                    print(f"⚠️ Статистика игры {game_id} не сохранена/не пересчитана: {e}")
 
                 candidate_names: Set[str] = set()
 

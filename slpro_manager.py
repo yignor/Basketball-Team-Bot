@@ -322,8 +322,14 @@ class SlproManager:
                 import fantasy_stats
                 fantasy_stats.store_slpro_box(box, str(ctx.get("season_id") or ""),
                                               ctx.get("stage_id") or "")
+                # Пересчёт фэнтези по этой игре: сверка составов + очки недели.
+                import fantasy
+                summary = fantasy.apply_game_result("slpro", box.game_id, box.game_date)
+                affected = sum(len(s["affected"]) for s in summary["seasons"])
+                print(f"🏆 SLPRO: фэнтези обновлено (игроков в игре {summary['played']}, "
+                      f"затронуто участников {affected})")
             except Exception as e:
-                print(f"⚠️ SLPRO: box-score {sid} не сохранён в базу: {e}")
+                print(f"⚠️ SLPRO: box-score {sid} не сохранён/не пересчитан: {e}")
 
             quarters = format_quarters(box, team_id)
             if quarters:
