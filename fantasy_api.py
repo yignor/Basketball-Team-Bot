@@ -209,6 +209,60 @@ def _norm_name(name: str) -> str:
     return " ".join((name or "").lower().replace("ё", "е").split())
 
 
+def _lev1(a: str, b: str) -> bool:
+    """Расстояние Левенштейна между a и b не больше 1 (ранний выход)."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:  # одна замена
+        return sum(1 for x, y in zip(a, b) if x != y) <= 1
+    if la > lb:  # ровно одна вставка/удаление
+        a, b, la, lb = b, a, lb, la
+    i = j = diff = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1; j += 1
+        else:
+            diff += 1; j += 1
+            if diff > 1:
+                return False
+    return True
+
+
+def _srcset(ref: str) -> set:
+    return {r.split(":", 1)[0] for r in ref.split("+")}
+
+
+def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Склеивает почти-одинаковые ФИО ИЗ РАЗНЫХ ЛИГ: та же фамилия, имя
+    отличается ≤1 буквы (напр. «Шлепикас Роман» ↔ «Шлепикас Ромас»). Разные
+    лиги — чтобы не слить двух разных людей внутри одной лиги. Фамилию требуем
+    точную; более сложные расхождения — вручную/через связку id в «Игроки»."""
+    result: List[Dict[str, Any]] = []
+    for e in merged:
+        eparts = _norm_name(e["name"]).split()
+        e_sur = eparts[0] if eparts else ""
+        e_first = eparts[1] if len(eparts) > 1 else ""
+        e_src = _srcset(e["ref"])
+        hit = None
+        for g in result:
+            gparts = _norm_name(g["name"]).split()
+            g_sur = gparts[0] if gparts else ""
+            g_first = gparts[1] if len(gparts) > 1 else ""
+            if e_sur and g_sur == e_sur and not (_srcset(g["ref"]) & e_src) and _lev1(e_first, g_first):
+                hit = g
+                break
+        if hit:
+            hit["ref"] = "+".join(sorted(set(hit["ref"].split("+")) | set(e["ref"].split("+"))))
+            if not hit["number"]:
+                hit["number"] = e["number"]
+        else:
+            result.append(dict(e))
+    return result
+
+
 def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     by_name: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
@@ -229,7 +283,7 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         e = by_name[key]
         merged.append({"ref": "+".join(sorted(e["refs"])), "number": e["number"],
                        "name": e["name"], "team": e["team"]})
-    return merged
+    return _consolidate_similar(merged)
 
 
 # ─────────────────────────── Хендлеры ────────────────────────────────────────
