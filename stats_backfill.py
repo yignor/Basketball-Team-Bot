@@ -33,7 +33,11 @@ DEFAULT_LIMIT = 200          # игр за один прогон
 IB_API = "https://reg.infobasket.su"
 
 # Соревнования Infobasket по сезонам: comp_id -> подпись.
-IB_COMPS: Dict[int, str] = {73582: "2023/24", 88649: "2024/25", 108009: "2025/26"}
+# Соревнования Infobasket команды. Источник правды — лист «Конфиг»
+# (get_config_ids), здесь лишь читабельные подписи и запасной вариант.
+# Старый хардкод [73582, 88649, 108009] был ОШИБОЧНЫМ — это чужие юношеские/
+# ветеранские лиги (73582 = «Юноши 2010»), не путать с нашей 140825.
+IB_COMPS: Dict[int, str] = {140825: "Летняя Лига · Группа 4 (2026)"}
 
 # Статус завершённой игры отличается у источников.
 SLPRO_FINISHED = 2
@@ -271,6 +275,30 @@ async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,
 
 
 # ─────────────────────────── Сводка ──────────────────────────────────────────
+
+def purge_source_season(source: str, season_id: str) -> Dict[str, int]:
+    """Удаляет из локальной копии все игры источника за конкретный season_id.
+    Нужно, чтобы вычистить ошибочно скачанную чужую лигу (напр. Infobasket
+    73582 = «Юноши 2010», затянутую старым хардкодом comp). game_stats_fetched
+    не имеет season_id — чистим по game_id."""
+    sheets_cache.init_db()
+    sid = str(season_id)
+    with sheets_cache.get_connection() as conn:
+        gids = {r[0] for r in conn.execute(
+            "SELECT game_id FROM game_player_stats WHERE source=? AND season_id=?", (source, sid))}
+        gids |= {r[0] for r in conn.execute(
+            "SELECT game_id FROM game_meta WHERE source=? AND season_id=?", (source, sid))}
+        n_stats = conn.execute(
+            "DELETE FROM game_player_stats WHERE source=? AND season_id=?", (source, sid)).rowcount
+        n_meta = conn.execute(
+            "DELETE FROM game_meta WHERE source=? AND season_id=?", (source, sid)).rowcount
+        n_fetched = 0
+        for gid in gids:
+            n_fetched += conn.execute(
+                "DELETE FROM game_stats_fetched WHERE source=? AND game_id=?", (source, gid)).rowcount
+        conn.commit()
+    return {"games": len(gids), "stats": n_stats, "meta": n_meta, "fetched": n_fetched}
+
 
 def forget_games_without_stage(source: str = "slpro") -> int:
     """Снимает отметку «скачано» с игр, у которых не заполнена стадия.

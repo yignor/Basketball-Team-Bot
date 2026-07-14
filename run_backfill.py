@@ -64,7 +64,20 @@ async def main() -> int:
     ap.add_argument("--summary", action="store_true", help="показать, что уже в локальной копии")
     ap.add_argument("--refetch-no-stage", action="store_true",
                     help="перекачать игры без стадии (остались от версии до stage_id)")
+    ap.add_argument("--purge", metavar="SOURCE:SEASON",
+                    help="удалить чужую лигу из копии, напр. infobasket:73582")
     args = ap.parse_args()
+
+    if args.purge:
+        try:
+            psrc, psid = args.purge.split(":", 1)
+        except ValueError:
+            print("формат: --purge source:season, напр. infobasket:73582")
+            return 2
+        res = stats_backfill.purge_source_season(psrc.strip(), psid.strip())
+        print(f"Удалено {psrc}:{psid} — игр {res['games']}, "
+              f"строк статистики {res['stats']}, матчей {res['meta']}, из реестра {res['fetched']}")
+        return 0
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
