@@ -88,6 +88,10 @@
 </head>
 <body>
   <header><h1 id="title">🏀 Фэнтези</h1><div class="sub" id="subtitle"></div></header>
+  <div class="bar hidden" id="leagueBar">
+    <label class="counter" for="league">Лига:</label>
+    <select id="league"></select>
+  </div>
   <div class="tabs">
     <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
@@ -145,6 +149,7 @@
   let live = false, rosterSize = 3, maxPer = 3, locked = false;
   let pool = [], counts = {}, standings = [], weekStart = '';
   let search = '', playedOnly = false, isAdmin = false;
+  let seasonId = null, seasons = [];
 
   const $ = id => document.getElementById(id);
   function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
@@ -168,6 +173,8 @@
   }
 
   async function api(path, opts, timeoutMs) {
+    // Выбранную лигу подмешиваем во ВСЕ вызовы — бэкенд считает по ней.
+    if (seasonId) path += (path.indexOf('?') >= 0 ? '&' : '?') + 'season=' + encodeURIComponent(seasonId);
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs || 15000);  // мобильная сеть бывает медленной
     try {
@@ -222,6 +229,9 @@
     ]);
     if (!p.season) { msg('Сейчас нет активного сезона фэнтези.'); return false; }
     if (!p.member) { msg('Фэнтези доступна только игрокам команды.'); return false; }
+    seasons = p.seasons || [];
+    if (!seasonId) seasonId = p.season.id;   // первый ответ фиксирует лигу
+    renderLeaguePicker();
     rosterSize = p.season.roster_size || 3;
     maxPer = p.season.max_per_player || rosterSize;
     isAdmin = !!p.admin;
@@ -503,6 +513,27 @@
     renderPool();
   }
   window.togglePlayed = togglePlayed;
+
+  function renderLeaguePicker() {
+    const bar = $('leagueBar'), sel = $('league');
+    if (!seasons || seasons.length < 2) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+    sel.innerHTML = seasons.map(s =>
+      `<option value="${s.id}"${s.id === seasonId ? ' selected' : ''}>${esc(s.name)} · ${esc(s.format)}</option>`
+    ).join('');
+    sel.onchange = e => switchSeason(parseInt(e.target.value, 10));
+  }
+
+  async function switchSeason(id) {
+    if (id === seasonId) return;
+    haptic('light');
+    seasonId = id;
+    counts = {};            // состав у каждой лиги свой
+    msg('Загрузка…');
+    try { if (!await fromApi()) return; } catch (e) { msg('Не удалось переключить лигу.'); return; }
+    msg('');
+    renderPool(); renderStandings(); syncButton();
+  }
 
   // ─── старт ─────────────────────────────────────────────────────────────────
 

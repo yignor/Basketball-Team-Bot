@@ -603,31 +603,39 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
 
 def _fantasy_menu_markup() -> InlineKeyboardMarkup:
     import fantasy
-    season = fantasy.get_active_season()
+    seasons = fantasy.active_seasons()
+    season = seasons[0] if seasons else None
     rows: List[List[InlineKeyboardButton]] = []
-    if not season:
-        rows.append([InlineKeyboardButton("▶️ Старт сезона", callback_data="admin:fantasy:start")])
-    else:
+    # «Старт» доступен всегда — можно вести несколько параллельных лиг.
+    rows.append([InlineKeyboardButton("▶️ Старт сезона (+лига)", callback_data="admin:fantasy:start")])
+    if season:
         fmt = season.get("format", "3x3")
         other = "5x5" if str(fmt).startswith("3") else "3x3"
         rows.append([InlineKeyboardButton(f"🔀 Формат: {fmt} → {other}", callback_data="admin:fantasy:format")])
         rows.append([InlineKeyboardButton("👥 Составы в пуле", callback_data="admin:fantasy:pool")])
         rows.append([InlineKeyboardButton("🎯 Турнир подсчёта", callback_data="admin:fantasy:scope")])
         rows.append([InlineKeyboardButton("📥 Пересчитать статистику", callback_data="admin:fantasy:ingest")])
-        rows.append([InlineKeyboardButton("🏁 Завершить сезон", callback_data="admin:fantasy:end")])
+        end_label = "🏁 Завершить лигу…" if len(seasons) > 1 else "🏁 Завершить сезон"
+        rows.append([InlineKeyboardButton(end_label, callback_data="admin:fantasy:end")])
     rows.append(_back_button())
     return InlineKeyboardMarkup(rows)
 
 
 def _fantasy_menu_text() -> str:
     import fantasy
-    season = fantasy.get_active_season()
-    if not season:
-        return "🏆 Фэнтези лига\n\nАктивного сезона нет."
-    return (f"🏆 Фэнтези лига\n\nСезон: «{season['name']}»\n"
-            f"Формат: {season.get('format', '3x3')}\n"
-            f"Турниры подсчёта: {fantasy.scopes_title(fantasy.season_scopes(season))}\n"
-            f"Старт: {season.get('started_at', '')[:10]}")
+    seasons = fantasy.active_seasons()
+    if not seasons:
+        return "🏆 Фэнтези лига\n\nАктивной лиги нет."
+    head = "🏆 Фэнтези лига\n"
+    if len(seasons) > 1:
+        head += f"\nАктивных лиг: {len(seasons)}\n"
+    lines = []
+    for s in seasons:
+        lines.append(f"• «{s['name']}» · {s.get('format', '3x3')} · "
+                     f"{fantasy.scopes_title(fantasy.season_scopes(s))}")
+    tail = ("\n\nКнопки формата/пула/турнира действуют на последнюю лигу."
+            if len(seasons) > 1 else "")
+    return head + "\n".join(lines) + tail
 
 
 async def _fantasy_scope_markup() -> InlineKeyboardMarkup:
@@ -929,8 +937,28 @@ def _check_already_run_today(data_types: List[str]) -> Optional[str]:
     return None
 
 
-async def _handle_fantasy_action(query, action: str) -> None:
+async def _handle_fantasy_action(query, action: str, arg: Optional[str] = None) -> None:
     import fantasy
+    if action == "end":
+        seasons = fantasy.active_seasons()
+        if arg is None and len(seasons) > 1:
+            # Несколько активных лиг — спрашиваем, какую закрыть.
+            rows = [[InlineKeyboardButton(f"🏁 {s['name']} ({s.get('format','')})",
+                                          callback_data=f"admin:fantasy:end:{s['id']}")]
+                    for s in seasons]
+            rows.append(_back_button("admin:menu:fantasy"))
+            await query.edit_message_text("Какую лигу завершить?", reply_markup=InlineKeyboardMarkup(rows))
+            return
+        result = fantasy.end_season(int(arg) if arg else None)
+        if not result:
+            await query.edit_message_text("Активной лиги нет.", reply_markup=_fantasy_menu_markup())
+            return
+        final = fantasy.format_season_final(result["season"]["id"])
+        await query.edit_message_text(
+            f"{final}\n\n(Показано только тебе. Разошли в чат вручную, если нужно.)",
+            reply_markup=_fantasy_menu_markup(),
+        )
+        return
     if action == "start":
         now = datetime.now()
         months = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -972,16 +1000,6 @@ async def _handle_fantasy_action(query, action: str) -> None:
         except Exception as e:
             summary = str(e)
         await query.edit_message_text(f"📥 Статистика фэнтези\n\n{summary}", reply_markup=_fantasy_menu_markup())
-    elif action == "end":
-        result = fantasy.end_season()
-        if not result:
-            await query.edit_message_text("Активного сезона нет.", reply_markup=_fantasy_menu_markup())
-            return
-        final = fantasy.format_season_final(result["season"]["id"])
-        await query.edit_message_text(
-            f"{final}\n\n(Показано только тебе. Разошли в чат вручную, если нужно.)",
-            reply_markup=_fantasy_menu_markup(),
-        )
     else:
         await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
 
@@ -1101,7 +1119,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
 
         elif parts[1] == "fantasy":
-            await _handle_fantasy_action(query, parts[2] if len(parts) > 2 else "")
+            await _handle_fantasy_action(query, parts[2] if len(parts) > 2 else "",
+                                         parts[3] if len(parts) > 3 else None)
 
         elif parts[1] == "fscope":
             await _handle_fantasy_scope(query, parts)

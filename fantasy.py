@@ -76,6 +76,16 @@ def get_active_season() -> Optional[Dict[str, Any]]:
     return seasons[0] if seasons else None
 
 
+def get_active_by_id(season_id: Any) -> Optional[Dict[str, Any]]:
+    """Активный сезон по id (для выбора лиги в Mini App). None, если такого
+    активного сезона нет — тогда вызывающий откатывается на последний активный."""
+    try:
+        sid = int(season_id)
+    except (TypeError, ValueError):
+        return None
+    return next((s for s in active_seasons() if s["id"] == sid), None)
+
+
 def start_season(name: str, fmt: str = "3x3",
                  weights: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     """Создаёт активный сезон. Несколько активных допускаются (параллельные

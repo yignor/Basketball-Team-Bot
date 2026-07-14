@@ -265,6 +265,17 @@ def _auth_user(request: web.Request) -> Optional[Dict[str, Any]]:
     return user
 
 
+def _season(request: web.Request) -> Optional[Dict[str, Any]]:
+    """Сезон запроса. Mini App передаёт ?season=<id> (выбранная лига); без него
+    или если лига уже закрыта — последний активный."""
+    sid = request.query.get("season")
+    if sid:
+        s = fantasy.get_active_by_id(sid)
+        if s:
+            return s
+    return fantasy.get_active_season()
+
+
 def _is_admin(user: Optional[Dict[str, Any]]) -> bool:
     """Админ Mini App — тот же список, что у бота (ADMIN_USER_IDS в .env).
     Подпись initData уже проверена, id подделать нельзя."""
@@ -300,12 +311,16 @@ async def handle_pool(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    season = fantasy.get_active_season()
+    season = _season(request)
     pool = _pool_with_stats(await build_pool(), season)
+    # Список активных лиг — для переключателя в Mini App (когда их несколько).
+    seasons = [{"id": s["id"], "name": s["name"], "format": s["format"]}
+               for s in fantasy.active_seasons()]
     return web.json_response({
         "season": season and {"id": season["id"], "name": season["name"], "format": season["format"],
                               "roster_size": fantasy.roster_size(season),
                               "max_per_player": fantasy.max_per_player(season)},
+        "seasons": seasons,
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
         "admin": _is_admin(user),
@@ -327,7 +342,9 @@ async def handle_exclude(request: web.Request) -> web.Response:
     entry = next((p for p in await build_pool() if p["ref"] == ref), None)
     if not entry:
         return web.json_response({"error": "unknown_player"}, status=404)
-    now_excluded, _ = fantasy.toggle_pool_exclude_name(entry["name"])
+    season = _season(request)
+    now_excluded, _ = fantasy.toggle_pool_exclude_name(entry["name"],
+                                                       season["id"] if season else None)
     return web.json_response({"ok": True, "ref": ref, "excluded": now_excluded})
 
 
@@ -335,7 +352,7 @@ async def handle_get_roster(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    season = fantasy.get_active_season()
+    season = _season(request)
     if not season:
         return web.json_response({"roster": None, "week_start": None})
     week_start, locked = fantasy.active_selection(season)
@@ -355,7 +372,7 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     uid = str(user["id"])
     if not _is_team_member(uid, user.get("username", "")):
         return web.json_response({"error": "not_a_member"}, status=403)
-    season = fantasy.get_active_season()
+    season = _season(request)
     if not season:
         return web.json_response({"error": "no_active_season"}, status=400)
 
@@ -430,7 +447,7 @@ async def handle_player(request: web.Request) -> web.Response:
     if not entry:
         return web.json_response({"error": "unknown_player"}, status=404)
 
-    season = fantasy.get_active_season()
+    season = _season(request)
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
     scopes = fantasy.effective_scopes(season) if season else []
     profile = fantasy_stats.player_profile(ref, scopes, weights)
@@ -451,7 +468,7 @@ async def handle_standings(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    season = fantasy.get_active_season()
+    season = _season(request)
     if not season:
         return web.json_response({"standings": []})
     week_start = fantasy.week_start_of(date.today()).isoformat()
