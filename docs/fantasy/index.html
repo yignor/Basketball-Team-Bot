@@ -78,7 +78,8 @@
       font-weight: 600; font-family: inherit; cursor: pointer; }
     #saveBtn:disabled { opacity: .6; cursor: default; }
     .hidden { display: none; }
-    #msg { text-align: center; color: var(--hint); padding: 40px 16px; }
+    /* pre-line — чтобы в сообщениях работали переносы строк. */
+    #msg { text-align: center; color: var(--hint); padding: 40px 16px; white-space: pre-line; }
     .info { cursor: pointer; }
     .chev { color: var(--hint); font-size: 12px; margin-left: 4px; }
     /* Экран игрока */
@@ -174,6 +175,28 @@
 
   const $ = id => document.getElementById(id);
   function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
+
+  // Тупиковый экран: кроме сообщения показывать нечего. Вкладки и фильтры
+  // прячем — рабочий вид приложения над текстом ошибки только сбивает с толку.
+  function deadEnd(text) {
+    for (const el of [$('leagueBar'), document.querySelector('.tabs'),
+                      $('draft'), $('table'), $('saveBar')]) {
+      if (el) el.classList.add('hidden');
+    }
+    msg(text);
+  }
+
+  // Отказ в доступе объясняем с ником, который видит бот: причина почти всегда
+  // в том, что он не совпадает с ником в таблице команды, и увидеть свой ник
+  // прямо в сообщении быстрее, чем выяснять это перепиской с админом.
+  function deniedText() {
+    let u = '';
+    try { u = tg.initDataUnsafe.user.username || ''; } catch (e) {}
+    return '🚫 У тебя нет доступа к фэнтези.\n\n' +
+      'Она открыта только игрокам команды из состава.\n\n' +
+      (u ? `Бот видит тебя как @${u}.\n\n` : '') +
+      'Если ты в составе — попроси администратора сверить твой ник в таблице команды.';
+  }
   function haptic(t){ try{ tg.HapticFeedback.impactOccurred(t); }catch(e){} }
   function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   const total = () => Object.values(counts).reduce((a,b)=>a+b, 0);
@@ -385,7 +408,7 @@
     unknown_player: 'В составе есть игрок не из пула.',
     too_many_copies: 'Слишком много копий одного игрока.',
     locked: 'Состав уже заблокирован до конца недели.',
-    not_a_member: 'Фэнтези доступна только игрокам команды.',
+    not_a_member: 'У тебя нет доступа к фэнтези — она только для игроков команды.',
   };
 
   async function saveRoster() {
@@ -594,10 +617,10 @@
         live = false;  // не достучались — запасной режим
         // Сервер прямо отказал: откат не поможет, объясняем по-человечески.
         if (e.data && e.data.error === 'not_a_member') {
-          msg('Фэнтези доступна только игрокам команды.'); return;
+          deadEnd(deniedText()); return;
         }
         if (e.data && e.data.error === 'unauthorized') {
-          msg('Не удалось подтвердить вход. Открой фэнтези через бота.'); return;
+          deadEnd('Не удалось подтвердить вход. Открой фэнтези через бота.'); return;
         }
         if (e.data) {
           why = 'сервер ответил: ' + (e.data.error || e.message);
@@ -611,11 +634,11 @@
     }
     if (!live) {
       const D = readHashData();
-      if (!D) { msg('Фэнтези сейчас недоступна (' + why + '). Попробуй позже.'); return; }
-      if (!D.season) { msg('Сейчас нет активного сезона фэнтези.'); return; }
+      if (!D) { deadEnd('Фэнтези сейчас недоступна (' + why + '). Попробуй позже.'); return; }
+      if (!D.season) { deadEnd('Сейчас нет активного сезона фэнтези.'); return; }
       fromHash(D);
     }
-    if (!pool.length) { msg('Пул игроков пуст — попробуй позже.'); return; }
+    if (!pool.length) { deadEnd('Пул игроков пуст — попробуй позже.'); return; }
     $('lockBanner').classList.toggle('hidden', !locked);
     msg('');
     $('sort').onchange = renderPool;
