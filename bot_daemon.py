@@ -420,7 +420,9 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_fantasy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/fantasy — открыть Mini App фэнтези (кнопка web_app). Доступно всем."""
+    """/fantasy — открыть Mini App фэнтези (кнопка web_app). ТОЛЬКО игрокам
+    команды (лист «Игроки») и админам: в payload уходят ФИО пула и имена
+    участников, посторонним их видеть нельзя."""
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat or chat.type != "private":
@@ -429,6 +431,10 @@ async def handle_fantasy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
     except Exception:
         pass
+    import fantasy_api
+    if not (fantasy_api._is_team_member(str(user.id), user.username or "") or _is_admin(user)):
+        await update.message.reply_text("Фэнтези доступна только игрокам команды.")
+        return
     import fantasy
     season = fantasy.get_active_season()
     if not season:

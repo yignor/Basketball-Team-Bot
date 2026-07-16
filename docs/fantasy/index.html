@@ -569,6 +569,13 @@
         live = true;
       } catch (e) {
         live = false;  // не достучались — запасной режим
+        // Сервер прямо отказал: откат не поможет, объясняем по-человечески.
+        if (e.data && e.data.error === 'not_a_member') {
+          msg('Фэнтези доступна только игрокам команды.'); return;
+        }
+        if (e.data && e.data.error === 'unauthorized') {
+          msg('Не удалось подтвердить вход. Открой фэнтези через бота.'); return;
+        }
         if (e.data) {
           why = 'сервер ответил: ' + (e.data.error || e.message);
         } else {

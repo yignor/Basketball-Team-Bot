@@ -330,6 +330,17 @@ def _season(request: web.Request) -> Optional[Dict[str, Any]]:
     return fantasy.get_active_season()
 
 
+def _can_view(user: Optional[Dict[str, Any]]) -> bool:
+    """Кто вправе ЧИТАТЬ фэнтези: игрок команды (лист «Игроки») или админ.
+    Подпись initData сама по себе не пропуск — её получит любой, кто открыл
+    бота. А в пуле/таблице видны ФИО, поэтому посторонним доступа нет
+    (см. юр-инвариант: ФИО показываем только своим)."""
+    if not user:
+        return False
+    return (_is_team_member(str(user.get("id")), user.get("username", ""))
+            or _is_admin(user))
+
+
 def _is_admin(user: Optional[Dict[str, Any]]) -> bool:
     """Админ Mini App — тот же список, что у бота (ADMIN_USER_IDS в .env).
     Подпись initData уже проверена, id подделать нельзя."""
@@ -365,6 +376,8 @@ async def handle_pool(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
     pool = _pool_with_stats(await build_pool(), season)
     # Список активных лиг — для переключателя в Mini App (когда их несколько).
@@ -406,6 +419,8 @@ async def handle_get_roster(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
     if not season:
         return web.json_response({"roster": None, "week_start": None})
@@ -495,6 +510,8 @@ async def handle_player(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
     ref = request.query.get("ref", "")
     pool = await build_pool()
     entry = next((p for p in pool if p["ref"] == ref), None)
@@ -522,6 +539,8 @@ async def handle_standings(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
     if not season:
         return web.json_response({"standings": []})
