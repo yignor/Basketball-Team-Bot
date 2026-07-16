@@ -15,8 +15,12 @@
       --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    /* Снизу оставляем место под нативную кнопку Telegram («Сохранить состав»,
+       ~64px) и под «безопасную зону» айфона (полоска home indicator). Иначе
+       кнопка налезает на последние карточки и обрезает их. */
     body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg); color: var(--text); font-size: 16px; padding-bottom: 40px; }
+      background: var(--bg); color: var(--text); font-size: 16px;
+      padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
     header { padding: 14px 16px 6px; }
     h1 { font-size: 18px; margin: 0 0 2px; }
     .sub { color: var(--hint); font-size: 13px; }
@@ -67,8 +71,10 @@
     .info { cursor: pointer; }
     .chev { color: var(--hint); font-size: 12px; margin-left: 4px; }
     /* Экран игрока */
+    /* Экран игрока перекрывает всё (inset: 0), поэтому свою «безопасную зону»
+       снизу закладывает сам — иначе журнал игр уползает под home indicator. */
     #player { position: fixed; inset: 0; background: var(--bg); overflow-y: auto;
-      padding-bottom: 30px; z-index: 10; }
+      padding-bottom: calc(30px + env(safe-area-inset-bottom, 0px)); z-index: 10; }
     .phead { display: flex; align-items: center; gap: 10px; padding: 14px 16px 4px; }
     .back { background: none; border: none; color: var(--button); font-size: 16px;
       cursor: pointer; padding: 4px 0; }
