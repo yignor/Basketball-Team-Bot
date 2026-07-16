@@ -15,15 +15,23 @@
 """
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = Path(__file__).parent / "data" / "bot.db"
 
 PLAYERS_SHEET_NAME = "Игроки"
+# Столбец, куда бот сам вписывает числовой Telegram id при первом входе игрока.
+# Колонка «Telegram ID» исторически заполнена @никами, а ник в TG меняется и
+# переуступается — доступ держим на числовом id, а этот столбец ещё и наглядно
+# показывает, кто уже подключился.
+PLAYERS_TG_ID_HEADER = "Числовой TG ID"
 ATTEND_SHEET_NAME = "Посещаемость"
 SERVICE_SHEET_NAME = "Сервисный"
 BOT_USERS_SHEET_NAME = "Пользователи бота"
@@ -47,6 +55,7 @@ CREATE TABLE IF NOT EXISTS players (
     name          TEXT NOT NULL DEFAULT '',
     nickname      TEXT NOT NULL DEFAULT '',
     telegram_id   TEXT NOT NULL DEFAULT '',
+    tg_user_id    TEXT NOT NULL DEFAULT '',   -- числовой TG id из листа (наглядность)
     birthday      TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT '',
     team          TEXT NOT NULL DEFAULT '',
@@ -54,6 +63,18 @@ CREATE TABLE IF NOT EXISTS players (
     notes         TEXT NOT NULL DEFAULT '',
     synced_at     TEXT NOT NULL
 );
+
+-- Привязка «строка листа Игроки ↔ числовой Telegram id», закреплённая при
+-- первом входе. Ник в Telegram меняется и переуступается, числовой id — нет,
+-- поэтому доступ держим на нём. Таблица НЕ подчищается sync_players (он
+-- перезаливает players целиком из листа), иначе привязка терялась бы.
+CREATE TABLE IF NOT EXISTS player_links (
+    tg_user_id  TEXT PRIMARY KEY,
+    username    TEXT NOT NULL DEFAULT '',
+    player_row  INTEGER NOT NULL,
+    linked_at   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_player_links_row ON player_links(player_row);
 CREATE INDEX IF NOT EXISTS idx_players_telegram_id ON players(telegram_id);
 
 CREATE TABLE IF NOT EXISTS attendance (
@@ -379,6 +400,7 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "attendance", "dirty", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "fantasy_seasons", "settings_json", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "players", "tg_user_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_player_stats", "stage_id", "TEXT NOT NULL", "''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_gps_scope "
                      "ON game_player_stats(source, season_id, stage_id)")
@@ -433,6 +455,7 @@ def sync_players(spreadsheet) -> None:
                     str(r.get("Имя", "")),
                     str(r.get("Ник", "")),
                     str(r.get("Telegram ID", "")),
+                    str(r.get(PLAYERS_TG_ID_HEADER, "")),
                     str(r.get("Дата рождения", "")),
                     str(r.get("Статус", "")),
                     str(r.get("Команда", "")),
@@ -445,8 +468,8 @@ def sync_players(spreadsheet) -> None:
             conn.executemany(
                 """
                 INSERT INTO players
-                (row_index, surname, name, nickname, telegram_id, birthday, status, team, added_date, notes, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -456,6 +479,62 @@ def sync_players(spreadsheet) -> None:
             conn.rollback()
             _mark_sync_result(conn, "players", 0, str(e))
             raise
+
+
+# ───────────── Привязка игрока к числовому Telegram id ──────────────────────
+
+def get_player_link(tg_user_id: str) -> Optional[Dict[str, Any]]:
+    """Закреплённая привязка по числовому id (или None)."""
+    init_db()
+    with _connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM player_links WHERE tg_user_id = ?", (str(tg_user_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def is_row_linked(player_row: int) -> bool:
+    """Занята ли строка листа кем-то (защита от захвата освободившегося ника)."""
+    init_db()
+    with _connection() as conn:
+        return conn.execute(
+            "SELECT 1 FROM player_links WHERE player_row = ?", (int(player_row),)).fetchone() is not None
+
+
+def link_player(tg_user_id: str, username: str, player_row: int) -> bool:
+    """Закрепляет строку листа за числовым id. Идемпотентно; если строка уже
+    за кем-то другим или id уже привязан к другой строке — отказ."""
+    init_db()
+    with _connection() as conn:
+        try:
+            conn.execute(
+                """INSERT INTO player_links (tg_user_id, username, player_row, linked_at)
+                   VALUES (?, ?, ?, ?)""",
+                (str(tg_user_id), (username or "").lstrip("@"), int(player_row), _now_iso()))
+            conn.execute("UPDATE players SET tg_user_id = ? WHERE row_index = ?",
+                         (str(tg_user_id), int(player_row)))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return False
+
+
+def write_player_tg_id(spreadsheet, player_row: int, tg_user_id: str) -> bool:
+    """Вписывает числовой id в лист «Игроки» — чтобы было видно, кто подключился.
+    Best-effort: доступ держится на локальной player_links, поэтому сбой записи
+    в Sheets не должен ломать вход."""
+    try:
+        ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
+        header = ws.row_values(1)
+        if PLAYERS_TG_ID_HEADER not in header:
+            header.append(PLAYERS_TG_ID_HEADER)
+            ws.update_cell(1, len(header), PLAYERS_TG_ID_HEADER)
+        col = header.index(PLAYERS_TG_ID_HEADER) + 1
+        ws.update_cell(int(player_row), col, str(tg_user_id))
+        return True
+    except Exception as e:
+        logger.warning(f"Не удалось записать числовой TG id в лист: {e}")
+        return False
 
 
 def sync_attendance(spreadsheet) -> None:

@@ -98,21 +98,58 @@ def verify_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400) -
 
 
 def _is_team_member(telegram_id: Any, username: str = "") -> bool:
-    """v1: участвуют только игроки команды (есть в листе «Игроки»).
+    """Участвуют только игроки команды (лист «Игроки»).
 
-    В листе колонка «Telegram ID» исторически заполнена @юзернеймами, а не
-    числовыми id — поэтому сверяем и с тем, и с другим."""
+    Доступ держим на ЧИСЛОВОМ Telegram id: он вечный и не переуступается.
+    Ник — только для первого знакомства: в листе колонка «Telegram ID»
+    исторически заполнена @никами, поэтому при первом входе находим строку по
+    нику и закрепляем за ней числовой id (см. sheets_cache.player_links).
+
+    Дальше ник уже не нужен: сменил @ — доступ остался; освободил @ и его занял
+    посторонний — тот НЕ пройдёт, строка занята. Окно доверия к нику сужается
+    до одного первого входа настоящего игрока."""
     sheets_cache.init_db()
+    uid = str(telegram_id)
+
+    # 1. Уже привязан — пускаем по числовому id.
+    if sheets_cache.get_player_link(uid):
+        return True
+
+    # 2. Числовой id проставлен в самом листе (админ вписал руками).
     uname = (username or "").lstrip("@").lower()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
-            """SELECT 1 FROM players
-               WHERE telegram_id = ?
-                  OR (? != '' AND lower(ltrim(telegram_id, '@')) = ?)
-               LIMIT 1""",
-            (str(telegram_id), uname, uname),
-        ).fetchone()
-    return row is not None
+            "SELECT row_index FROM players WHERE tg_user_id = ? LIMIT 1", (uid,)).fetchone()
+        if row:
+            sheets_cache.link_player(uid, uname, row["row_index"])
+            return True
+        # 3. Первое знакомство: ищем строку по нику — но только СВОБОДНУЮ.
+        if not uname:
+            return False
+        cand = conn.execute(
+            """SELECT row_index FROM players
+               WHERE lower(ltrim(telegram_id, '@')) = ? LIMIT 1""", (uname,)).fetchone()
+    if not cand:
+        return False
+    if sheets_cache.is_row_linked(cand["row_index"]):
+        log.warning(f"фэнтези: ник @{uname} совпал со строкой {cand['row_index']}, "
+                    f"но она уже закреплена за другим id — отказ")
+        return False
+    if not sheets_cache.link_player(uid, uname, cand["row_index"]):
+        return False
+    log.info(f"фэнтези: @{uname} закреплён за строкой {cand['row_index']} (id {uid})")
+    _push_tg_id_to_sheet(cand["row_index"], uid)
+    return True
+
+
+def _push_tg_id_to_sheet(player_row: int, tg_user_id: str) -> None:
+    """Best-effort: показать числовой id в листе. Доступ живёт в локальной
+    player_links, поэтому недоступность Sheets вход не ломает."""
+    try:
+        from collect_votes import _init_sheets
+        sheets_cache.write_player_tg_id(_init_sheets(), player_row, tg_user_id)
+    except Exception as e:
+        log.warning(f"фэнтези: числовой id не записан в лист: {e}")
 
 
 # ─────────────────────────── Пул драфта ──────────────────────────────────────
