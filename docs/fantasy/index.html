@@ -15,12 +15,12 @@
       --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-    /* Снизу оставляем место под нативную кнопку Telegram («Сохранить состав»,
-       ~64px) и под «безопасную зону» айфона (полоска home indicator). Иначе
-       кнопка налезает на последние карточки и обрезает их. */
+    /* Снизу оставляем место под плашку сохранения (#saveBar) и под «безопасную
+       зону» айфона (полоска home indicator). Иначе плашка налезает на
+       последние карточки и обрезает их. */
     body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
       background: var(--bg); color: var(--text); font-size: 16px;
-      padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+      padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px)); }
     header { padding: 14px 16px 6px; }
     h1 { font-size: 18px; margin: 0 0 2px; }
     .sub { color: var(--hint); font-size: 13px; }
@@ -66,6 +66,17 @@
       background: var(--secondary-bg); border-radius: 12px; margin: 8px 0; }
     .place { min-width: 30px; font-weight: 700; color: var(--hint); }
     .pts { font-weight: 700; }
+    /* Кнопку сохранения рисуем сами, а не нативной MainButton телеграма: та
+       живёт в оболочке клиента и на айфоне уезжает за нижний край экрана.
+       Своя плашка — часть страницы, её видно всегда. Отступ снизу учитывает
+       «безопасную зону» (полоска home indicator). */
+    #saveBar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+      padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+      background: var(--bg); border-top: 1px solid var(--secondary-bg); }
+    #saveBtn { width: 100%; padding: 14px; border: none; border-radius: 12px;
+      background: var(--button); color: var(--button-text); font-size: 16px;
+      font-weight: 600; font-family: inherit; cursor: pointer; }
+    #saveBtn:disabled { opacity: .6; cursor: default; }
     .hidden { display: none; }
     #msg { text-align: center; color: var(--hint); padding: 40px 16px; }
     .info { cursor: pointer; }
@@ -140,6 +151,10 @@
       <button class="tab" id="ptab-season" onclick="showSlice('season')">Весь турнир</button>
     </div>
     <div id="pBody"></div>
+  </div>
+
+  <div id="saveBar" class="hidden">
+    <button id="saveBtn" onclick="saveRoster()">Сохранить состав</button>
   </div>
 
   <div id="msg">Загрузка…</div>
@@ -350,11 +365,12 @@
     $('counter').textContent = `Выбрано: ${total()} / ${rosterSize}${hint}`;
   }
 
+  // Плашку показываем только на вкладке состава и только когда набран полный
+  // ростер — на «Таблице» и на экране игрока сохранять нечего.
   function syncButton() {
-    if (!tg || !tg.MainButton) return;
-    if (locked || total() !== rosterSize) { tg.MainButton.hide(); return; }
-    tg.MainButton.setText('Сохранить состав');
-    tg.MainButton.show(); tg.MainButton.enable();
+    const onDraft = !$('draft').classList.contains('hidden');
+    const ready = onDraft && !locked && total() === rosterSize;
+    $('saveBar').classList.toggle('hidden', !ready);
   }
 
   // Состав как плоский список с повторами — порядок пула, чтобы был стабилен.
@@ -376,19 +392,20 @@
     haptic('heavy');
     const refs = selectedRefs();
     if (!live) { tg.sendData(JSON.stringify({ refs })); return; }  // Telegram сам закроет
-    tg.MainButton.showProgress();
+    const btn = $('saveBtn');
+    btn.disabled = true; btn.textContent = 'Сохраняю…';
     try {
       await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs }) });
-      tg.MainButton.hideProgress();
       tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
                                    buttons:[{type:'close'}]}, () => tg.close())
                    : tg.close();
     } catch (e) {
-      tg.MainButton.hideProgress();
+      btn.disabled = false; btn.textContent = 'Сохранить состав';
       const text = (e.data && SAVE_ERRORS[e.data.error]) || 'Не удалось сохранить. Попробуй ещё раз.';
       tg.showAlert ? tg.showAlert(text) : alert(text);
     }
   }
+  window.saveRoster = saveRoster;
 
   // ─── экран игрока ──────────────────────────────────────────────────────────
 
@@ -401,7 +418,7 @@
     $('pTitle').textContent = 'Загрузка…';
     $('pSub').textContent = '';
     $('pBody').innerHTML = '';
-    if (tg && tg.MainButton) tg.MainButton.hide();
+    $('saveBar').classList.add('hidden');
     if (tg && tg.BackButton) { tg.BackButton.show(); tg.BackButton.onClick(closePlayer); }
     try {
       P = await api('/fantasy/player?ref=' + encodeURIComponent(ref));
@@ -520,7 +537,7 @@
     $('table').classList.toggle('hidden', name !== 'table');
     $('tab-draft').classList.toggle('active', name === 'draft');
     $('tab-table').classList.toggle('active', name === 'table');
-    if (name === 'draft') syncButton(); else if (tg && tg.MainButton) tg.MainButton.hide();
+    syncButton();
   }
   window.showTab = showTab;
 
@@ -604,7 +621,6 @@
     $('sort').onchange = renderPool;
     $('search').oninput = e => { search = (e.target.value || '').trim().toLowerCase(); renderPool(); };
     renderPool(); renderStandings();
-    if (tg && tg.MainButton) tg.MainButton.onClick(saveRoster);
     syncButton();
   }
   init();
