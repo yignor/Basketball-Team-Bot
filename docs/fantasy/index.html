@@ -588,7 +588,7 @@
     }
     if (!live) {
       const D = readHashData();
-      if (!D) { msg('Живой режим недоступен (' + why + '). Открой фэнтези командой /fantasy.'); return; }
+      if (!D) { msg('Фэнтези сейчас недоступна (' + why + '). Попробуй позже.'); return; }
       if (!D.season) { msg('Сейчас нет активного сезона фэнтези.'); return; }
       fromHash(D);
     }

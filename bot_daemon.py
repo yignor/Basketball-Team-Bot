@@ -54,56 +54,6 @@ DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.l
 FANTASY_WEBAPP_URL = os.getenv("FANTASY_WEBAPP_URL", "").strip()
 
 
-async def _fantasy_payload(user_id: str) -> Optional[str]:
-    """base64url(JSON) с сезоном/пулом/составом пользователя/таблицей — кладём
-    в URL Mini App. None, если нет активного сезона."""
-    import base64
-    from datetime import date
-    import fantasy
-    import fantasy_api
-    import fantasy_stats
-    season = fantasy.get_active_season()
-    if not season:
-        return None
-    pool = await fantasy_api.build_pool()
-    _scopes = fantasy.effective_scopes(season)
-    agg = fantasy_stats.player_aggregates(fantasy.season_weights(season), scope=_scopes)
-    last = fantasy_stats.player_last_fp(fantasy.season_weights(season), scope=_scopes)
-    week_start, sched_locked = fantasy.active_selection(season)
-    r = fantasy.get_roster(user_id, season["id"], week_start)
-    # Таблица — суммарные очки за всю лигу (+история по турам для тапа).
-    table = fantasy.season_standings_live(season["id"])
-    names = fantasy.display_names([row["user_id"] for row in table])
-    standings = [{"name": names.get(str(row["user_id"]), "Участник"),
-                  "points": row["points"], "history": row.get("history", [])} for row in table]
-    def _short_stats(ref: str) -> Dict[str, Any]:
-        keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
-                for lr in fantasy_stats.expand_refs([ref])]
-        a = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], fantasy.season_weights(season))
-        if not a:
-            return {}
-        lasts = [last[k] for k in keys if last.get(k)]
-        lg = max(lasts, key=lambda x: x.get("date", ""), default={})
-        return {"g": a["games"], "p": a["pts"], "rb": a["reb"], "a": a["ast"],
-                "s": a["stl"], "b": a["blk"], "t": a["tur"], "f": a["fp"],
-                "lf": lg.get("fp"), "ld": lg.get("date")}
-
-    data = {
-        "season": {"name": season["name"], "format": season["format"],
-                   "roster_size": fantasy.roster_size(season),
-                   "max_per_player": fantasy.max_per_player(season)},
-        # компактно: номер (пустой у SLPRO-ростера) и команда (одна) опускаем,
-        # чтобы URL Mini App не разрастался
-        "pool": [{"r": p["ref"], "m": p["name"], "s": _short_stats(p["ref"])} for p in pool],
-        "roster": r["refs"] if r else [],
-        "locked": sched_locked or (bool(r["locked"]) if r else False),
-        "week_start": week_start,
-        "standings": standings,
-    }
-    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
 _WEBAPP_VERSION = str(int(time.time()))
 
 
@@ -132,21 +82,6 @@ async def _setup_menu_button(app) -> None:
             log.info("Кнопка меню: список команд (живой API выключен)")
     except Exception as e:
         log.warning(f"Не удалось настроить кнопку меню: {e}")
-
-
-async def _fantasy_webapp_markup(user_id: str) -> Optional[ReplyKeyboardMarkup]:
-    """Reply-кнопка «Открыть фэнтези» (web_app + данные в URL). None, если
-    Mini App не настроен (нет FANTASY_WEBAPP_URL) или нет активного сезона."""
-    if not FANTASY_WEBAPP_URL:
-        return None
-    payload = await _fantasy_payload(user_id)
-    if payload is None:
-        return None
-    url = f"{_webapp_url()}#d={payload}"
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("🏆 Открыть фэнтези", web_app=WebAppInfo(url=url))]],
-        resize_keyboard=True,
-    )
 
 
 def _scrub_token_from_old_log() -> None:
@@ -417,55 +352,6 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _refresh_db_cache()
     _periodic_push_local_changes()
     await _send_main_menu(update, with_keyboard=True)
-
-
-async def handle_fantasy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/fantasy — открыть Mini App фэнтези (кнопка web_app). ТОЛЬКО игрокам
-    команды (лист «Игроки») и админам: в payload уходят ФИО пула и имена
-    участников, посторонним их видеть нельзя."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or chat.type != "private":
-        return
-    try:
-        sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
-    except Exception:
-        pass
-    import fantasy_api
-    if not (fantasy_api._is_team_member(str(user.id), user.username or "") or _is_admin(user)):
-        await update.message.reply_text("Фэнтези доступна только игрокам команды.")
-        return
-    import fantasy
-    season = fantasy.get_active_season()
-    if not season:
-        await update.message.reply_text("🏆 Сейчас нет активного сезона фэнтези. Загляни позже!")
-        return
-    if not FANTASY_WEBAPP_URL:
-        await update.message.reply_text("🏆 Фэнтези скоро откроется — приложение ещё настраивается.")
-        return
-    try:
-        markup = await _fantasy_webapp_markup(str(user.id))
-    except Exception as e:
-        log.warning(f"Не удалось собрать кнопку фэнтези: {e}")
-        markup = None
-    if not markup:
-        await update.message.reply_text("🏆 Не удалось открыть фэнтези, попробуй позже.")
-        return
-    await update.message.reply_text(
-        f"🏆 Фэнтези «{season['name']}» ({season['format']})\nНажми кнопку ниже, чтобы набрать состав:",
-        reply_markup=markup,
-    )
-
-
-def _fantasy_notify_markup(prefs: Dict[str, bool]) -> InlineKeyboardMarkup:
-    def row(kind: str, label: str) -> List[InlineKeyboardButton]:
-        on = prefs.get(kind, True)
-        mark = "🔔 вкл" if on else "🔕 выкл"
-        return [InlineKeyboardButton(f"{label}: {mark}", callback_data=f"fnotify:{kind}:{0 if on else 1}")]
-    return InlineKeyboardMarkup([
-        row("open", "Открытие набора"),
-        row("lock", "Закрытие набора"),
-    ])
 
 
 async def handle_fantasy_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1264,7 +1150,6 @@ async def on_startup(app: Application) -> None:
         await app.bot.set_my_commands([
             BotCommand("admin", "Админ-панель"),
             BotCommand("start", "Показать кнопку админ-панели"),
-            BotCommand("fantasy", "Открыть фэнтези"),
             BotCommand("fantasy_notify", "Уведомления фэнтези вкл/выкл"),
         ])
     except Exception as e:
@@ -1334,7 +1219,6 @@ def main() -> None:
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("admin", handle_admin))
-    app.add_handler(CommandHandler("fantasy", handle_fantasy))
     app.add_handler(CommandHandler("fantasy_notify", handle_fantasy_notify))
     app.add_handler(CallbackQueryHandler(handle_fantasy_notify_callback, pattern=r"^fnotify:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))

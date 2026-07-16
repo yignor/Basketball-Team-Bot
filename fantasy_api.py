@@ -147,6 +147,22 @@ async def derive_pool_teams() -> List[Dict[str, Any]]:
     return teams
 
 
+def _protocol_players(source: str, team_id: Any) -> List[Dict[str, Any]]:
+    """Кто РЕАЛЬНО играл за команду — из наших протоколов (локальная база).
+    Заявка бывает неполной: игрок мог сыграть и уже выбыть из списка. ФИО не
+    храним, поэтому отдаём только id + номер; имя подставит заявка, если он
+    там есть."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT player_id, number, MAX(game_date) last_game, COUNT(*) games
+               FROM game_player_stats WHERE source = ? AND team_id = ?
+               GROUP BY player_id ORDER BY last_game DESC""",
+            (source, str(team_id))).fetchall()
+    return [{"pid": r["player_id"], "number": r["number"] or "",
+             "games": r["games"], "last_game": r["last_game"]} for r in rows]
+
+
 async def _resolve_pool_teams() -> List[Dict[str, Any]]:
     """Команды пула: явный выбор админа (fantasy.pool_teams) или дефолт —
     все кандидаты из настроек поиска игр."""
@@ -184,17 +200,32 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
                            for p in roster if p.get("active", True)]
         except Exception as e:
             log.warning(f"пул: ростер {src}:{tid} — {e}")
-            continue
+            players = []          # заявка недоступна — опираемся на протоколы
+        src_db = "slpro" if src == "slpro" else "infobasket"
         pref = "slpro" if src == "slpro" else "ib"
-        for p in players:
-            if p["pid"] is None:
+        by_pid = {str(p["pid"]): p for p in players if p.get("pid") is not None}
+
+        # Пул = заявка ∪ протоколы. Заявка даёт ФИО и новичков, ещё не игравших;
+        # протоколы — тех, кто реально играл, но из заявки уже выпал.
+        for pp in _protocol_players(src_db, tid):
+            pid = str(pp["pid"])
+            if pid in by_pid:
+                if not by_pid[pid].get("number"):
+                    by_pid[pid]["number"] = pp["number"]   # номер из протокола
                 continue
+            by_pid[pid] = {"pid": pid, "number": pp["number"],
+                           # ФИО не храним — для выбывших из заявки имени нет
+                           "name": f"№{pp['number']}" if pp["number"] else f"ID {pid}",
+                           "off_roster": True}
+
+        for p in by_pid.values():
             ref = f"{pref}:{tid}:{p['pid']}"
             if ref in seen:
                 continue
             seen.add(ref)
             pool.append({"ref": ref, "number": str(p["number"] or ""),
-                         "name": p["name"], "team": team.get("name", "")})
+                         "name": p["name"], "team": team.get("name", ""),
+                         "off_roster": bool(p.get("off_roster"))})
 
     # Один физический игрок может быть в ДВУХ лигах (SLPRO Farm + Инфобаскет) с
     # разными id. Склеиваем по ФИО в одну карточку с составной ссылкой
@@ -242,12 +273,17 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     точную; более сложные расхождения — вручную/через связку id в «Игроки»."""
     result: List[Dict[str, Any]] = []
     for e in merged:
+        if e.get("off_roster"):        # «имя» = номер, сравнивать нечего
+            result.append(dict(e))
+            continue
         eparts = _norm_name(e["name"]).split()
         e_sur = eparts[0] if eparts else ""
         e_first = eparts[1] if len(eparts) > 1 else ""
         e_src = _srcset(e["ref"])
         hit = None
         for g in result:
+            if g.get("off_roster"):
+                continue
             gparts = _norm_name(g["name"]).split()
             g_sur = gparts[0] if gparts else ""
             g_first = gparts[1] if len(gparts) > 1 else ""
@@ -268,11 +304,14 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     order: List[str] = []
     for p in pool:
         key = _norm_name(p["name"])
-        if not key:
-            key = p["ref"]  # без имени — не склеиваем
+        # У выбывших из заявки «имя» — это «№13»: склеивать по нему нельзя,
+        # иначе два разных игрока с одним номером из разных лиг слипнутся.
+        if not key or p.get("off_roster"):
+            key = p["ref"]
         if key not in by_name:
             by_name[key] = {"refs": [p["ref"]], "number": p["number"],
-                            "name": p["name"], "team": p["team"]}
+                            "name": p["name"], "team": p["team"],
+                            "off_roster": bool(p.get("off_roster"))}
             order.append(key)
         else:
             by_name[key]["refs"].append(p["ref"])
@@ -282,7 +321,8 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for key in order:
         e = by_name[key]
         merged.append({"ref": "+".join(sorted(e["refs"])), "number": e["number"],
-                       "name": e["name"], "team": e["team"]})
+                       "name": e["name"], "team": e["team"],
+                       "off_roster": e["off_roster"]})
     return _consolidate_similar(merged)
 
 
