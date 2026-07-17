@@ -15,6 +15,13 @@ URL_FILE="${FANTASY_API_URL_FILE:-/opt/basketball-bot/data/fantasy_api_url.txt}"
 # Гарантируем каталог для файла URL
 mkdir -p "$(dirname "$URL_FILE")"
 
+# Пока новый туннель не поднялся (и когда он падает) — адрес мёртв. Держим файл
+# пустым в эти моменты, чтобы демон не подставлял ?api= с дохлым URL, а фронт
+# сам откатывался на Funnel. Заполнится, как только cloudflared выдаст адрес.
+: > "$URL_FILE"
+trap ': > "$URL_FILE"' EXIT
+trap 'exit 0' TERM INT   # systemd stop -> нормальный выход -> сработает EXIT-trap
+
 echo "cloudflared-fantasy: туннель к http://127.0.0.1:${PORT}, URL -> ${URL_FILE}"
 
 # --protocol http2: держим связь с Cloudflare по TCP 443, а не QUIC/UDP —

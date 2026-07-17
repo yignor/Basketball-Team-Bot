@@ -33,6 +33,29 @@ import fantasy_stats
 
 log = logging.getLogger(__name__)
 
+# Публичный адрес живого API. Основной транспорт — Cloudflare quick-tunnel: его
+# адрес меняется при каждом рестарте, поэтому deploy/cloudflared-fantasy.sh
+# пишет его в этот файл, а демон/рассылка подмешивают в ссылку Mini App (?api=).
+# Tailscale Funnel остаётся запасным: если тут пусто, фронт откатывается на него.
+_TUNNEL_URL_FILE = os.getenv(
+    "FANTASY_API_URL_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fantasy_api_url.txt"))
+
+
+def public_api_url() -> str:
+    """Текущий публичный адрес живого API для фронта. Приоритет: env-override
+    (FANTASY_API_PUBLIC_URL) -> файл от cloudflared-fantasy. Пусто -> фронт сам
+    уйдёт на Funnel (в т.ч. когда туннель лёг: скрипт стирает файл)."""
+    override = os.getenv("FANTASY_API_PUBLIC_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+    try:
+        with open(_TUNNEL_URL_FILE, encoding="utf-8") as f:
+            return f.read().strip().rstrip("/")
+    except OSError:
+        return ""
+
+
 # ─────────────────────────── initData auth ───────────────────────────────────
 
 def verify_init_data_detailed(init_data: str, bot_token: str,

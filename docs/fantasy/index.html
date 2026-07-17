@@ -165,8 +165,13 @@
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
 
-  // Живой бэкенд (Tailscale Funnel). Пусто -> только запасной режим.
-  const API = 'https://botpc.tail5ed4ef.ts.net';
+  // Живой бэкенд. Основной транспорт — Cloudflare quick-tunnel: его адрес
+  // меняется при рестарте, поэтому бот передаёт актуальный прямо в ссылке
+  // (?api=..., в кнопке меню и в reply-кнопке). Если адреса нет (туннель лежит)
+  // — откатываемся на Tailscale Funnel; если и он недоступен (у части игроков в
+  // РФ режет) — приложение уйдёт в запасной режим по #d=.
+  const FUNNEL = 'https://botpc.tail5ed4ef.ts.net';  // Tailscale Funnel — запасной транспорт
+  const API = (new URLSearchParams(location.search).get('api') || FUNNEL).replace(/\/+$/, '');
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false;
   let pool = [], counts = {}, standings = [], weekStart = '';

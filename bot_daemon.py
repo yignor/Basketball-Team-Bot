@@ -58,13 +58,20 @@ _WEBAPP_VERSION = str(int(time.time()))
 
 
 def _webapp_url() -> str:
-    """URL Mini App с версией. GitHub Pages и Telegram кешируют страницу; версия
-    меняется при каждом перезапуске демона, поэтому после деплоя пользователь
-    гарантированно получает свежий фронт, а не старый JS."""
+    """URL Mini App с версией и текущим адресом живого API. Версия (?v=) меняется
+    при каждом перезапуске демона — после деплоя пользователь получает свежий
+    фронт, а не старый JS. Адрес API (?api=) — от Cloudflare quick-tunnel (он
+    меняется при рестарте туннеля), фронт берёт его отсюда; если пусто, фронт
+    сам откатится на Funnel."""
     if not FANTASY_WEBAPP_URL:
         return ""
     sep = "&" if "?" in FANTASY_WEBAPP_URL else "?"
-    return f"{FANTASY_WEBAPP_URL}{sep}v={_WEBAPP_VERSION}"
+    url = f"{FANTASY_WEBAPP_URL}{sep}v={_WEBAPP_VERSION}"
+    api = fantasy_api.public_api_url()
+    if api:
+        from urllib.parse import quote
+        url += "&api=" + quote(api, safe="")
+    return url
 
 
 async def _setup_menu_button(app) -> None:
@@ -1157,19 +1164,28 @@ BACKGROUND_TICK_SECONDS = 30
 _background_task = None
 
 
-async def _background_loop() -> None:
+async def _background_loop(app: Application) -> None:
     """Единственный независимый таймер демона. Раньше _refresh_poll_cache/
     _refresh_db_cache/_periodic_push_local_changes срабатывали только
     попутно с входящим трафиком Telegram — во время матча без активности
     в чате это могло надолго задерживать и их, и (что важнее) вотчер
     результатов игр, которому нужно тикать независимо от чата."""
     log.info(f"Фоновый цикл запущен (тик каждые {BACKGROUND_TICK_SECONDS}с)")
+    last_api = fantasy_api.public_api_url()
     while True:
         try:
             await asyncio.sleep(BACKGROUND_TICK_SECONDS)
             _refresh_poll_cache()
             _refresh_db_cache()
             _periodic_push_local_changes()
+            # Адрес Cloudflare-туннеля меняется при его рестарте (независимо от
+            # демона). Заметив смену, пере-ставим кнопку меню на свежий адрес —
+            # иначе «Открыть» вело бы на мёртвый туннель.
+            api_now = fantasy_api.public_api_url()
+            if api_now != last_api:
+                last_api = api_now
+                await _setup_menu_button(app)
+                log.info(f"Кнопка меню обновлена под новый адрес API: {api_now or '(пусто -> Funnel)'}")
             await game_watcher.tick()
         except asyncio.CancelledError:
             log.info("Фоновый цикл остановлен")
@@ -1201,7 +1217,7 @@ async def on_startup(app: Application) -> None:
     await _setup_menu_button(app)
 
     global _background_task
-    _background_task = asyncio.create_task(_background_loop())
+    _background_task = asyncio.create_task(_background_loop(app))
 
     # Фэнтези-API в том же event loop (localhost; наружу — Tailscale Funnel).
     global _fantasy_runner
