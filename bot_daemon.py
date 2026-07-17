@@ -317,12 +317,21 @@ def _is_admin(user) -> bool:
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
 
 
-def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
+def _admin_reply_keyboard(fantasy_payload: Optional[str] = None) -> ReplyKeyboardMarkup:
     """Постоянная кнопка внизу экрана — открывает то же меню, что и /admin,
     без необходимости печатать команду каждый раз. Видна только админу,
-    т.к. отправляется только в его личном чате с ботом."""
+    т.к. отправляется только в его личном чате с ботом.
+
+    Если передан payload фэнтези — добавляем вторым рядом ту же кнопку
+    запасного входа, что видят игроки: у reply-клавиатуры на чат одна, поэтому
+    совмещаем в ней обе, чтобы админ мог посмотреть приложение."""
+    rows = [[KeyboardButton(ADMIN_KEYBOARD_LABEL)]]
+    if fantasy_payload and _webapp_url():
+        rows.append([KeyboardButton(
+            FANTASY_KEYBOARD_LABEL,
+            web_app=WebAppInfo(url=_webapp_url() + "#d=" + fantasy_payload))])
     return ReplyKeyboardMarkup(
-        [[KeyboardButton(ADMIN_KEYBOARD_LABEL)]],
+        rows,
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -370,10 +379,20 @@ async def _maybe_send_fantasy_keyboard(update: Update, user) -> None:
 
 
 async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
+    # Для админа кладём в клавиатуру и кнопку фэнтези — чтобы он видел приложение
+    # так же, как игроки. Нет активного сезона / фронт не настроен -> payload None
+    # -> клавиатура остаётся только с админ-кнопкой.
+    fantasy_payload = None
+    if with_keyboard and FANTASY_WEBAPP_URL and _webapp_url():
+        try:
+            user = update.effective_user
+            fantasy_payload = await fantasy_api.build_webapp_payload(str(user.id)) if user else None
+        except Exception as e:
+            log.warning(f"Не удалось собрать кнопку фэнтези для админа: {e}")
     for attempt in range(3):
         try:
             if with_keyboard:
-                await update.message.reply_text(ADMIN_KEYBOARD_LABEL + " активна ⬇️", reply_markup=_admin_reply_keyboard())
+                await update.message.reply_text(ADMIN_KEYBOARD_LABEL + " активна ⬇️", reply_markup=_admin_reply_keyboard(fantasy_payload))
             await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
             return
         except Exception as e:
