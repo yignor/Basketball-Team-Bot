@@ -13,13 +13,35 @@
 
 import argparse
 import asyncio
+import os
+import time
 from datetime import timedelta
 from typing import Any, List, Optional
+
+from telegram import KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
 
 from datetime_utils import get_moscow_time
 import fantasy
 import fantasy_stats
 from slpro_client import SlproClient
+
+
+def _fantasy_webapp_base() -> Optional[str]:
+    """URL статики Mini App (GitHub Pages). None — фронт не настроен, кнопку
+    запасного входа не вешаем. Данные поедут в #d=, не в query."""
+    url = os.getenv("FANTASY_WEBAPP_URL", "").strip()
+    return url or None
+
+
+def _fantasy_reply_markup(base_url: str, payload: str) -> ReplyKeyboardMarkup:
+    """Постоянная кнопка запасного входа: статика на Pages + данные в #d=.
+    web_app (а не url) — чтобы из неё работал sendData и сохранение состава
+    уходило боту в обход живого API. ?v= бьёт HTTP-кеш страницы."""
+    sep = "&" if "?" in base_url else "?"
+    url = f"{base_url}{sep}v={int(time.time())}#d={payload}"
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("🏀 Фэнтези", web_app=WebAppInfo(url=url))]],
+        resize_keyboard=True, is_persistent=True)
 
 
 class FantasyRunner:
@@ -72,7 +94,7 @@ class FantasyRunner:
                 text = f"🏆 {season['name']}\n{text}"
             await self._send_to_chats(chat_ids, text, topic)
             participants = [r["user_id"] for r in fantasy.get_week_rosters(season["id"], report_week)]
-            sent_dm = await self._send_dms(participants, text)
+            sent_dm = await self._send_dms(participants, text, with_fantasy_button=True)
             print(f"📊 «{season['name']}»: таблица в {len(chat_ids)} чат(ов), личка {sent_dm}/{len(participants)}")
         return True
 
@@ -123,7 +145,10 @@ class FantasyRunner:
                 chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
                 await self._send_to_chats(chat_ids, label, self.gsm.game_announcement_topic_id)
                 audience = fantasy.notify_audience(season["id"], kind)
-                sent = await self._send_dms(audience, label)
+                # Кнопку обновляем на открытии набора — тогда офлайн-игрок сразу
+                # соберёт состав из свежего payload; на блокировке не нужна.
+                sent = await self._send_dms(audience, label,
+                                            with_fantasy_button=(kind == "open"))
                 print(f"📣 Фэнтези «{season['name']}»: событие «{kind}» — личка {sent}/{len(audience)}")
         return True
 
@@ -146,13 +171,32 @@ class FantasyRunner:
                 else:
                     print(f"❌ Фэнтези: ошибка отправки в чат {chat_id}: {e}")
 
-    async def _send_dms(self, user_ids: List[str], text: str) -> int:
+    async def _send_dms(self, user_ids: List[str], text: str,
+                        with_fantasy_button: bool = False) -> int:
         if not self.bot:
             return 0
+        # Свежую кнопку запасного входа считаем ОДИН раз (пул/таблица общие),
+        # у каждого игрока меняется только его состав. Так офлайн-игроки на
+        # открытии набора и в понедельник получают актуальный payload.
+        shared, markup_url = None, _fantasy_webapp_base()
+        if with_fantasy_button and markup_url:
+            try:
+                import fantasy_api
+                shared = await fantasy_api.webapp_shared()
+            except Exception as e:
+                print(f"⚠️ Фэнтези: не собрать кнопку запасного входа: {e}")
         sent = 0
         for uid in user_ids:
+            markup = None
+            if shared:
+                try:
+                    import fantasy_api
+                    payload = fantasy_api.encode_webapp_payload(shared, str(uid))
+                    markup = _fantasy_reply_markup(markup_url, payload)
+                except Exception:
+                    markup = None
             try:
-                await self.bot.send_message(chat_id=int(uid), text=text)
+                await self.bot.send_message(chat_id=int(uid), text=text, reply_markup=markup)
                 sent += 1
             except Exception as e:
                 # Пользователь мог не запускать бота / заблокировать — не критично.

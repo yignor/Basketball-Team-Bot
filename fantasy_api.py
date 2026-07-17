@@ -14,6 +14,7 @@ HTTP-API фэнтези для Mini App (aiohttp). Живёт в процесс�
 не хранятся.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -447,6 +448,87 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         enriched.append({**p, "stats": combined, "last": last_one,
                          "excluded": fantasy.norm_player_name(p["name"]) in excluded})
     return enriched
+
+
+# ─── payload запасного входа (постоянная кнопка в Telegram) ──────────────────
+#
+# Живой вход (кнопка меню -> живой API) не работает у части игроков: то сеть до
+# ts.net не пускает, то ник в таблице не совпал. Запасной вход — постоянная
+# reply-кнопка, в URL которой бот запекает данные (#d=base64url(JSON)), а
+# сохранение состава уходит обратно через Telegram sendData. Так вход не зависит
+# от доступности живого API. Данные едут ПРИВАТНО в личном чате игрока, в
+# публичный репозиторий ничего не коммитится — ФИО-инвариант соблюдён.
+#
+# Гарантия «без удвоения»: и живой вход, и sendData сохраняют состав под ОДНИМ
+# числовым telegram id, а fantasy_rosters уникальна по (user_id, сезон, тур).
+# Через какой вход игрок ни зайди — это один участник, один состав, один счёт.
+
+
+def _compress_pool(enriched: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ужимаем обогащённый пул до коротких ключей — payload едет в URL кнопки,
+    длину надо экономить. Исключённых игроков не кладём: запасной вход всегда
+    не-админ, вернуть их в нём всё равно нельзя, а выбрать их не должно быть
+    можно (сервер исключение по имени не проверяет, фильтр только на фронте)."""
+    out: List[Dict[str, Any]] = []
+    for p in enriched:
+        if p.get("excluded"):
+            continue
+        st = p.get("stats") or {}
+        lg = p.get("last") or {}
+        s = ({"g": st.get("games", 0), "p": st.get("pts", 0), "rb": st.get("reb", 0),
+              "a": st.get("ast", 0), "s": st.get("stl", 0), "b": st.get("blk", 0),
+              "t": st.get("tur", 0), "f": st.get("fp", 0),
+              "lf": lg.get("fp"), "ld": lg.get("date")} if st else {})
+        out.append({"r": p["ref"], "m": p["name"], "s": s})
+    return out
+
+
+async def webapp_shared() -> Optional[Dict[str, Any]]:
+    """Общая (одинаковая для всех игроков) часть payload: сезон, пул со
+    статистикой, таблица, окно набора. Считаем один раз и переиспользуем в
+    рассылке — у каждого игрока меняется только его собственный состав."""
+    season = fantasy.get_active_season()
+    if not season:
+        return None
+    pool = _compress_pool(_pool_with_stats(await build_pool(), season))
+    week_start, sched_locked = fantasy.active_selection(season)
+    table = fantasy.season_standings_live(season["id"])
+    names = fantasy.display_names([str(r["user_id"]) for r in table])
+    standings = [{"name": names.get(str(r["user_id"]), "Участник"),
+                  "points": r["points"], "history": r.get("history", [])} for r in table]
+    return {
+        "season_id": season["id"],
+        "season": {"name": season["name"], "format": season["format"],
+                   "roster_size": fantasy.roster_size(season),
+                   "max_per_player": fantasy.max_per_player(season)},
+        "pool": pool,
+        "week_start": week_start,
+        "sched_locked": sched_locked,
+        "standings": standings,
+    }
+
+
+def encode_webapp_payload(shared: Dict[str, Any], user_id: str) -> str:
+    """Персональный payload = общая часть + состав игрока, base64url для #d=.
+    Состав берём из БД по числовому id — тому же, под которым пишет живой вход,
+    поэтому оба входа показывают один состав, а очки не задваиваются."""
+    r = fantasy.get_roster(str(user_id), shared["season_id"], shared["week_start"])
+    data = {
+        "season": shared["season"],
+        "pool": shared["pool"],
+        "roster": r["refs"] if r else [],
+        "locked": shared["sched_locked"] or (bool(r["locked"]) if r else False),
+        "week_start": shared["week_start"],
+        "standings": shared["standings"],
+    }
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+async def build_webapp_payload(user_id: str) -> Optional[str]:
+    """Payload запасного входа для одного игрока. None — нет активного сезона."""
+    shared = await webapp_shared()
+    return encode_webapp_payload(shared, user_id) if shared else None
 
 
 async def handle_pool(request: web.Request) -> web.Response:

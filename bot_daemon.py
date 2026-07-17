@@ -321,6 +321,47 @@ def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
+
+
+def _fantasy_reply_keyboard(payload: str) -> ReplyKeyboardMarkup:
+    """Постоянная кнопка запасного входа в фэнтези. Открывает Mini App как
+    web_app — только из reply-кнопки Telegram даёт sendData, поэтому сохранение
+    состава уходит боту через Telegram и не зависит от живого API. Данные едут
+    в самом URL (#d=payload), приватно, в личном чате игрока."""
+    url = _webapp_url() + "#d=" + payload
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def _maybe_send_fantasy_keyboard(update: Update, user) -> None:
+    """Не-админу — игроку команды — вешаем постоянную кнопку запасного входа.
+    Не игроку не показываем ничего. Нет активного сезона / фронт не настроен —
+    молча выходим."""
+    if not (FANTASY_WEBAPP_URL and _webapp_url()):
+        return
+    import fantasy_api
+    try:
+        if not fantasy_api._is_team_member(str(user.id), user.username or ""):
+            return
+        payload = await fantasy_api.build_webapp_payload(str(user.id))
+    except Exception as e:
+        log.warning(f"Не удалось собрать кнопку фэнтези: {e}")
+        return
+    if not payload:
+        return
+    try:
+        await update.message.reply_text(
+            "🏀 Фэнтези: жми кнопку ниже — собрать состав и посмотреть таблицу. "
+            "Кнопка останется внизу чата.",
+            reply_markup=_fantasy_reply_keyboard(payload))
+    except Exception as e:
+        log.warning(f"Не удалось отправить кнопку фэнтези: {e}")
+
+
 async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
     for attempt in range(3):
         try:
@@ -348,6 +389,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         log.warning(f"Не удалось записать пользователя бота: {e}")
 
     if not _is_admin(user):
+        # Игроку команды — постоянная кнопка запасного входа в фэнтези.
+        await _maybe_send_fantasy_keyboard(update, user)
         return
     _refresh_db_cache()
     _periodic_push_local_changes()
