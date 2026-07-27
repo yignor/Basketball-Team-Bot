@@ -138,6 +138,7 @@ def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
                 "tpm": p.fg3m, "tpa": p.fg3a, "ftm": p.ftm, "fta": p.fta,
                 # Время SLPRO отдаёт секундами; плюс-минус в бокс-скоре нет.
                 "secs": getattr(p, "time_played", 0) or 0,
+                "plus_minus": getattr(p, "plus_minus", 0) or 0,
             }
             _store_player_row(conn, SOURCE_SLPRO, box.game_id, game_date, season_id, team_id, row,
                               stage_id=stage_id)

@@ -62,11 +62,17 @@ async def main() -> int:
                     help="пауза между запросами к чужому API, сек")
     ap.add_argument("--dry-run", action="store_true", help="только посчитать, что предстоит скачать")
     ap.add_argument("--summary", action="store_true", help="показать, что уже в локальной копии")
+    ap.add_argument("--refetch-missing", action="store_true",
+                    help="перекачать игры без времени на площадке и плюс-минуса")
     ap.add_argument("--refetch-no-stage", action="store_true",
                     help="перекачать игры без стадии (остались от версии до stage_id)")
     ap.add_argument("--purge", metavar="SOURCE:SEASON",
                     help="удалить чужую лигу из копии, напр. infobasket:73582")
     args = ap.parse_args()
+
+    if args.refetch_missing:
+        n = stats_backfill.forget_games_missing_fields(args.source if args.source != "all" else "slpro")
+        print(f"Помечено к перекачке игр без времени/плюс-минуса: {n}")
 
     if args.purge:
         try:

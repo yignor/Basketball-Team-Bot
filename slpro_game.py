@@ -44,6 +44,7 @@ class PlayerStat:
     blk: int = 0
     pf: int = 0
     time_played: int = 0
+    plus_minus: int = 0
     start_five: bool = False
 
     @property
@@ -134,6 +135,17 @@ def parse_box_score(resp: Dict[str, Any]) -> Optional[BoxScore]:
         except (TypeError, ValueError):
             team_id = None
         pts = e.get("points") or 0
+
+        # Плюс-минус. В событии заброшенного мяча приходит массив `players` —
+        # кто в этот момент был на площадке. Значит считается точно, а не по
+        # прикидке: своим на паркете плюсуем очки, чужим — минусуем.
+        if action == _MADE and team_id is not None:
+            for on_court in (e.get("players") or []):
+                q = box.players.get(on_court)
+                if q is None:
+                    continue
+                same_side = (team_id == box.home_id) == q.is_home
+                q.plus_minus += pts if same_side else -pts
 
         # Счёт по четвертям (по забитым)
         if action == _MADE and team_id is not None:

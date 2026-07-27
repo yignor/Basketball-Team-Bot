@@ -300,6 +300,28 @@ def purge_source_season(source: str, season_id: str) -> Dict[str, int]:
     return {"games": len(gids), "stats": n_stats, "meta": n_meta, "fetched": n_fetched}
 
 
+def forget_games_missing_fields(source: str = "slpro") -> int:
+    """Помечает к перекачке игры, у которых пусто время на площадке и плюс-минус.
+
+    Эти поля появились позже самого бэкфилла, и у старых игр их нет. Плюс-минус
+    SLPRO в API не отдаёт — он считается из play-by-play (в событии заброшенного
+    мяча приходит состав на площадке), поэтому нужна именно перекачка протокола,
+    а не досчёт по имеющимся строкам."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT game_id FROM game_player_stats
+               WHERE source = ? GROUP BY game_id
+               HAVING MAX(secs) = 0 AND MAX(ABS(plus_minus)) = 0""", (source,)).fetchall()
+        ids = [r["game_id"] for r in rows]
+        for gid in ids:
+            conn.execute("DELETE FROM game_stats_fetched WHERE source = ? AND game_id = ?",
+                         (source, gid))
+        conn.commit()
+    log.info("к перекачке (нет времени/плюс-минуса): %d игр", len(ids))
+    return len(ids)
+
+
 def forget_games_without_stage(source: str = "slpro") -> int:
     """Снимает отметку «скачано» с игр, у которых не заполнена стадия.
 
