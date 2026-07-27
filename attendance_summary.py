@@ -179,7 +179,10 @@ def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
                str(no_answer) if no_answer else "",
                pct, SPARK_TOKEN, str(p["revotes"]) if p["revotes"] else ""]
         for wd in weekdays:
-            row.append(f"{p['by_weekday'].get(wd, 0)}/{total_by_wd[wd]}")
+            # «4 из 4», а НЕ «4/4»: Sheets принимает «4/4» за дату и показывает
+            # «4 апреля». Выдавало себя то, что «0/4» оставалось текстом —
+            # нулевого месяца не бывает.
+            row.append(f"{p['by_weekday'].get(wd, 0)} из {total_by_wd[wd]}")
         last = p["last"]
         row.append(f"{last.day} {MONTHS_GEN[last.month]}" if last else "—")
         rows.append(row)
