@@ -487,17 +487,29 @@ def season_participants(season_id: int) -> List[str]:
 # ─────────────────────────── Таблицы ─────────────────────────────────────────
 
 def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:
-    """Таблица участников за неделю: [{user_id, points, refs}], по убыванию."""
+    """Таблица участников за неделю: [{user_id, points, refs}], по убыванию.
+
+    Суммирует те же зафиксированные снимки, что и общий зачёт. Считать здесь
+    заново «текущим» составом нельзя: он размораживается после каждой игры, и
+    понедельничный отчёт приписал бы игры недели тому составу, который случайно
+    стоит в понедельник."""
     season = _get_season(season_id)
-    weights = season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    scopes = effective_scopes(season) if season else []
+    if season:
+        backfill_game_scores(season)
     d_from, d_to = week_bounds(week_start)
-    rosters = get_week_rosters(season_id, week_start)
-    table = []
-    for r in rosters:
-        pts = fantasy_stats.player_points(r["refs"], weights, date_from=d_from, date_to=d_to,
-                                          scope=scopes)
-        table.append({"user_id": r["user_id"], "points": pts, "refs": r["refs"]})
+    # Участники недели — те, кто её собирал: с нулём в таблице тоже нужны.
+    points = {str(r["user_id"]): 0.0 for r in get_week_rosters(season_id, week_start)}
+    refs = {str(r["user_id"]): r["refs"] for r in get_week_rosters(season_id, week_start)}
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT user_id, points FROM fantasy_game_scores
+               WHERE season_id = ? AND game_date >= ? AND game_date <= ?""",
+            (season_id, d_from, d_to)).fetchall()
+    for r in rows:
+        uid = str(r["user_id"])
+        points[uid] = round(points.get(uid, 0.0) + float(r["points"] or 0), 2)
+    table = [{"user_id": uid, "points": pts, "refs": refs.get(uid, [])}
+             for uid, pts in points.items()]
     table.sort(key=lambda x: x["points"], reverse=True)
     return table
 
