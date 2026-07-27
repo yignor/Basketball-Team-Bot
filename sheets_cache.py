@@ -350,6 +350,22 @@ CREATE TABLE IF NOT EXISTS fantasy_game_scores (
 CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_season ON fantasy_game_scores(season_id, game_date);
 CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_user ON fantasy_game_scores(season_id, user_id, game_date);
 
+-- Привязка «Telegram id -> id игрока в лиге». Человек присылает ссылку на свой
+-- профиль, бот достаёт из неё числовой id: искать по фамилии нельзя (однофамильцы
+-- и опечатки подмешают чужие игры). ФИО тут нет — только идентификаторы.
+-- changes — сколько раз менял привязку; на этот счётчик сядет платная смена id.
+CREATE TABLE IF NOT EXISTS player_identities (
+    tg_user_id  TEXT NOT NULL,
+    source      TEXT NOT NULL,             -- slpro | infobasket
+    player_id   TEXT NOT NULL,
+    comp_id     TEXT NOT NULL DEFAULT '',  -- соревнование из ссылки (Инфобаскет)
+    api_url     TEXT NOT NULL DEFAULT '',
+    linked_at   TEXT NOT NULL DEFAULT '',
+    changes     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tg_user_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_player_identities_player ON player_identities(source, player_id);
+
 -- Личные настройки уведомлений фэнтези. По умолчанию (нет строки) — уведомляем.
 -- open — «открыт набор», lock — «набор закрыт».
 CREATE TABLE IF NOT EXISTS fantasy_notify_prefs (

@@ -360,6 +360,40 @@ def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
     return round(total, 2)
 
 
+def career_summary(source: str, player_id: str, form_n: int = 5) -> Dict[str, Any]:
+    """Личный прогресс игрока по локальной копии протоколов: всего игр, средние
+    за игру, последняя игра и форма (среднее за последние N игр против
+    предыдущих N). Без фильтра по турниру — это карьера, а не зачёт лиги."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            """SELECT * FROM game_player_stats
+               WHERE source = ? AND player_id = ? AND game_date != ''
+               ORDER BY game_date""", (source, str(player_id)))]
+    if not rows:
+        return {"games": 0}
+
+    def avg(subset: List[Dict[str, Any]], key: str) -> float:
+        return round(sum(float(r.get(key, 0) or 0) for r in subset) / len(subset), 1) if subset else 0.0
+
+    def avg_fp(subset: List[Dict[str, Any]]) -> float:
+        return round(sum(fantasy_points(r) for r in subset) / len(subset), 1) if subset else 0.0
+
+    recent, earlier = rows[-form_n:], rows[-2 * form_n:-form_n]
+    last = rows[-1]
+    return {
+        "games": len(rows),
+        "first_date": rows[0]["game_date"],
+        "last_date": last["game_date"],
+        "avg": {k: avg(rows, k) for k in ("pts", "reb", "ast", "stl", "blk", "tur")},
+        "avg_fp": avg_fp(rows),
+        "last": {"date": last["game_date"], "fp": fantasy_points(last),
+                 **{k: int(last.get(k, 0) or 0) for k in ("pts", "reb", "ast", "stl", "blk", "tur")}},
+        "form": {"recent": avg_fp(recent), "earlier": avg_fp(earlier),
+                 "n": len(recent), "prev_n": len(earlier)},
+    }
+
+
 def last_game_date(scope: Optional[Any] = None) -> str:
     """Дата последней игры, попавшей в локальную статистику (в рамках турниров
     подсчёта). Нужна для среза «по последней игре»."""

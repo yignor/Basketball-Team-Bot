@@ -423,6 +423,86 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _send_main_menu(update, with_keyboard=True)
 
 
+def _format_progress(source: str, player_id: str) -> str:
+    """Личный прогресс по локальной копии протоколов. Пусто — если игр этого
+    человека у нас ещё нет."""
+    import fantasy_stats
+    import player_identity
+    s = fantasy_stats.career_summary(source, player_id)
+    title = player_identity.SOURCE_TITLES.get(source, source)
+    if not s.get("games"):
+        return (f"• {title}: игр пока не нашёл. Если ты играешь в турнире, который "
+                f"бот ещё не зеркалит, статистика подтянется после ближайшего обновления.")
+    a, last, form = s["avg"], s["last"], s["form"]
+    lines = [
+        f"• {title}: {s['games']} игр ({s['first_date']} … {s['last_date']})",
+        f"   в среднем за игру: {a['pts']} очк · {a['reb']} подб · {a['ast']} пас · "
+        f"{a['stl']} перехв · {a['blk']} блок · {a['tur']} потерь",
+        f"   последняя игра {last['date']}: {last['pts']} очк · {last['reb']} подб · "
+        f"{last['ast']} пас",
+    ]
+    # Форма: сравниваем только когда есть с чем сравнивать, иначе цифра врёт.
+    if form["prev_n"]:
+        delta = round(form["recent"] - form["earlier"], 1)
+        arrow = "📈" if delta > 0 else ("📉" if delta < 0 else "➖")
+        lines.append(f"   форма {arrow} за {form['n']} игр {form['recent']} против "
+                     f"{form['earlier']} за предыдущие {form['prev_n']}")
+    return "\n".join(lines)
+
+
+async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Личное сообщение со ссылкой на профиль в лиге -> привязка id к человеку.
+
+    Молчим, если ссылки в сообщении нет: обработчик висит на всех текстах в
+    личке и не должен отвечать на обычную переписку."""
+    msg = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    import player_identity
+    parsed = None
+    for word in (msg.text or "").split():
+        parsed = player_identity.parse_profile_link(word)
+        if parsed:
+            break
+    if not parsed:
+        return
+
+    res = player_identity.link_identity(user.id, parsed)
+    title = player_identity.SOURCE_TITLES.get(parsed["source"], parsed["source"])
+    if res.get("same"):
+        head = f"✅ {title}: этот профиль уже привязан (id {parsed['player_id']})."
+    elif res.get("changed"):
+        head = (f"🔄 {title}: привязка изменена — id {res['previous']} → "
+                f"{parsed['player_id']}.")
+    else:
+        head = f"✅ {title}: профиль привязан, id {parsed['player_id']}."
+    await msg.reply_text(head + "\n\n" + _format_progress(parsed["source"], parsed["player_id"]))
+
+
+async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/profile — какие профили привязаны и что по ним видно."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private":
+        return
+    import player_identity
+    ids = player_identity.get_identities(user.id)
+    if not ids:
+        await update.message.reply_text(
+            "У тебя пока не привязан ни один профиль.\n\n"
+            "Пришли мне ссылку на свою страницу в лиге — например:\n"
+            "• https://slpro.basketstat.ru/player/888\n"
+            "• https://www.fbp.ru/player.html?personId=400566&apiUrl=https://reg.infobasket.su\n\n"
+            "Я запомню твой номер в лиге и буду показывать личный прогресс.")
+        return
+    parts = ["📊 Твой прогресс", ""]
+    for rec in ids:
+        parts.append(_format_progress(rec["source"], rec["player_id"]))
+    await update.message.reply_text("\n".join(parts))
+
+
 async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Приём состава из Mini App (Telegram sendData). Валидируем на сервере и
     сохраняем — клиенту не доверяем."""
@@ -1225,6 +1305,7 @@ async def on_startup(app: Application) -> None:
         await app.bot.set_my_commands([
             BotCommand("admin", "Админ-панель"),
             BotCommand("start", "Показать кнопку админ-панели"),
+            BotCommand("profile", "Мой профиль и прогресс"),
         ])
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
@@ -1295,6 +1376,11 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", handle_admin))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
+    app.add_handler(CommandHandler("profile", handle_my_profile))
+    # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
+    # но отвечает, только если в сообщении действительно есть ссылка.
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_profile_link))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     log.info("Запуск polling...")
