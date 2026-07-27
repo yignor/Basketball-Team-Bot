@@ -484,7 +484,7 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await msg.reply_text(
                     f"❌ В SLPRO нет игрока с id {parsed['player_id']}.\n\n"
                     "Проверь ссылку: нужна страница вида "
-                    "https://slpro.basketstat.ru/player/12684")
+                    "https://slpro.basketstat.ru/player/XXXX")
                 return
             career = info.get("career") or []
 
@@ -552,8 +552,8 @@ async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(
             "У тебя пока не привязан ни один профиль.\n\n"
             "Пришли мне ссылку на свою страницу в лиге — например:\n"
-            "• https://slpro.basketstat.ru/player/888\n"
-            "• https://www.fbp.ru/player.html?personId=400566&apiUrl=https://reg.infobasket.su\n\n"
+            "• https://slpro.basketstat.ru/player/XXXX\n"
+            "• https://www.fbp.ru/player.html?personId=XXXXXX&apiUrl=https://reg.infobasket.su\n\n"
             "Я запомню твой номер в лиге и буду показывать личный прогресс.")
         return
     parts = ["📊 Твой прогресс", ""]

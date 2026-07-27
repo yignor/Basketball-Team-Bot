@@ -3,9 +3,9 @@
 Статистика игрока по personId Infobasket: все игры, все сезоны, прогресс/регресс.
 
 Запуск:
-  python player_stats.py --person-id 400566
-  python player_stats.py --person-id 400566 --chat-id 123456789
-  python player_stats.py --person-id 400566 --no-telegram --output report.html
+  python player_stats.py --person-id XXXXXX
+  python player_stats.py --person-id XXXXXX --chat-id 123456789
+  python player_stats.py --person-id XXXXXX --no-telegram --output report.html
 """
 
 import argparse
@@ -782,7 +782,7 @@ async def main(person_id: int, out_file: str, target: Optional[str] = None) -> N
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Статистика игрока по personId Infobasket")
     ap.add_argument("--person-id", type=int, required=True,
-                    help="PersonID в Infobasket (напр. 400566)")
+                    help="PersonID в Infobasket (напр. XXXXXX)")
     ap.add_argument("--output",
                     help="Имя HTML файла (по умолчанию stats_<id>.html)")
     ap.add_argument("--to",

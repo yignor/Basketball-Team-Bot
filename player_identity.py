@@ -12,8 +12,8 @@
 Имя показывается транзитно из публичного ростера лиги, как и везде.
 
 Поддерживаемые ссылки:
-  https://slpro.basketstat.ru/player/888
-  https://www.fbp.ru/player.html?personId=400566&apiUrl=https://reg.infobasket.su&compId=108009&lang=ru
+  https://slpro.basketstat.ru/player/XXXX
+  https://www.fbp.ru/player.html?personId=XXXXXX&apiUrl=https://reg.infobasket.su&compId=XXXXXX&lang=ru
 """
 
 from typing import Any, Dict, List, Optional
@@ -47,7 +47,7 @@ def parse_profile_link(url: str) -> Optional[Dict[str, str]]:
     host = host[4:] if host.startswith("www.") else host
     q = parse_qs(u.query or "")
 
-    # SLPRO: числовой id прямо в пути — /player/888
+    # SLPRO: числовой id прямо в пути — /player/XXXX
     if host in _SLPRO_HOSTS:
         parts = [p for p in (u.path or "").split("/") if p]
         if len(parts) >= 2 and parts[-2] == "player" and parts[-1].isdigit():

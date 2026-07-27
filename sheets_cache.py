@@ -308,7 +308,7 @@ CREATE TABLE IF NOT EXISTS fantasy_seasons (
 
 -- Состав участника на конкретную игровую неделю (история по неделям).
 -- player_refs_json — список выбранных игроков пула (ключи вида
--- "slpro:707:12684" / "ib:36502:400566" — источник:team:player_id).
+-- "slpro:707:XXXX" / "ib:36502:XXXXXX" — источник:team:player_id).
 CREATE TABLE IF NOT EXISTS fantasy_rosters (
     user_id          TEXT NOT NULL,
     season_id        INTEGER NOT NULL,

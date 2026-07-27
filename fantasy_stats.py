@@ -256,7 +256,7 @@ def fantasy_points(stat_row: Dict[str, Any], weights: Optional[Dict[str, float]]
 
 
 def parse_ref(ref: str) -> Tuple[str, str]:
-    """"slpro:707:12684" / "ib:36502:400566" -> (source, player_id).
+    """"slpro:707:XXXX" / "ib:36502:XXXXXX" -> (source, player_id).
     source-псевдонимы: slpro -> slpro, ib/infobasket -> infobasket."""
     parts = ref.split(":")
     src = parts[0].lower()
@@ -266,7 +266,7 @@ def parse_ref(ref: str) -> Tuple[str, str]:
 
 
 def parse_ref_full(ref: str) -> Tuple[str, str, str]:
-    """"slpro:707:12684" -> (source, team_id, player_id). Команда нужна, чтобы
+    """"slpro:707:XXXX" -> (source, team_id, player_id). Команда нужна, чтобы
     сравнить игры игрока с играми его команды (посещаемость)."""
     parts = str(ref).split(":")
     src, pid = parse_ref(ref)
