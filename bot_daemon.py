@@ -478,6 +478,23 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"{parsed['player_id']}.")
     else:
         head = f"✅ {title}: профиль привязан, id {parsed['player_id']}."
+
+    # Инфобаскет отдаёт всю личную историю за пару запросов — качаем сразу, иначе
+    # человек увидит только те игры, что попали в наше зеркало турнира команды.
+    # SLPRO зеркалим целиком, там докачивать нечего.
+    if parsed["source"] == player_identity.SOURCE_INFOBASKET:
+        await msg.reply_text(head + "\n\n⏳ Собираю твою историю игр…")
+        try:
+            import stats_backfill
+            got = await stats_backfill.fetch_person_games_infobasket(
+                parsed["player_id"], parsed.get("api_url") or stats_backfill.IB_API)
+            log.info(f"личная история {parsed['player_id']}: сезоны {got['seasons']}, "
+                     f"игр {got['games']}, добавлено {got['added']}")
+        except Exception as e:
+            log.warning(f"личная история {parsed['player_id']} не скачалась: {e}")
+        await msg.reply_text(_format_progress(parsed["source"], parsed["player_id"]))
+        return
+
     await msg.reply_text(head + "\n\n" + _format_progress(parsed["source"], parsed["player_id"]))
 
 

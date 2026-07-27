@@ -340,3 +340,97 @@ def local_summary() -> Dict[str, Any]:
         for row in conn.execute("SELECT source, COUNT(*) with_meta FROM game_meta GROUP BY source"):
             out.setdefault(row["source"], {}).update(with_meta=row["with_meta"])
     return out
+
+
+# ─── личная история игрока (Инфобаскет) ──────────────────────────────────────
+#
+# Открыто 27.07.2026: у Инфобаскета ЕСТЬ помачевая история по человеку, и берётся
+# она за пару запросов, без зеркалирования целых соревнований.
+#   Widget/PlayerSeasonStats/<personId>  -> SeasonStats[].Season.CompID — сезоны,
+#                                           в которых человек играл;
+#   Widget/PlayerStats/<personId>?compId=<сезон> -> GameStats[] — строка на игру
+#                                           (GameID, дата, полный бокс-скор).
+# `compId` здесь — СЕЗОН-контейнер (2024/2025/2026), а не турнир: compId=0 даёт
+# только текущий сезон, поэтому за прошлые надо спрашивать отдельно.
+
+def _ib_person_row(g: Dict[str, Any], person_id: str, season_comp: Any) -> Optional[tuple]:
+    """Запись игры из PlayerStats -> кортеж под game_player_stats."""
+    game = g.get("Game") or {}
+    game_id = game.get("GameID")
+    if not game_id:
+        return None
+    d = (g.get("GameDate") or "").strip()          # DD.MM.YYYY
+    try:
+        day, month, year = d.split(".")
+        game_date = f"{year}-{month}-{day}"
+    except ValueError:
+        return None
+    side = "TeamNameA" if g.get("TeamNumber") == 1 else "TeamNameB"
+    team_id = str((g.get(side) or {}).get("TeamID") or "")
+
+    def n(key: str) -> int:
+        return int(g.get(key) or 0)
+
+    return (fantasy_stats.SOURCE_INFOBASKET, str(game_id), str(person_id), team_id,
+            str(g.get("DisplayNumber") or ""), game_date, str(season_comp), "",
+            n("Points"), n("Rebound"), n("OffRebound"), n("DefRebound"), n("Assist"),
+            n("Steal"), n("Blocks"), n("Turnover"), n("Foul"),
+            n("Goal23"), n("Shot23"), n("Goal3"), n("Shot3"), n("Goal1"), n("Shot1"),
+            sheets_cache.now_iso())
+
+
+async def fetch_person_games_infobasket(person_id: Any,
+                                        api_url: str = IB_API) -> Dict[str, Any]:
+    """Скачивает всю личную историю человека и кладёт в локальную копию.
+
+    Пишем через INSERT OR IGNORE — намеренно. У строк, скачанных по турниру,
+    в `season_id` лежит comp_id (по нему фильтруется зачёт фэнтези), а здесь —
+    сезон-контейнер. Перезапись сломала бы фильтр подсчёта очков, поэтому уже
+    имеющиеся строки не трогаем: личная история только дополняет.
+    """
+    sheets_cache.init_db()
+    api = (api_url or IB_API).rstrip("/")
+    pid = str(person_id)
+    seasons: List[Any] = []
+    rows: List[tuple] = []
+
+    async with _ib_session() as session:
+        try:
+            async with session.get(f"{api}/Widget/PlayerSeasonStats/{pid}?format=json",
+                                   timeout=aiohttp.ClientTimeout(total=30)) as r:
+                data = await r.json(content_type=None) if r.status == 200 else {}
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.warning("личная история %s: сезоны — %s", pid, type(e).__name__)
+            data = {}
+        for s in (data.get("SeasonStats") or []):
+            comp = (s.get("Season") or {}).get("CompID")
+            if comp is not None and comp not in seasons:
+                seasons.append(comp)
+
+        for comp in seasons or [0]:
+            url = f"{api}/Widget/PlayerStats/{pid}?compId={comp}&filter=0&team=0&format=json"
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    payload = await r.json(content_type=None) if r.status == 200 else {}
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.warning("личная история %s: сезон %s — %s", pid, comp, type(e).__name__)
+                continue
+            for g in (payload.get("GameStats") or []):
+                row = _ib_person_row(g, pid, comp)
+                if row:
+                    rows.append(row)
+            await asyncio.sleep(DEFAULT_DELAY)
+
+    added = 0
+    if rows:
+        with sheets_cache.get_connection() as conn:
+            before = conn.total_changes
+            conn.executemany(
+                """INSERT OR IGNORE INTO game_player_stats
+                   (source, game_id, player_id, team_id, number, game_date, season_id,
+                    stage_id, pts, reb, reb_off, reb_def, ast, stl, blk, tur, pf,
+                    fgm, fga, tpm, tpa, ftm, fta, fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+            added = conn.total_changes - before
+            conn.commit()
+    return {"seasons": seasons, "games": len(rows), "added": added}
