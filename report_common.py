@@ -188,7 +188,9 @@ def apply_formatting(ws, all_rows: List[List[str]], extra_bold_patterns: Optiona
                         "startRowIndex": i,
                         "endRowIndex":   i + 1,
                         "startColumnIndex": 0,
-                        "endColumnIndex":   8,
+                        # 9 колонок: в сводке к явке добавились «без ответа»,
+                        # смены мнения, дни недели и дата последнего прихода.
+                        "endColumnIndex":   9,
                     },
                     "cell": {
                         "userEnteredFormat": {

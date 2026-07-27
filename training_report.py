@@ -137,12 +137,36 @@ class SheetBuilder:
         self.rows.append([f"Сводка за месяц · {total_trainings} тренировок"])
 
     def summary_table_header(self):
-        self.rows.append(["Фамилия / Имя", "Ник", "Посетил", "Пропустил", "Всего", "% посещений"])
+        self.rows.append(["Фамилия / Имя", "Ник", "Пришёл", "Пропустил", "Без ответа",
+                          "% посещений", "Менял мнение", "Ходит по дням", "Последняя"])
 
-    def summary_row(self, full_name: str, nick: str, present: int, absent: int):
-        total = present + absent
-        pct   = f"{round(present / total * 100)}%" if total else "—"
-        self.rows.append([full_name, f"@{nick}" if nick else "", str(present), str(absent), str(total), pct])
+    def summary_row(self, full_name: str, nick: str, present: int, absent: int,
+                    no_answer: int, revotes: int, weekdays: str, last_seen: str):
+        # Процент считаем от ВСЕХ тренировок месяца, а не от числа ответов:
+        # промолчать и не прийти — для тренера то же самое, что прийти не смог.
+        total = present + absent + no_answer
+        pct = f"{round(present / total * 100)}%" if total else "—"
+        self.rows.append([full_name, f"@{nick}" if nick else "",
+                          str(present), str(absent), str(no_answer) if no_answer else "",
+                          pct, str(revotes) if revotes else "",
+                          weekdays, last_seen])
+
+    def totals_line(self, trainings: int, avg_present: float,
+                    best: Optional[Tuple[date, int]], worst: Optional[Tuple[date, int]],
+                    revotes: int, silent: int):
+        """Строка «итого по команде» — то, ради чего тренер открывает лист."""
+        parts = [f"Тренировок: {trainings}", f"средняя явка: {avg_present:g} чел."]
+        if best:
+            d, n = best
+            parts.append(f"лучшая: {DAYS_RU[d.weekday()]} {d.day} {MONTHS_RU_GEN.get(d.month, '')} — {n}")
+        if worst and worst[0] != (best or (None,))[0]:
+            d, n = worst
+            parts.append(f"слабее всех: {DAYS_RU[d.weekday()]} {d.day} {MONTHS_RU_GEN.get(d.month, '')} — {n}")
+        if revotes:
+            parts.append(f"смен мнения: {revotes}")
+        if silent:
+            parts.append(f"ни разу не ответили: {silent}")
+        self.rows.append([" · ".join(parts)])
 
     def training_days_line(self, trainings_with_counts: List[Tuple[date, int, int]]):
         """Строка вида 'По дням: вт 10 июня – 8 · пт 13 июня – 6 · ...'"""
@@ -190,6 +214,31 @@ class SheetBuilder:
 
 
 # ─────────────────────────── Report generation ───────────────────────────────
+
+def _weekdays_label(counts: Dict[int, int]) -> str:
+    """{1: 4, 4: 2} -> «вт 4 · пт 2» — по каким дням человек реально ходит."""
+    if not counts:
+        return ""
+    order = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    return " · ".join(f"{DAYS_RU[wd]} {n}" for wd, n in order if n)
+
+
+def _date_label(d: Optional[date]) -> str:
+    return f"{d.day} {MONTHS_RU_GEN.get(d.month, '')}" if d else "—"
+
+
+def _silent_players(players: Dict[str, Dict], voted: Dict[str, Dict]) -> int:
+    """Сколько человек из состава не ответили НИ РАЗУ. В таблицу их построчно не
+    выводим (там осели бы и те, кто давно не в команде), но тренеру важно
+    видеть само число."""
+    seen = {name.strip().lower() for name in voted}
+    roster = set()
+    for p in players.values():
+        full = f"{p.get('surname', '')} {p.get('name', '')}".strip()
+        if full:
+            roster.add(full.lower())
+    return len(roster - seen)
+
 
 def build_report(
     votes: List[Dict],
@@ -251,15 +300,28 @@ def build_report(
         for dt_str, _ in month_trainings:
             month_votes_all.extend(by_training[dt_str])
 
-        player_month: Dict[str, Dict] = defaultdict(lambda: {"present": 0, "absent": 0, "nick": ""})
-        for v in month_votes_all:
-            full_name, nick = resolve_player(v, players)
-            key = full_name
-            player_month[key]["nick"] = nick
-            if v["vote_type"] == "PRESENT":
-                player_month[key]["present"] += 1
-            elif v["vote_type"] == "ABSENT":
-                player_month[key]["absent"] += 1
+        # Считаем всё, что нужно тренеру: явку, пропуски, молчание, смены мнения,
+        # по каким дням недели человек ходит и когда был в последний раз.
+        player_month: Dict[str, Dict] = defaultdict(
+            lambda: {"present": 0, "absent": 0, "nick": "", "revotes": 0,
+                     "voted": 0, "weekdays": defaultdict(int), "last": None})
+        date_by_training = {dt_str: d for dt_str, d in month_trainings}
+        for dt_str, _ in month_trainings:
+            for v in by_training[dt_str]:
+                full_name, nick = resolve_player(v, players)
+                p = player_month[full_name]
+                p["nick"] = nick
+                p["voted"] += 1
+                p["revotes"] += int(v.get("revotes") or 0)
+                if v["vote_type"] == "PRESENT":
+                    p["present"] += 1
+                    d = date_by_training.get(dt_str)
+                    if d:
+                        p["weekdays"][d.weekday()] += 1
+                        if p["last"] is None or d > p["last"]:
+                            p["last"] = d
+                elif v["vote_type"] == "ABSENT":
+                    p["absent"] += 1
 
         # Per-training day counts for this month (sorted oldest→newest for readability)
         month_day_counts: List[Tuple[date, int, int]] = []
@@ -269,12 +331,26 @@ def build_report(
             a_cnt  = sum(1 for v in tvotes if v["vote_type"] == "ABSENT")
             month_day_counts.append((d, p_cnt, a_cnt))
 
+        # Итог по команде — первое, что видит тренер, открыв лист.
+        total_tr = len(month_trainings)
+        present_counts = [p for _, p, _ in month_day_counts]
+        avg_present = round(sum(present_counts) / len(present_counts), 1) if present_counts else 0
+        best = max(month_day_counts, key=lambda x: x[1])[:2] if month_day_counts else None
+        worst = min(month_day_counts, key=lambda x: x[1])[:2] if month_day_counts else None
+        silent = _silent_players(players, player_month)
+        sb.totals_line(total_tr, avg_present, best, worst,
+                       sum(p["revotes"] for p in player_month.values()), silent)
         sb.training_days_line(month_day_counts)
         sb.blank()
         sb.summary_table_header()
         # Sort by attendance desc
         for pname, pdata in sorted(player_month.items(), key=lambda x: -x[1]["present"]):
-            sb.summary_row(pname, pdata["nick"], pdata["present"], pdata["absent"])
+            sb.summary_row(
+                pname, pdata["nick"], pdata["present"], pdata["absent"],
+                max(0, total_tr - pdata["voted"]), pdata["revotes"],
+                _weekdays_label(pdata["weekdays"]),
+                _date_label(pdata["last"]),
+            )
 
         sb.blank(2)
         summary_sections.append(sb.rows)
