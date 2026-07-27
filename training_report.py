@@ -27,6 +27,8 @@ from typing import Dict, List, Optional, Tuple
 
 import gspread
 
+from datetime_utils import get_moscow_time
+
 import attendance_summary
 from report_common import (
     MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
@@ -341,7 +343,8 @@ def build_report(
 
     # ── Assemble final output ──
     # Order: all monthly summaries (newest first), then all details (newest first)
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # Сервер живёт по UTC, а подпись обещала МСК — время в шапке врало на 3 часа.
+    now = get_moscow_time().strftime("%d.%m.%Y %H:%M")
     header = [
         [f"ПОСЕЩАЕМОСТЬ ТРЕНИРОВОК · Обновлено: {now} МСК"],
         ["═" * 60],

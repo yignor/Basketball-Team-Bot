@@ -44,8 +44,33 @@ BASE_HEADERS = ["Фамилия / Имя", "Ник", "Пришёл", "Пропу
                 "Без ответа", "% посещений", "Менял мнение"]
 
 
-def _weekdays_of(dates: Sequence[date]) -> List[int]:
-    return sorted({d.weekday() for d in dates})
+# Дни недели узнаём из ТЕКСТА ответа, а не из даты опроса. Опрос выходит раз в
+# неделю (в воскресенье) и предлагает варианты вроде «Среда», «Пятница»,
+# «Среда и пятница» — все они одинаково считаются явкой, а какой это день,
+# сохраняется только в тексте варианта. По дате опроса всё складывалось в один
+# день недели, и «хожу только по средам» было не отличить от «хожу всегда».
+DAY_STEMS = [("понедельник", 0), ("вторник", 1), ("сред", 2), ("четверг", 3),
+             ("пятниц", 4), ("суббот", 5), ("воскресен", 6)]
+
+
+def days_in_text(text: Optional[str]) -> set:
+    low = (text or "").lower()
+    return {wd for stem, wd in DAY_STEMS if stem in low}
+
+
+def _vote_days(vote: Dict[str, Any], event_date: date) -> set:
+    """Дни, к которым относится ответ. Если в тексте дней нет (игровой опрос,
+    «Готов»/«Не готов») — это сам день события."""
+    return days_in_text(vote.get("vote_text")) or {event_date.weekday()}
+
+
+def _offered_days(votes: Sequence[Dict[str, Any]], event_date: date) -> set:
+    """Какие дни вообще предлагал этот опрос — объединение дней из всех
+    ответов. Это знаменатель: нельзя пропустить пятницу, которой не было."""
+    days = set()
+    for v in votes:
+        days |= days_in_text(v.get("vote_text"))
+    return days or {event_date.weekday()}
 
 
 def aggregate(events: Dict[date, List[Dict[str, Any]]],
@@ -57,22 +82,29 @@ def aggregate(events: Dict[date, List[Dict[str, Any]]],
     «ходит только по средам или во все дни»."""
     out: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"nick": "", "present": 0, "absent": 0, "voted": 0, "revotes": 0,
-                 "by_weekday": defaultdict(lambda: [0, 0]), "last": None})
+                 "by_weekday": defaultdict(int), "last": None})
     for d in sorted(events):
+        offered = _offered_days(events[d], d)
         for v in events[d]:
             name, nick = resolve(v)
             p = out[name]
             if nick:
                 p["nick"] = nick
-            p["voted"] += 1
             p["revotes"] += int(v.get("revotes") or 0)
             if v.get("vote_type") == "PRESENT":
-                p["present"] += 1
-                p["by_weekday"][d.weekday()][0] += 1
+                # Считаем в ДНЯХ: «Среда и пятница» — это две тренировки, а не
+                # одна. Иначе тот, кто ходит дважды в неделю, и тот, кто раз,
+                # выглядят одинаково.
+                chosen = _vote_days(v, d) & offered or _vote_days(v, d)
+                p["present"] += len(chosen)
+                p["voted"] += len(offered)
+                for wd in chosen:
+                    p["by_weekday"][wd] += 1
                 if p["last"] is None or d > p["last"]:
                     p["last"] = d
             elif v.get("vote_type") == "ABSENT":
-                p["absent"] += 1
+                p["absent"] += len(offered)
+                p["voted"] += len(offered)
     return out
 
 
@@ -84,20 +116,28 @@ def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
     if not dates:
         return []
     stats = aggregate(events, resolve)
-    weekdays = _weekdays_of(dates)
-    # Сколько событий пришлось на каждый день недели — знаменатель для «3/4».
+    # Знаменатель для «3/4» — сколько РАЗ предлагался этот день недели.
     total_by_wd: Dict[int, int] = defaultdict(int)
     for d in dates:
-        total_by_wd[d.weekday()] += 1
+        for wd in _offered_days(events[d], d):
+            total_by_wd[wd] += 1
+    weekdays = sorted(total_by_wd)
+    total_slots = sum(total_by_wd.values())    # всего тренировочных дней
 
     rows: List[List[str]] = [[f"═══ {title} ═══"]]
 
-    present_per_event = [sum(1 for v in events[d] if v.get("vote_type") == "PRESENT")
-                         for d in dates]
+    # Явка на «событие» = сколько человеко-дней собрал этот опрос.
+    present_per_event = []
+    for d in dates:
+        offered = _offered_days(events[d], d)
+        present_per_event.append(sum(
+            len(_vote_days(v, d) & offered) or 0
+            for v in events[d] if v.get("vote_type") == "PRESENT"))
     avg = round(sum(present_per_event) / len(present_per_event), 1) if present_per_event else 0
     best_i = max(range(len(dates)), key=lambda i: present_per_event[i]) if dates else None
     worst_i = min(range(len(dates)), key=lambda i: present_per_event[i]) if dates else None
-    parts = [f"{unit.capitalize()}: {len(dates)}", f"средняя явка: {avg:g} чел."]
+    parts = [f"{unit.capitalize()}: {total_slots}", f"опросов: {len(dates)}",
+             f"средняя явка: {avg:g} чел."]
     if best_i is not None:
         d = dates[best_i]
         parts.append(f"лучшая: {DAYS_SHORT[d.weekday()]} {d.day} {MONTHS_GEN[d.month]}"
@@ -117,25 +157,23 @@ def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
     # Разбивка по дням недели: сколько всего и какая явка в среднем.
     wd_parts = []
     for wd in weekdays:
-        idx = [i for i, d in enumerate(dates) if d.weekday() == wd]
-        wd_avg = round(sum(present_per_event[i] for i in idx) / len(idx), 1)
-        wd_parts.append(f"{DAYS_SHORT[wd]} ×{len(idx)} (в среднем {wd_avg:g})")
+        came = sum(p["by_weekday"].get(wd, 0) for p in stats.values())
+        wd_avg = round(came / total_by_wd[wd], 1) if total_by_wd[wd] else 0
+        wd_parts.append(f"{DAYS_SHORT[wd]} ×{total_by_wd[wd]} (в среднем {wd_avg:g})")
     rows.append([" · ".join(parts)])
     rows.append(["По дням недели: " + " · ".join(wd_parts)])
     rows.append([""])
 
     rows.append(BASE_HEADERS + [DAYS_SHORT[wd] for wd in weekdays] + ["Последняя"])
-    total_events = len(dates)
     for name, p in sorted(stats.items(), key=lambda x: (-x[1]["present"], x[0])):
-        no_answer = max(0, total_events - p["voted"])
-        pct = f"{round(p['present'] / total_events * 100)}%" if total_events else ""
+        no_answer = max(0, total_slots - p["voted"])
+        pct = f"{round(p['present'] / total_slots * 100)}%" if total_slots else ""
         row = [name, f"@{p['nick']}" if p["nick"] else "",
                str(p["present"]), str(p["absent"]),
                str(no_answer) if no_answer else "",
                pct, str(p["revotes"]) if p["revotes"] else ""]
         for wd in weekdays:
-            came = p["by_weekday"].get(wd, [0, 0])[0]
-            row.append(f"{came}/{total_by_wd[wd]}")
+            row.append(f"{p['by_weekday'].get(wd, 0)}/{total_by_wd[wd]}")
         last = p["last"]
         row.append(f"{last.day} {MONTHS_GEN[last.month]}" if last else "—")
         rows.append(row)

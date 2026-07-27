@@ -19,6 +19,8 @@ from collections import defaultdict
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
+from datetime_utils import get_moscow_time
+
 import attendance_summary
 import sheets_cache
 from report_common import (
@@ -246,7 +248,8 @@ def build_report(
 
         detail_sections.append(db.rows)
 
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # Сервер живёт по UTC, а подпись обещала МСК — время в шапке врало на 3 часа.
+    now = get_moscow_time().strftime("%d.%m.%Y %H:%M")
     header = [
         [f"ПОСЕЩАЕМОСТЬ ИГР · Обновлено: {now} МСК"],
         ["═" * 60],

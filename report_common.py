@@ -226,7 +226,11 @@ def apply_percent_gradient(ws, column_index: int, last_row: int) -> None:
            "startColumnIndex": column_index, "endColumnIndex": column_index + 1}
     try:
         # Старые правила снимаем — иначе они копятся при каждом перезапуске.
-        existing = ws.spreadsheet.fetch_sheet_metadata().get("sheets", [])
+        # fields обязателен: без него метаданные приходят БЕЗ conditionalFormats,
+        # старые правила не находились и накапливались поверх новых.
+        existing = ws.spreadsheet.fetch_sheet_metadata(
+            params={"fields": "sheets(properties.sheetId,conditionalFormats)"}
+        ).get("sheets", [])
         drops = []
         for sh in existing:
             if sh.get("properties", {}).get("sheetId") != ws.id:
