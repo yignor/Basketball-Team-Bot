@@ -376,6 +376,7 @@ def _ib_person_row(g: Dict[str, Any], person_id: str, season_comp: Any) -> Optio
             n("Points"), n("Rebound"), n("OffRebound"), n("DefRebound"), n("Assist"),
             n("Steal"), n("Blocks"), n("Turnover"), n("Foul"),
             n("Goal23"), n("Shot23"), n("Goal3"), n("Shot3"), n("Goal1"), n("Shot1"),
+            n("Seconds"), n("PlusMinus"),
             sheets_cache.now_iso())
 
 
@@ -429,8 +430,8 @@ async def fetch_person_games_infobasket(person_id: Any,
                 """INSERT OR IGNORE INTO game_player_stats
                    (source, game_id, player_id, team_id, number, game_date, season_id,
                     stage_id, pts, reb, reb_off, reb_def, ast, stl, blk, tur, pf,
-                    fgm, fga, tpm, tpa, ftm, fta, fetched_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                    fgm, fga, tpm, tpa, ftm, fta, secs, plus_minus, fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
             added = conn.total_changes - before
             conn.commit()
     return {"seasons": seasons, "games": len(rows), "added": added}

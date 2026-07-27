@@ -56,8 +56,8 @@ def _store_player_row(conn, source: str, game_id: str, game_date: str,
         INSERT INTO game_player_stats
         (source, game_id, player_id, team_id, number, game_date, season_id, stage_id,
          pts, reb, reb_off, reb_def, ast, stl, blk, tur, pf,
-         fgm, fga, tpm, tpa, ftm, fta, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         fgm, fga, tpm, tpa, ftm, fta, secs, plus_minus, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source, game_id, player_id) DO UPDATE SET
             team_id=excluded.team_id, number=excluded.number,
             game_date=excluded.game_date, season_id=excluded.season_id,
@@ -66,14 +66,17 @@ def _store_player_row(conn, source: str, game_id: str, game_date: str,
             reb_def=excluded.reb_def, ast=excluded.ast, stl=excluded.stl,
             blk=excluded.blk, tur=excluded.tur, pf=excluded.pf,
             fgm=excluded.fgm, fga=excluded.fga, tpm=excluded.tpm, tpa=excluded.tpa,
-            ftm=excluded.ftm, fta=excluded.fta, fetched_at=excluded.fetched_at
+            ftm=excluded.ftm, fta=excluded.fta,
+            secs=excluded.secs, plus_minus=excluded.plus_minus,
+            fetched_at=excluded.fetched_at
         """,
         (source, str(game_id), str(s["player_id"]), str(team_id), str(s.get("number", "")),
          game_date, str(season_id), str(stage_id or ""),
          s.get("pts", 0), s.get("reb", 0), s.get("reb_off", 0), s.get("reb_def", 0),
          s.get("ast", 0), s.get("stl", 0), s.get("blk", 0), s.get("tur", 0), s.get("pf", 0),
          s.get("fgm", 0), s.get("fga", 0), s.get("tpm", 0), s.get("tpa", 0),
-         s.get("ftm", 0), s.get("fta", 0), sheets_cache.now_iso()),
+         s.get("ftm", 0), s.get("fta", 0),
+         s.get("secs", 0), s.get("plus_minus", 0), sheets_cache.now_iso()),
     )
 
 
@@ -133,6 +136,8 @@ def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
                 "ast": p.ast, "stl": p.stl, "blk": p.blk, "tur": p.tur, "pf": p.pf,
                 "fgm": p.fg2m + p.fg3m, "fga": p.fg2a + p.fg3a,
                 "tpm": p.fg3m, "tpa": p.fg3a, "ftm": p.ftm, "fta": p.fta,
+                # Время SLPRO отдаёт секундами; плюс-минус в бокс-скоре нет.
+                "secs": getattr(p, "time_played", 0) or 0,
             }
             _store_player_row(conn, SOURCE_SLPRO, box.game_id, game_date, season_id, team_id, row,
                               stage_id=stage_id)

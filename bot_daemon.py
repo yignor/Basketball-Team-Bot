@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -587,6 +588,7 @@ def _report_prefs_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append([InlineKeyboardButton("🔍 Подробный разбор", callback_data="rep:deep"),
                  InlineKeyboardButton("📌 Показатели", callback_data="rep:mets")])
+    rows.append([InlineKeyboardButton("📄 Получить файл за месяц", callback_data="rep:file")])
     rows.append([InlineKeyboardButton("🔔 Присылать отчёт:", callback_data="rep:noop")])
     row = []
     for key, title in personal_report.NOTIFY_MODES.items():
@@ -597,6 +599,43 @@ def _report_prefs_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     return InlineKeyboardMarkup(rows)
+
+
+async def _send_month_file(query, uid: Any) -> None:
+    """Файл по кнопке — не дожидаясь расписания. Один файл на ВСЕ лиги игрока."""
+    import player_identity
+    import monthly_report
+    profiles = [(r["source"], r["player_id"]) for r in player_identity.get_identities(uid)]
+    if not profiles:
+        await query.answer("Сначала пришли ссылку на свой профиль в лиге", show_alert=True)
+        return
+    await query.answer("Собираю файл…")
+    today = datetime.now()
+    year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+    try:
+        html_doc = await asyncio.to_thread(
+            monthly_report.build_combined, profiles, year, month)
+    except Exception as e:
+        log.warning(f"месячный файл для {uid}: {e}")
+        html_doc = None
+    if not html_doc:
+        # Прошлый месяц пуст — пробуем текущий, иначе человек получит пустоту.
+        try:
+            html_doc = await asyncio.to_thread(
+                monthly_report.build_combined, profiles, today.year, today.month)
+            year, month = today.year, today.month
+        except Exception:
+            html_doc = None
+    if not html_doc:
+        await query.message.reply_text("За последние месяцы игр не нашлось — "
+                                       "файл будет, когда появятся протоколы.")
+        return
+    bio = io.BytesIO(html_doc.encode("utf-8"))
+    bio.name = f"otchet_{year}-{month:02d}.html"
+    await query.message.reply_document(
+        document=bio, filename=bio.name,
+        caption="📊 Отчёт за месяц по всем твоим лигам. Внизу файла — готовый "
+                "запрос для ИИ, если захочешь разбор поглубже.")
 
 
 def _metrics_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
@@ -612,6 +651,8 @@ def _metrics_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
             rows.append(row); row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton("✅ Выбрать все", callback_data="rep:allmet:on"),
+                 InlineKeyboardButton("⬜️ Снять все", callback_data="rep:allmet:off")])
     rows.append([InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")])
     return InlineKeyboardMarkup(rows)
 
@@ -669,6 +710,16 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
             _deep_text(uid),
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")]]))
+        return
+    if len(parts) >= 3 and parts[1] == "allmet":
+        # «Снять все» оставляет один показатель: пустой отчёт бессмыслен.
+        keys = ([k for k, _, _ in personal_report.ALL_METRICS] if parts[2] == "on"
+                else [personal_report.DEFAULT_METRICS[0]])
+        prefs = personal_report.set_pref(uid, "metrics", ",".join(keys))
+        await query.edit_message_reply_markup(reply_markup=_metrics_markup(prefs))
+        return
+    if len(parts) >= 2 and parts[1] == "file":
+        await _send_month_file(query, uid)
         return
     if len(parts) >= 2 and parts[1] == "mets":
         await query.edit_message_reply_markup(
@@ -1587,7 +1638,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
-    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|deep|back)"))
+    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file)"))
     # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
     # но отвечает, только если в сообщении действительно есть ссылка.
     app.add_handler(MessageHandler(

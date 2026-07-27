@@ -33,6 +33,11 @@ ALL_METRICS: List[Tuple[str, str, bool]] = [
     ("blk", "блок-шоты", True),
     ("tur", "потери", False),
     ("pf", "фолы", False),
+    # КПИ не храним — считаем формулой, она одинакова для обеих лиг.
+    ("kpi", "КПИ", True),
+    # Плюс-минус отдаёт только Инфобаскет; у SLPRO его нет в протоколе.
+    ("plus_minus", "плюс-минус", True),
+    ("mins", "минуты", True),
 ]
 DEFAULT_METRICS = ["pts", "reb", "ast", "stl", "blk", "tur"]
 METRIC_TITLES = {k: t for k, t, _ in ALL_METRICS}
@@ -95,8 +100,22 @@ def _reference(rows: List[Dict[str, Any]], mode: str,
     return rows
 
 
+def metric_value(row: Dict[str, Any], key: str) -> float:
+    """Значение показателя за игру. Часть считается на лету, а не хранится."""
+    if key == "kpi":
+        # Классическая «эффективность»: полезное минус промахи и потери.
+        made = float(row.get("fgm") or 0) + float(row.get("ftm") or 0)
+        att = float(row.get("fga") or 0) + float(row.get("fta") or 0)
+        return (float(row.get("pts") or 0) + float(row.get("reb") or 0)
+                + float(row.get("ast") or 0) + float(row.get("stl") or 0)
+                + float(row.get("blk") or 0) - (att - made) - float(row.get("tur") or 0))
+    if key == "mins":
+        return round(float(row.get("secs") or 0) / 60, 1)
+    return float(row.get(key) or 0)
+
+
 def _avg(rows: List[Dict[str, Any]], key: str) -> float:
-    return round(sum(float(r.get(key) or 0) for r in rows) / len(rows), 1) if rows else 0.0
+    return round(sum(metric_value(r, key) for r in rows) / len(rows), 1) if rows else 0.0
 
 
 def compare(source: str, player_id: str, mode: str = "all",

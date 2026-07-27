@@ -253,6 +253,8 @@ CREATE TABLE IF NOT EXISTS game_player_stats (
     tpa           INTEGER NOT NULL DEFAULT 0,
     ftm           INTEGER NOT NULL DEFAULT 0,
     fta           INTEGER NOT NULL DEFAULT 0,
+    secs          INTEGER NOT NULL DEFAULT 0,   -- время на площадке, секунды
+    plus_minus    INTEGER NOT NULL DEFAULT 0,   -- есть у Инфобаскета; SLPRO не отдаёт
     fetched_at    TEXT NOT NULL,
     PRIMARY KEY (source, game_id, player_id)
 );
@@ -451,6 +453,8 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "attendance", "dirty", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "fantasy_seasons", "settings_json", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "game_player_stats", "secs", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_player_stats", "plus_minus", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "tg_user_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_player_stats", "stage_id", "TEXT NOT NULL", "''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_gps_scope "

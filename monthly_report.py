@@ -267,6 +267,34 @@ def _slpro_team_names() -> Dict[str, str]:
         return {}
 
 
+def build_combined(profiles: List[tuple], year: int, month: int,
+                   team_names: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """ОДИН файл по всем лигам игрока.
+
+    Человек играет в двух лигах и хочет видеть себя целиком, а не два отдельных
+    отчёта: сравнивать «там прибавил, тут просел» удобнее в одном месте."""
+    import player_identity
+    parts, any_games = [], False
+    for src, pid in profiles:
+        title = player_identity.SOURCE_TITLES.get(src, src)
+        htm = build_html(title, src, pid, year, month,
+                         team_names=(team_names or {}) if src == "slpro" else {})
+        if not htm:
+            continue
+        any_games = True
+        # Вырезаем тело каждого отчёта и склеиваем под общей шапкой.
+        body = htm.split("<body>", 1)[1].rsplit("</body>", 1)[0]
+        parts.append(body)
+    if not any_games:
+        return None
+    if len(parts) == 1:
+        head = build_html("", profiles[0][0], profiles[0][1], year, month)  # ради стилей
+        return head.split("<body>")[0] + "<body>" + parts[0] + "</body></html>"
+    shell = build_html("", profiles[0][0], profiles[0][1], year, month) or ""
+    head = shell.split("<body>")[0]
+    return head + "<body>" + "<hr style='margin:28px 0;opacity:.3'>".join(parts) + "</body></html>"
+
+
 def build_for(tg_user_id: Optional[str], source: Optional[str], player_id: Optional[str],
               year: int, month: int) -> List[tuple]:
     """[(имя файла, html)] по всем привязанным профилям (или по указанному)."""
