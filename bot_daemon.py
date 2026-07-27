@@ -1157,6 +1157,27 @@ async def handle_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE
 BACKGROUND_TICK_SECONDS = 30
 _background_task = None
 
+# Пул фэнтези кешируется в памяти на час, но собирается походом в API двух лиг —
+# секунды. Греем его сами, чтобы за это ждал фоновый цикл, а не игрок, открывший
+# приложение. Чуть чаще, чем истекает кеш, — иначе окно, когда он уже протух.
+_POOL_WARM_INTERVAL = 2400.0
+_pool_warm_at: float = 0.0
+
+
+async def _warm_fantasy_pool() -> None:
+    global _pool_warm_at
+    if not (FANTASY_API_ENABLED and BOT_TOKEN):
+        return
+    now = time.time()
+    if now - _pool_warm_at < _POOL_WARM_INTERVAL:
+        return
+    _pool_warm_at = now
+    try:
+        pool = await fantasy_api.build_pool(force=True)
+        log.info(f"Пул фэнтези прогрет: {len(pool)} игроков")
+    except Exception as e:
+        log.warning(f"Не удалось прогреть пул фэнтези: {e}")
+
 
 async def _background_loop(app: Application) -> None:
     """Единственный независимый таймер демона. Раньше _refresh_poll_cache/
@@ -1172,6 +1193,7 @@ async def _background_loop(app: Application) -> None:
             _refresh_poll_cache()
             _refresh_db_cache()
             _periodic_push_local_changes()
+            await _warm_fantasy_pool()
             # Адрес Cloudflare-туннеля меняется при его рестарте (независимо от
             # демона). Заметив смену, пере-ставим кнопку меню на свежий адрес —
             # иначе «Открыть» вело бы на мёртвый туннель.

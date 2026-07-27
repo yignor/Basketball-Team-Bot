@@ -257,6 +257,9 @@ CREATE TABLE IF NOT EXISTS game_player_stats (
     PRIMARY KEY (source, game_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gps_player ON game_player_stats(source, player_id);
+-- «последняя игра игрока» ищется через MAX(game_date) по игроку: без даты в
+-- индексе это перебор всех его строк на каждого игрока пула.
+CREATE INDEX IF NOT EXISTS idx_gps_player_date ON game_player_stats(source, player_id, game_date);
 CREATE INDEX IF NOT EXISTS idx_gps_date ON game_player_stats(game_date);
 
 -- Какие игры уже выкачаны (чтобы не дёргать API повторно; отдельно от
@@ -345,6 +348,7 @@ CREATE TABLE IF NOT EXISTS fantasy_game_scores (
     PRIMARY KEY (user_id, season_id, source, game_id)
 );
 CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_season ON fantasy_game_scores(season_id, game_date);
+CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_user ON fantasy_game_scores(season_id, user_id, game_date);
 
 -- Личные настройки уведомлений фэнтези. По умолчанию (нет строки) — уведомляем.
 -- open — «открыт набор», lock — «набор закрыт».

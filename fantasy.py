@@ -11,6 +11,7 @@ source:team:player_id (без ФИО).
 """
 
 import json
+import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -495,7 +496,7 @@ def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:
     стоит в понедельник."""
     season = _get_season(season_id)
     if season:
-        backfill_game_scores(season)
+        backfill_if_stale(season)
     d_from, d_to = week_bounds(week_start)
     # Участники недели — те, кто её собирал: с нулём в таблице тоже нужны.
     points = {str(r["user_id"]): 0.0 for r in get_week_rosters(season_id, week_start)}
@@ -647,8 +648,13 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
 
     Считает строго по составу той недели (inherit=False), чтобы сложившийся
     зачёт не поехал: раньше несобранная неделя давала ноль, и переносить в неё
-    состав задним числом нельзя."""
+    состав задним числом нельзя.
+
+    Пакетно: статистику недостающих игр забираем ОДНИМ запросом и считаем в
+    памяти. По игре на запрос выходило больше десятка секунд на полной копии
+    лиг — это и тормозило приложение."""
     sheets_cache.init_db()
+    weights = season_weights(season)
     scope_sql, scope_params = fantasy_stats.scope_where(effective_scopes(season))
     with sheets_cache.get_connection() as conn:
         games = conn.execute(
@@ -657,35 +663,134 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
         done = {(r["source"], r["game_id"]) for r in conn.execute(
             "SELECT DISTINCT source, game_id FROM fantasy_game_scores WHERE season_id = ?",
             (season["id"],))}
-    added = 0
-    for g in games:
-        if (g["source"], g["game_id"]) in done:
-            continue
-        record_game_scores(season, g["source"], g["game_id"], g["game_date"], inherit=False)
-        added += 1
-    return added
+        missing = [g for g in games if (g["source"], g["game_id"]) not in done]
+        if not missing:
+            return 0
+
+        # Очки каждого игрока в каждой недостающей игре — одним проходом.
+        fp_by_game: Dict[Tuple[str, str], Dict[str, float]] = {}
+        need = {(g["source"], g["game_id"]) for g in missing}
+        for row in conn.execute(
+                f"SELECT * FROM game_player_stats WHERE game_date != ''{scope_sql}",
+                scope_params):
+            key = (row["source"], row["game_id"])
+            if key in need:
+                fp_by_game.setdefault(key, {})[str(row["player_id"])] = \
+                    fantasy_stats.fantasy_points(dict(row), weights)
+
+        # Составы по неделям — тоже один раз, а не на каждую игру.
+        refs_by_week: Dict[str, Dict[str, List[str]]] = {}
+        for r in conn.execute(
+                "SELECT user_id, week_start, player_refs_json FROM fantasy_rosters WHERE season_id = ?",
+                (season["id"],)):
+            try:
+                refs = json.loads(r["player_refs_json"]) or []
+            except (json.JSONDecodeError, TypeError):
+                refs = []
+            if refs:
+                refs_by_week.setdefault(r["week_start"], {})[str(r["user_id"])] = refs
+
+        now_iso = sheets_cache.now_iso()
+        batch = []
+        for g in missing:
+            try:
+                wk = week_start_of(date.fromisoformat(g["game_date"])).isoformat()
+            except (ValueError, TypeError):
+                continue
+            per_player = fp_by_game.get((g["source"], g["game_id"]), {})
+            for uid, refs in refs_by_week.get(wk, {}).items():
+                pts = 0.0
+                for ref in fantasy_stats.expand_refs(refs):
+                    src, pid = fantasy_stats.parse_ref(ref)
+                    if src == g["source"]:
+                        pts += per_player.get(pid, 0.0)
+                batch.append((uid, season["id"], g["source"], str(g["game_id"]),
+                              g["game_date"], round(pts, 2),
+                              json.dumps(refs, ensure_ascii=False), now_iso))
+        if batch:
+            conn.executemany(
+                """INSERT INTO fantasy_game_scores
+                   (user_id, season_id, source, game_id, game_date, points, refs_json, computed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, season_id, source, game_id) DO NOTHING""", batch)
+            conn.commit()
+    return len(missing)
 
 
-def season_standings_live(season_id: int) -> List[Dict[str, Any]]:
+# Как часто самолечащий бэкфилл может запускаться из путей чтения. Раньше он
+# висел на КАЖДОМ запросе таблицы и добавлял секунды; данные меняются от силы
+# раз в игру, поэтому редкой проверки достаточно.
+_BACKFILL_MIN_INTERVAL = 600.0
+_backfill_at: Dict[int, float] = {}
+
+
+def backfill_if_stale(season: Dict[str, Any]) -> None:
+    """Бэкфилл не чаще раза в 10 минут на сезон — чтобы чтение таблицы
+    оставалось дешёвым."""
+    import time as _time
+    now = _time.time()
+    if now - _backfill_at.get(season["id"], 0.0) < _BACKFILL_MIN_INTERVAL:
+        return
+    _backfill_at[season["id"]] = now
+    try:
+        backfill_game_scores(season)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"фэнтези: бэкфилл очков не удался: {e}")
+
+
+def season_standings_live(season_id: int, history_limit: int = 20) -> List[Dict[str, Any]]:
     """Живая таблица лиги: сумма зафиксированных очков участника за все игры +
-    разбивка по играм (для истории при тапе). Считается из снимков, поэтому
-    прошлые игры уже не пересчитываются — только прибавляются новые."""
+    последние игры для истории при тапе. Считается из снимков, поэтому прошлые
+    игры не пересчитываются — только прибавляются новые.
+
+    Итоги суммирует сама база; в Python тянем только хвост истории, иначе на
+    длинном сезоне таблица разрасталась бы на сотни строк на каждого."""
     sheets_cache.init_db()
     season = _get_season(season_id)
     if season:
-        backfill_game_scores(season)      # самолечение: подхватываем пропущенное
+        backfill_if_stale(season)
     with sheets_cache.get_connection() as conn:
-        rows = conn.execute(
-            """SELECT user_id, game_date, points FROM fantasy_game_scores
-               WHERE season_id = ? ORDER BY game_date""", (season_id,)).fetchall()
-    totals: Dict[str, Dict[str, Any]] = {}
-    for r in rows:
-        uid = str(r["user_id"])
-        e = totals.setdefault(uid, {"user_id": uid, "points": 0.0, "history": []})
-        e["points"] = round(e["points"] + float(r["points"] or 0), 2)
-        e["history"].append({"label": _game_label(r["game_date"]),
+        totals = conn.execute(
+            """SELECT user_id, ROUND(SUM(points), 2) AS points FROM fantasy_game_scores
+               WHERE season_id = ? GROUP BY user_id ORDER BY points DESC""",
+            (season_id,)).fetchall()
+        hist: Dict[str, List[Dict[str, Any]]] = {}
+        for r in conn.execute(
+                """SELECT user_id, game_date, points FROM fantasy_game_scores
+                   WHERE season_id = ? ORDER BY game_date DESC""", (season_id,)):
+            rows = hist.setdefault(str(r["user_id"]), [])
+            if len(rows) < history_limit:
+                rows.append({"label": _game_label(r["game_date"]),
                              "week": r["game_date"], "points": r["points"]})
-    return sorted(totals.values(), key=lambda x: x["points"], reverse=True)
+    return [{"user_id": str(t["user_id"]), "points": t["points"] or 0.0,
+             # фронт разворачивает историю сам — отдаём в хронологическом порядке
+             "history": list(reversed(hist.get(str(t["user_id"]), [])))}
+            for t in totals]
+
+
+def top_participants(season_id: int, d_from: Optional[str] = None,
+                     d_to: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
+    """Топ угадавших: участники по сумме очков за период. Берём из тех же
+    снимков по играм, поэтому срез за любой период честный — очки уже
+    привязаны к дате конкретной игры, а не к «текущему» составу."""
+    sheets_cache.init_db()
+    query = ("""SELECT user_id, ROUND(SUM(points), 2) AS points, COUNT(*) AS games
+                FROM fantasy_game_scores WHERE season_id = ?""")
+    params: List[Any] = [season_id]
+    if d_from:
+        query += " AND game_date >= ?"; params.append(d_from)
+    if d_to:
+        query += " AND game_date <= ?"; params.append(d_to)
+    query += " GROUP BY user_id ORDER BY points DESC LIMIT ?"
+    params.append(limit)
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+    names = display_names([r["user_id"] for r in rows])
+    for r in rows:
+        r["user_id"] = str(r["user_id"])
+        r["name"] = names.get(r["user_id"], "Участник")
+        r["points"] = r["points"] or 0.0
+    return rows
 
 
 def _game_label(game_date: str) -> str:

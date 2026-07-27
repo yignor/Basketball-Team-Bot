@@ -520,7 +520,12 @@ async def handle_top(request: web.Request) -> web.Response:
                      "fp": st["fp"], "fp_avg": st["fp_avg"], "games": st["games"],
                      "pts": st["pts"], "reb": st["reb"], "ast": st["ast"]})
     rows.sort(key=lambda x: x["fp"], reverse=True)
-    return web.json_response({"period": period, "title": title, "top": rows[:30]})
+
+    # Вторая таблица — топ угадавших: кто из участников набрал больше очков за
+    # тот же период. Считается из тех же снимков по играм.
+    guessers = fantasy.top_participants(season["id"], d_from, d_to) if season else []
+    return web.json_response({"period": period, "title": title,
+                              "top": rows[:30], "guessers": guessers})
 
 
 # ─── payload запасного входа (постоянная кнопка в Telegram) ──────────────────

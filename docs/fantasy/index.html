@@ -153,7 +153,10 @@
       <button class="chip" data-period="all" onclick="showTop('all')">Всё время</button>
     </div>
     <div class="bar"><div class="counter" id="topLabel"></div></div>
+    <div class="sect">🏀 Игроки — кто принёс больше очков</div>
     <div class="list" id="topList"></div>
+    <div class="sect">🎯 Участники — кто лучше угадал</div>
+    <div class="list" id="guessList"></div>
   </div>
   <div id="player" class="hidden">
     <div class="phead">
@@ -616,7 +619,9 @@
         .map(p => ({ref: p.ref, name: p.name, games: p.st.games, fp: p.st.fp,
                     pts: p.st.pts, reb: p.st.reb, ast: p.st.ast}))
         .sort((a, b) => b.fp - a.fp).slice(0, 30);
-      renderTop({title: 'за всё время', top: rows});
+      // Угадавших офлайн берём из общего зачёта — он и есть «за всё время».
+      const guess = (standings || []).map(s => ({name: s.name, points: s.points}));
+      renderTop({title: 'за всё время', top: rows, guessers: guess});
       return;
     }
 
@@ -632,24 +637,42 @@
   }
   window.showTop = showTop;
 
+  function medal(i) { return ['🥇','🥈','🥉'][i] || (i + 1) + '.'; }
+
   function renderTop(d) {
     $('topLabel').textContent = d.title ? 'Фэнтези-очки ' + d.title : '';
+
     const el = $('topList');
     el.innerHTML = '';
     if (!d.top || !d.top.length) {
       el.innerHTML = '<div class="banner">За этот период игр не было.</div>';
+    } else {
+      d.top.forEach((p, i) => {
+        const div = document.createElement('div');
+        div.className = 'rank';
+        div.innerHTML = `<div class="place">${medal(i)}</div>` +
+          `<div class="info"><div class="pname">${esc(p.name)}<span class="chev">›</span></div>` +
+          `<div class="pstat">${games(p.games)} · ${p.pts} очк · ${p.reb} подб · ${p.ast} пас</div></div>` +
+          `<div class="pts">${p.fp}</div>`;
+        div.onclick = () => openPlayer(p.ref);
+        el.appendChild(div);
+      });
+    }
+
+    const gl = $('guessList');
+    gl.innerHTML = '';
+    if (!d.guessers || !d.guessers.length) {
+      gl.innerHTML = '<div class="banner">За этот период никто не набрал очков.</div>';
       return;
     }
-    d.top.forEach((p, i) => {
-      const medal = ['🥇','🥈','🥉'][i] || (i + 1) + '.';
+    d.guessers.forEach((g, i) => {
       const div = document.createElement('div');
       div.className = 'rank';
-      div.innerHTML = `<div class="place">${medal}</div>` +
-        `<div class="info"><div class="pname">${esc(p.name)}<span class="chev">›</span></div>` +
-        `<div class="pstat">${games(p.games)} · ${p.pts} очк · ${p.reb} подб · ${p.ast} пас</div></div>` +
-        `<div class="pts">${p.fp}</div>`;
-      div.onclick = () => openPlayer(p.ref);
-      el.appendChild(div);
+      div.innerHTML = `<div class="place">${medal(i)}</div>` +
+        `<div class="info"><div class="pname">${esc(g.name || 'Участник')}</div>` +
+        (g.games ? `<div class="pstat">${games(g.games)} в зачёте</div>` : '') + `</div>` +
+        `<div class="pts">${g.points}</div>`;
+      gl.appendChild(div);
     });
   }
 
