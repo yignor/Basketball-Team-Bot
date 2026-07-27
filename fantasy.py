@@ -241,6 +241,24 @@ def _update_settings(season: Dict[str, Any], **changes: Any) -> bool:
     return True
 
 
+def set_weights(weights: Dict[str, float], season_id: int) -> bool:
+    """Веса начисления очков. Менять их задним числом безопасно: очки уже
+    сыграных игр зафиксированы снимками (см. record_game_scores) и не
+    пересчитываются."""
+    clean = {}
+    for key in fantasy_stats.DEFAULT_WEIGHTS:
+        try:
+            clean[key] = round(float(weights.get(key, fantasy_stats.DEFAULT_WEIGHTS[key])), 2)
+        except (TypeError, ValueError):
+            clean[key] = fantasy_stats.DEFAULT_WEIGHTS[key]
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE fantasy_seasons SET scoring_json=? WHERE id=?",
+                     (json.dumps(clean, ensure_ascii=False), season_id))
+        conn.commit()
+    return True
+
+
 def set_max_per_player(n: int, season_id: Optional[int] = None) -> bool:
     season = get_active_season() if season_id is None else _get_season(season_id)
     return _update_settings(season, max_per_player=int(n)) if season else False

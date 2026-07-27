@@ -117,6 +117,7 @@
     <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
     <button class="tab" id="tab-top" onclick="showTab('top')">🔥 Топ</button>
+    <button class="tab hidden" id="tab-admin" onclick="showTab('admin')">⚙️</button>
   </div>
   <div id="draft">
     <div class="bar">
@@ -171,6 +172,11 @@
     <div id="pBody"></div>
   </div>
 
+  <div id="admin" class="hidden">
+    <div class="bar"><div class="counter">Настройки лиг. Правки применяются сразу.</div></div>
+    <div id="adminBody"></div>
+  </div>
+
   <div id="saveBar" class="hidden">
     <button id="saveBtn" onclick="saveRoster()">Сохранить состав</button>
   </div>
@@ -208,7 +214,7 @@
   // прячем — рабочий вид приложения над текстом ошибки только сбивает с толку.
   function deadEnd(text) {
     for (const el of [$('leagueBar'), document.querySelector('.tabs'),
-                      $('draft'), $('table'), $('top'), $('saveBar')]) {
+                      $('draft'), $('table'), $('top'), $('admin'), $('saveBar')]) {
       if (el) el.classList.add('hidden');
     }
     msg(text);
@@ -584,14 +590,80 @@
   }
 
   function showTab(name) {
-    for (const t of ['draft', 'table', 'top']) {
+    for (const t of ['draft', 'table', 'top', 'admin']) {
       $(t).classList.toggle('hidden', name !== t);
       $('tab-' + t).classList.toggle('active', name === t);
     }
     syncButton();
     if (name === 'top' && !$('topList').children.length) showTop(topPeriod);
+    if (name === 'admin') loadAdmin();
   }
   window.showTab = showTab;
+
+  // ─── админка ───────────────────────────────────────────────────────────────
+  //
+  // Каждая лига правится по своему id. Инлайн-кнопки в чате этого не умели: при
+  // двух активных лигах правка уходила в последнюю, и админ этого не видел.
+
+  async function loadAdmin() {
+    const el = $('adminBody');
+    if (!live) { el.innerHTML = '<div class="banner">Админка доступна только при связи с ботом.</div>'; return; }
+    el.innerHTML = '<div class="banner">Загрузка…</div>';
+    try { renderAdmin(await api('/fantasy/admin')); }
+    catch (e) { el.innerHTML = '<div class="banner">Не удалось открыть админку.</div>'; }
+  }
+
+  async function adminDo(body) {
+    try { renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(body)})); }
+    catch (e) { tg && tg.showAlert ? tg.showAlert('Не получилось сохранить.') : 0; }
+  }
+  window.adminDo = adminDo;
+
+  function renderAdmin(d) {
+    const el = $('adminBody');
+    el.innerHTML = '';
+    if (!d.seasons || !d.seasons.length) {
+      el.innerHTML = '<div class="banner">Активных лиг нет. Запусти сезон из чат-админки.</div>';
+      return;
+    }
+    for (const s of d.seasons) {
+      const box = document.createElement('div');
+      box.className = 'rank';
+      box.style.display = 'block';
+      const scopes = (s.scopes || []).map(sc =>
+        `<button class="chip on" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${JSON.stringify(sc)}})'>` +
+        `${esc(sc.name || (sc.source + " " + (sc.stage_id || sc.season_id || "")))} ✕</button>`).join(' ');
+      box.innerHTML =
+        `<div class="pname">${esc(s.name)}</div>` +
+        `<div class="pstat">формат ${esc(s.format)} · состав ${s.roster_size} · ` +
+        `до ${s.max_per_player} на игрока</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip${s.format === '3x3' ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"format",season_id:${s.id},value:"3x3"})'>3×3</button>` +
+          `<button class="chip${s.format === '5x5' ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"format",season_id:${s.id},value:"5x5"})'>5×5</button>` +
+          `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:1})'>по 1</button>` +
+          `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:${s.roster_size}})'>без лимита</button>` +
+        `</div>` +
+        `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
+        `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны</span>'}</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip" onclick='confirmFinish(${s.id}, ${JSON.stringify(s.name)})'>🏁 Завершить лигу</button>` +
+        `</div>`;
+      el.appendChild(box);
+    }
+  }
+
+  function confirmFinish(id, name) {
+    // Завершение необратимо — спрашиваем, иначе один промах закрывает сезон.
+    const ask = 'Завершить лигу «' + name + '»? Набор состава прекратится.';
+    if (tg && tg.showConfirm) {
+      tg.showConfirm(ask, ok => { if (ok) adminDo({action: 'finish', season_id: id}); });
+    } else if (confirm(ask)) {
+      adminDo({action: 'finish', season_id: id});
+    }
+  }
+  window.confirmFinish = confirmFinish;
 
   // ─── топ игроков по фэнтези-очкам ──────────────────────────────────────────
 
@@ -763,6 +835,7 @@
       fromHash(D);
     }
     if (!pool.length) { deadEnd('Пул игроков пуст — попробуй позже.'); return; }
+    $('tab-admin').classList.toggle('hidden', !isAdmin);
     $('lockBanner').classList.toggle('hidden', !locked);
     msg('');
     $('sort').onchange = renderPool;

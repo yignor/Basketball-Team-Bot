@@ -528,6 +528,85 @@ async def handle_top(request: web.Request) -> web.Response:
                               "top": rows[:30], "guessers": guessers})
 
 
+async def handle_admin_state(request: web.Request) -> web.Response:
+    """Состояние админки: все активные лиги со своими настройками.
+
+    Каждая лига отдаётся отдельно и правится по своему id — инлайн-кнопки в чате
+    этого не умели и при двух активных лигах били по последней."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _is_admin(user):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    seasons = []
+    for s in fantasy.active_seasons():
+        scopes = fantasy.effective_scopes(s)
+        seasons.append({
+            "id": s["id"], "name": s["name"], "format": s.get("format", "3x3"),
+            "roster_size": fantasy.roster_size(s),
+            "max_per_player": fantasy.max_per_player(s),
+            "weights": fantasy.season_weights(s),
+            "scopes": scopes,
+            "scopes_title": fantasy.scopes_title(scopes),
+            "manual_scopes": bool(fantasy.season_scopes(s)),
+        })
+    return web.json_response({"seasons": seasons,
+                              "weight_keys": list(fantasy_stats.DEFAULT_WEIGHTS)})
+
+
+async def handle_admin_action(request: web.Request) -> web.Response:
+    """Действия админки. Все — с явным season_id, чтобы правка попадала именно
+    в ту лигу, которую админ видит на экране."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _is_admin(user):
+        return web.json_response({"error": "forbidden"}, status=403)
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, TypeError):
+        return web.json_response({"error": "bad_request"}, status=400)
+
+    action = str(body.get("action") or "")
+    sid = body.get("season_id")
+    try:
+        sid = int(sid) if sid is not None else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad_season"}, status=400)
+
+    if action == "start":
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return web.json_response({"error": "no_name"}, status=400)
+        fantasy.start_season(name, str(body.get("format") or "3x3"))
+    elif sid is None:
+        return web.json_response({"error": "no_season"}, status=400)
+    elif action == "format":
+        fantasy.set_format(str(body.get("value") or "3x3"), season_id=sid)
+    elif action == "max_per":
+        try:
+            fantasy.set_max_per_player(int(body.get("value")), season_id=sid)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad_value"}, status=400)
+    elif action == "weights":
+        w = body.get("value")
+        if not isinstance(w, dict):
+            return web.json_response({"error": "bad_value"}, status=400)
+        fantasy.set_weights(w, sid)
+    elif action == "scope_toggle":
+        scope = body.get("value")
+        if not isinstance(scope, dict):
+            return web.json_response({"error": "bad_value"}, status=400)
+        fantasy.toggle_season_scope(scope, season_id=sid)
+    elif action == "finish":
+        fantasy.end_season(sid)
+    else:
+        return web.json_response({"error": "unknown_action"}, status=400)
+
+    return await handle_admin_state(request)
+
+
 # ─── payload запасного входа (постоянная кнопка в Telegram) ──────────────────
 #
 # Живой вход (кнопка меню -> живой API) не работает у части игроков: то сеть до
@@ -809,6 +888,8 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/player", handle_player),
         web.get("/fantasy/standings", handle_standings),
         web.get("/fantasy/top", handle_top),
+        web.get("/fantasy/admin", handle_admin_state),
+        web.post("/fantasy/admin", handle_admin_action),
         web.get("/health", lambda r: web.json_response({"ok": True})),
     ])
     return app
