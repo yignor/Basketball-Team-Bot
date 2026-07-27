@@ -193,7 +193,22 @@ def apply_formatting(ws, all_rows: List[List[str]], extra_bold_patterns: Optiona
         bold_patterns.extend(extra_bold_patterns)
 
     width = max((len(r) for r in all_rows), default=1)
-    requests = []
+    # Сначала сбрасываем оформление на всём листе. worksheet.clear() стирает
+    # ЗНАЧЕНИЯ, но не формат: раскладка между запусками сдвигается, и тёмная
+    # шапка прошлого отчёта оставалась поверх строки с фамилией.
+    requests = [{
+        "repeatCell": {
+            "range": {"sheetId": ws.id, "startRowIndex": 0,
+                      "endRowIndex": max(len(all_rows) + 200, 1),
+                      "startColumnIndex": 0, "endColumnIndex": max(width, 12)},
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"bold": False,
+                               "foregroundColor": {"red": 0, "green": 0, "blue": 0}},
+                "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+            }},
+            "fields": "userEnteredFormat(textFormat,backgroundColor)",
+        }
+    }]
     for i, row in enumerate(all_rows):
         text = row[0] if row else ""
         if not any(p in text for p in bold_patterns):

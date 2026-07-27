@@ -286,11 +286,14 @@ def build_report(
     # ВАЖНО: пустой период НЕ должен обнулять лист. Сводки строятся по всей
     # истории и не зависят от фильтра; пусто может быть только в деталях —
     # например, в понедельник, когда на новой неделе тренировок ещё не было.
-    all_events: Dict[date, List[Dict]] = {}
+    # Событие — недельный опрос (он один на дату). Дни внутри него берутся из
+    # вариантов ответа, поэтому дробить по опросам не нужно; а вот пересозданный
+    # опрос на ту же дату так не удвоит знаменатель.
+    all_events: List[Tuple[date, List[Dict]]] = []
     for _dt_str, _vlist in by_training.items():
         _d = iso_to_date(_dt_str)
         if _d:
-            all_events[_d] = _vlist
+            all_events.append((_d, _vlist))
     summary_rows_all = attendance_summary.build_sections(
         all_events, resolve, unit="тренировок", roster_total=roster_size(roster))
 

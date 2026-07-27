@@ -77,19 +77,22 @@ def _offered_days(votes: Sequence[Dict[str, Any]], event_date: date) -> set:
     return days or {event_date.weekday()}
 
 
-def aggregate(events: Dict[date, List[Dict[str, Any]]],
+def aggregate(events: Sequence[Tuple[date, List[Dict[str, Any]]]],
               resolve) -> Dict[str, Dict[str, Any]]:
     """Считает по каждому человеку статистику за период.
 
-    events — {дата события: [голоса]}; resolve(vote) -> (ФИО, ник).
+    events — СПИСОК (дата, голоса): в один день бывает две игры и переопрос
+    после переноса, а словарь по дате их схлопывал — знаменатель занижался и
+    являлась «явка 200%». resolve(vote) -> (ФИО, ник, ключ).
     Отдельно копим явку по дням недели: это и есть ответ на вопрос
     «ходит только по средам или во все дни»."""
     out: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {"nick": "", "key": "", "present": 0, "absent": 0, "voted": 0,
-                 "revotes": 0, "by_weekday": defaultdict(int), "last": None})
-    for d in sorted(events):
-        offered = _offered_days(events[d], d)
-        for v in events[d]:
+                 "revotes": 0, "by_weekday": defaultdict(int), "slots": set(),
+                 "last": None})
+    for idx, (d, votes) in enumerate(sorted(events, key=lambda x: x[0])):
+        offered = _offered_days(votes, d)
+        for v in votes:
             name, nick, key = resolve(v)
             p = out[name]
             if nick:
@@ -101,30 +104,40 @@ def aggregate(events: Dict[date, List[Dict[str, Any]]],
                 # одна. Иначе тот, кто ходит дважды в неделю, и тот, кто раз,
                 # выглядят одинаково.
                 chosen = _vote_days(v, d) & offered or _vote_days(v, d)
-                p["present"] += len(chosen)
-                p["voted"] += len(offered)
+                # Считаем СЛОТЫ (событие + день), а не голоса: если человек
+                # почему-то оказался в одном опросе дважды, явка не удвоится.
                 for wd in chosen:
+                    if (idx, wd) in p["slots"]:
+                        continue
+                    p["slots"].add((idx, wd))
+                    p["present"] += 1
+                    p["voted"] += 1
                     p["by_weekday"][wd] += 1
                 if p["last"] is None or d > p["last"]:
                     p["last"] = d
             elif v.get("vote_type") == "ABSENT":
-                p["absent"] += len(offered)
-                p["voted"] += len(offered)
+                for wd in offered:
+                    if (idx, wd) in p["slots"]:
+                        continue
+                    p["slots"].add((idx, wd))
+                    p["absent"] += 1
+                    p["voted"] += 1
     return out
 
 
-def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
+def summary_rows(title: str, events: Sequence[Tuple[date, List[Dict[str, Any]]]],
                  resolve, unit: str = "тренировок",
                  roster_total: int = 0) -> List[List[str]]:
     """Блок сводки за период: заголовок, строка итогов, таблица по людям."""
-    dates = sorted(events)
+    events = sorted(events, key=lambda x: x[0])
+    dates = [d for d, _ in events]
     if not dates:
         return []
     stats = aggregate(events, resolve)
     # Знаменатель для «3/4» — сколько РАЗ предлагался этот день недели.
     total_by_wd: Dict[int, int] = defaultdict(int)
-    for d in dates:
-        for wd in _offered_days(events[d], d):
+    for d, votes in events:
+        for wd in _offered_days(votes, d):
             total_by_wd[wd] += 1
     weekdays = sorted(total_by_wd)
     total_slots = sum(total_by_wd.values())    # всего тренировочных дней
@@ -133,16 +146,21 @@ def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
 
     # Явка на «событие» = сколько человеко-дней собрал этот опрос.
     present_per_event = []
-    for d in dates:
-        offered = _offered_days(events[d], d)
+    for d, votes in events:
+        offered = _offered_days(votes, d)
         present_per_event.append(sum(
             len(_vote_days(v, d) & offered) or 0
-            for v in events[d] if v.get("vote_type") == "PRESENT"))
+            for v in votes if v.get("vote_type") == "PRESENT"))
     avg = round(sum(present_per_event) / len(present_per_event), 1) if present_per_event else 0
     best_i = max(range(len(dates)), key=lambda i: present_per_event[i]) if dates else None
     worst_i = min(range(len(dates)), key=lambda i: present_per_event[i]) if dates else None
-    parts = [f"{unit.capitalize()}: {total_slots}", f"опросов: {len(dates)}",
-             f"средняя явка: {avg:g} чел."]
+    parts = [f"{unit.capitalize()}: {total_slots}"]
+    # «опросов» показываем, только когда это не то же самое число: у игр опрос
+    # = игра, и повтор выглядел бы как ошибка. У тренировок один опрос может
+    # покрывать два дня — вот там разница осмысленна.
+    if len(events) != total_slots:
+        parts.append(f"опросов: {len(events)}")
+    parts.append(f"средняя явка: {avg:g} чел.")
     if best_i is not None:
         d = dates[best_i]
         parts.append(f"лучшая: {DAYS_SHORT[d.weekday()]} {d.day} {MONTHS_GEN[d.month]}"
@@ -224,7 +242,7 @@ def _period_finished(key: Tuple, kind: str, today: date) -> bool:
     return key[0] < today.year
 
 
-def build_sections(events: Dict[date, List[Dict[str, Any]]], resolve,
+def build_sections(events: Sequence[Tuple[date, List[Dict[str, Any]]]], resolve,
                    unit: str = "тренировок",
                    roster_total: int = 0,
                    today: Optional[date] = None) -> List[List[str]]:
@@ -238,9 +256,9 @@ def build_sections(events: Dict[date, List[Dict[str, Any]]], resolve,
                           ("quarter", "СВОДКИ ПО КВАРТАЛАМ"),
                           ("half", "СВОДКИ ПО ПОЛУГОДИЯМ"),
                           ("year", "СВОДКИ ПО ГОДАМ")):
-        buckets: Dict[Tuple, Dict[date, List[Dict[str, Any]]]] = defaultdict(dict)
-        for d, votes in events.items():
-            buckets[_period_key(d, kind)][d] = votes
+        buckets: Dict[Tuple, List[Tuple[date, List[Dict[str, Any]]]]] = defaultdict(list)
+        for d, votes in events:
+            buckets[_period_key(d, kind)].append((d, votes))
         keys = [k for k in buckets if _period_finished(k, kind, today)]
         if not keys:
             continue

@@ -202,11 +202,17 @@ def build_report(
     # ВАЖНО: пустой период НЕ должен обнулять лист. Сводки строятся по всей
     # истории и не зависят от фильтра; пусто может быть только в деталях —
     # например, в понедельник, когда на новой неделе тренировок ещё не было.
-    all_events: Dict[date, List[Dict]] = {}
-    for _dt_str, _vlist in by_game.items():
-        _d = iso_to_date(_dt_str)
+    # Для сводок событие — ИГРА, а не день: в один день бывает две игры и
+    # переопрос после переноса, из-за чего явка вылезала за 100%.
+    _by_event: Dict[str, List[Dict]] = defaultdict(list)
+    for _v in votes:
+        if _v["vote_type"] in ("PRESENT", "ABSENT"):
+            _by_event[str(_v.get("game_id") or _v.get("game_date"))].append(_v)
+    all_events: List[Tuple[date, List[Dict]]] = []
+    for _vlist in _by_event.values():
+        _d = iso_to_date(_vlist[0].get("game_date"))
         if _d:
-            all_events[_d] = _vlist
+            all_events.append((_d, _vlist))
     summary_rows_all = attendance_summary.build_sections(
         all_events, resolve, unit="игр", roster_total=roster_size(roster))
 
