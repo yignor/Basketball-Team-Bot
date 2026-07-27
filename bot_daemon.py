@@ -469,6 +469,25 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not parsed:
         return
 
+    # SLPRO умеет сказать, существует ли такой игрок — спрашиваем ДО привязки,
+    # иначе опечатка в ссылке молча запомнится как «твой» несуществующий id.
+    career = None
+    if parsed["source"] == player_identity.SOURCE_SLPRO:
+        try:
+            from slpro_client import SlproClient
+            info = await SlproClient().get_player_info(parsed["player_id"])
+        except Exception as e:
+            log.warning(f"SLPRO: проверка игрока {parsed['player_id']} не удалась: {e}")
+            info = None          # лига недоступна — не мешаем привязке
+        else:
+            if not info:
+                await msg.reply_text(
+                    f"❌ В SLPRO нет игрока с id {parsed['player_id']}.\n\n"
+                    "Проверь ссылку: нужна страница вида "
+                    "https://slpro.basketstat.ru/player/12684")
+                return
+            career = info.get("career") or []
+
     res = player_identity.link_identity(user.id, parsed)
     title = player_identity.SOURCE_TITLES.get(parsed["source"], parsed["source"])
     if res.get("same"):
@@ -495,7 +514,12 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         await msg.reply_text(_format_progress(parsed["source"], parsed["player_id"]))
         return
 
-    await msg.reply_text(head + "\n\n" + _format_progress(parsed["source"], parsed["player_id"]))
+    text = head + "\n\n" + _format_progress(parsed["source"], parsed["player_id"])
+    if career:
+        seasons = ", ".join(sorted({str(c.get("season")) for c in career if c.get("season")},
+                                   reverse=True))
+        text += f"\n   сезоны в лиге: {seasons}"
+    await msg.reply_text(text)
 
 
 async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

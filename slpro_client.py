@@ -144,6 +144,19 @@ class SlproClient:
         data = await self._post("teams/get-players", team_id=team_id)
         return (data or {}).get("players", []) or []
 
+    async def get_player_info(self, player_id: Any) -> Optional[Dict[str, Any]]:
+        """Карточка игрока: `career[]` (сезон × команда + агрегат сезона) и
+        `last_games[]` (последние 10). Нужна, чтобы проверить, что присланный
+        id вообще существует, и показать разбивку по сезонам, как на сайте.
+
+        `player_id` шлём СТРОКОЙ: на числе их бэкенд падает в 500
+        («trim(): Argument #1 must be of type string, int given»).
+        Роут найден в чанке страницы игрока (759.js) — перебором не давался.
+        """
+        data = await self._post("players/get-player-info", player_id=str(player_id))
+        player = (data or {}).get("player")
+        return player if isinstance(player, dict) else None
+
     async def get_game(self, game_id: Any, ctx: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Полный box-score одной игры: {game, players:{home_players,
         guest_players}, log:[...]}. Требует tournament_id + season_id — берём
