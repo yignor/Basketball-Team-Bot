@@ -40,8 +40,12 @@ MONTHS_GEN = {
 # ничего не ломает.
 PCT_COLUMN_INDEX = 5
 
+# Шкала рисуется формулой SPARKLINE в самой таблице (столбец сразу за
+# процентом). Формула зависит от номера строки, а он известен только при записи
+# листа, поэтому здесь ставим метку — её подменяет report_common.fill_sparklines.
+SPARK_TOKEN = "{SPARK}"
 BASE_HEADERS = ["Фамилия / Имя", "Ник", "Пришёл", "Пропустил",
-                "Без ответа", "% посещений", "Менял мнение"]
+                "Без ответа", "% посещений", "Шкала", "Менял мнение"]
 
 
 # Дни недели узнаём из ТЕКСТА ответа, а не из даты опроса. Опрос выходит раз в
@@ -81,15 +85,16 @@ def aggregate(events: Dict[date, List[Dict[str, Any]]],
     Отдельно копим явку по дням недели: это и есть ответ на вопрос
     «ходит только по средам или во все дни»."""
     out: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"nick": "", "present": 0, "absent": 0, "voted": 0, "revotes": 0,
-                 "by_weekday": defaultdict(int), "last": None})
+        lambda: {"nick": "", "key": "", "present": 0, "absent": 0, "voted": 0,
+                 "revotes": 0, "by_weekday": defaultdict(int), "last": None})
     for d in sorted(events):
         offered = _offered_days(events[d], d)
         for v in events[d]:
-            name, nick = resolve(v)
+            name, nick, key = resolve(v)
             p = out[name]
             if nick:
                 p["nick"] = nick
+            p["key"] = key
             p["revotes"] += int(v.get("revotes") or 0)
             if v.get("vote_type") == "PRESENT":
                 # Считаем в ДНЯХ: «Среда и пятница» — это две тренировки, а не
@@ -110,7 +115,7 @@ def aggregate(events: Dict[date, List[Dict[str, Any]]],
 
 def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
                  resolve, unit: str = "тренировок",
-                 roster_names: Optional[Sequence[str]] = None) -> List[List[str]]:
+                 roster_total: int = 0) -> List[List[str]]:
     """Блок сводки за период: заголовок, строка итогов, таблица по людям."""
     dates = sorted(events)
     if not dates:
@@ -149,11 +154,12 @@ def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
     revotes_total = sum(p["revotes"] for p in stats.values())
     if revotes_total:
         parts.append(f"смен мнения: {revotes_total}")
-    if roster_names:
-        silent = len({n.strip().lower() for n in roster_names} -
-                     {n.strip().lower() for n in stats})
-        if silent:
-            parts.append(f"ни разу не ответили: {silent}")
+    if roster_total:
+        # Считаем по ключу человека (строка листа «Игроки»), а не по ФИО:
+        # тёзки схлопывались бы, а лишний пробел в имени ломал сверку.
+        answered = len({p["key"] for p in stats.values() if p["key"].startswith("row:")})
+        if roster_total > answered:
+            parts.append(f"ни разу не ответили: {roster_total - answered}")
     # Разбивка по дням недели: сколько всего и какая явка в среднем.
     wd_parts = []
     for wd in weekdays:
@@ -171,7 +177,7 @@ def summary_rows(title: str, events: Dict[date, List[Dict[str, Any]]],
         row = [name, f"@{p['nick']}" if p["nick"] else "",
                str(p["present"]), str(p["absent"]),
                str(no_answer) if no_answer else "",
-               pct, str(p["revotes"]) if p["revotes"] else ""]
+               pct, SPARK_TOKEN, str(p["revotes"]) if p["revotes"] else ""]
         for wd in weekdays:
             row.append(f"{p['by_weekday'].get(wd, 0)}/{total_by_wd[wd]}")
         last = p["last"]
@@ -217,7 +223,7 @@ def _period_finished(key: Tuple, kind: str, today: date) -> bool:
 
 def build_sections(events: Dict[date, List[Dict[str, Any]]], resolve,
                    unit: str = "тренировок",
-                   roster_names: Optional[Sequence[str]] = None,
+                   roster_total: int = 0,
                    today: Optional[date] = None) -> List[List[str]]:
     """Все сводки: месяцы (свежие сверху), затем кварталы, полугодия, годы.
 
@@ -239,7 +245,7 @@ def build_sections(events: Dict[date, List[Dict[str, Any]]], resolve,
         wrote = False
         for key in sorted(keys, reverse=True):
             rows = summary_rows(_period_title(key, kind), buckets[key], resolve,
-                                unit=unit, roster_names=roster_names)
+                                unit=unit, roster_total=roster_total)
             if rows:
                 block.extend(rows)
                 wrote = True

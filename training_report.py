@@ -32,7 +32,8 @@ from datetime_utils import get_moscow_time
 import attendance_summary
 from report_common import (
     MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
-    load_roster, make_resolver, apply_percent_gradient,
+    load_roster, make_resolver, roster_size, apply_percent_gradient,
+    fill_sparklines, sheet_locale,
     init_sheets as _init_sheets,
     get_or_create as _get_or_create,
     load_players,
@@ -332,7 +333,7 @@ def build_report(
                 # Sort: present first, then absent
                 ordered = sorted(training_votes, key=lambda v: (0 if v["vote_type"] == "PRESENT" else 1))
                 for v in ordered:
-                    full_name, nick = resolve(v)
+                    full_name, nick, _key = resolve(v)
                     db.training_person_row(full_name, nick, v["vote_text"], v["vote_type"], v["revotes"])
 
                 db.blank()
@@ -366,9 +367,8 @@ def build_report(
         d = iso_to_date(dt_str)
         if d:
             all_events[d] = vlist
-    roster_names = [f"{p['surname']} {p['name']}".strip() for p in roster.values()]
     summary_rows = attendance_summary.build_sections(
-        all_events, resolve, unit="тренировок", roster_names=roster_names)
+        all_events, resolve, unit="тренировок", roster_total=roster_size(roster))
 
     all_rows: List[List[str]] = []
     all_rows.extend(header)
@@ -414,6 +414,11 @@ def main(
 
     # Clear sheet and write
     report_ws.clear()
+
+    # Шкала SPARKLINE: формула зависит от номера строки, поэтому метки
+    # подменяем уже после того, как все строки собраны.
+    fill_sparklines(all_rows, attendance_summary.SPARK_TOKEN,
+                    attendance_summary.PCT_COLUMN_INDEX, sheet_locale(spreadsheet))
 
     # Pad rows to equal column count for batch update
     max_cols = max(len(r) for r in all_rows) if all_rows else 1

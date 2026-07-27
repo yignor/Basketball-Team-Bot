@@ -26,7 +26,8 @@ import sheets_cache
 from report_common import (
     MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
     init_sheets, get_or_create, load_players, resolve_player,
-    load_roster, make_resolver, apply_percent_gradient,
+    load_roster, make_resolver, roster_size, apply_percent_gradient,
+    fill_sparklines, sheet_locale,
     iso_to_date, week_range, parse_period_args, apply_formatting,
 )
 
@@ -239,7 +240,7 @@ def build_report(
 
                 ordered = sorted(game_votes, key=lambda v: (0 if v["vote_type"] == "PRESENT" else 1))
                 for v in ordered:
-                    full_name, nick = resolve(v)
+                    full_name, nick, _key = resolve(v)
                     db.game_person_row(full_name, nick, v["vote_text"], v["vote_type"], v["revotes"])
 
                 db.blank()
@@ -270,9 +271,8 @@ def build_report(
         d = iso_to_date(dt_str)
         if d:
             all_events[d] = vlist
-    roster_names = [f"{p['surname']} {p['name']}".strip() for p in roster.values()]
     all_rows.extend(attendance_summary.build_sections(
-        all_events, resolve, unit="игр", roster_names=roster_names))
+        all_events, resolve, unit="игр", roster_total=roster_size(roster)))
     all_rows.extend(detail_header)
     for sec in detail_sections:
         all_rows.extend(sec)
@@ -308,6 +308,11 @@ def main(
         report_ws.add_rows(len(all_rows) + 100 - current_rows)
 
     report_ws.clear()
+
+    # Шкала SPARKLINE: формула зависит от номера строки, поэтому метки
+    # подменяем уже после того, как все строки собраны.
+    fill_sparklines(all_rows, attendance_summary.SPARK_TOKEN,
+                    attendance_summary.PCT_COLUMN_INDEX, sheet_locale(spreadsheet))
 
     max_cols = max(len(r) for r in all_rows) if all_rows else 1
     padded = [r + [""] * (max_cols - len(r)) for r in all_rows]

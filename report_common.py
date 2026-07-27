@@ -277,7 +277,11 @@ def load_roster() -> Dict[str, Dict]:
     for p in players:
         if not (p.get("surname") or p.get("name")):
             continue
+        # key — сам человек (строка листа). По нему считаем «ни разу не
+        # ответили»: сверять по ФИО нельзя — тёзки схлопнутся, а у одного
+        # человека имя в отчёте и в листе может отличаться пробелом.
         entry = {"surname": p.get("surname", ""), "name": p.get("name", ""),
+                 "key": f"row:{p.get('row_index')}",
                  "nick": (p.get("telegram_id") or p.get("nickname") or "").lstrip("@")}
         for raw in (p.get("telegram_id"), p.get("nickname")):
             uname = (raw or "").strip().lstrip("@").lower()
@@ -290,16 +294,61 @@ def load_roster() -> Dict[str, Dict]:
     return roster
 
 
+def roster_size(roster: Dict[str, Dict]) -> int:
+    """Сколько РАЗНЫХ людей в составе (один человек лежит под несколькими
+    ключами: числовой id и ник)."""
+    return len({p["key"] for p in roster.values()})
+
+
 def make_resolver(roster: Dict[str, Dict]):
-    """(ФИО из состава, ник) по голосу. Сначала числовой id — он не меняется,
-    в отличие от ника. Кого в составе нет, помечаем: молча показать имя из
+    """(ФИО из состава, ник, ключ-человека) по голосу.
+
+    Сверяем по числовому id, а если его нет — по нику; ФИО для сверки не
+    используем вовсе. Кого в составе не нашли, помечаем: молча показать имя из
     Telegram — значит выдать чужака за игрока команды."""
-    def resolve(vote: Dict) -> Tuple[str, str]:
+    def resolve(vote: Dict) -> Tuple[str, str, str]:
+        uid = str(vote.get("user_id") or "").strip()
         uname = (vote.get("username") or "").strip().lstrip("@").lower()
-        p = roster.get(f"id:{vote.get('user_id')}") or (roster.get(uname) if uname else None)
+        p = (roster.get(f"id:{uid}") if uid else None) or (roster.get(uname) if uname else None)
         if p:
-            return f"{p['surname']} {p['name']}".strip(), p["nick"] or uname
+            return f"{p['surname']} {p['name']}".strip(), p["nick"] or uname, p["key"]
         shown = (f"{vote.get('first_name', '')} {vote.get('last_name', '')}".strip()
-                 or uname or str(vote.get("user_id", "")))
-        return f"{shown} (нет в составе)", uname
+                 or uname or uid)
+        return f"{shown} (нет в составе)", uname, f"x:{uid or uname}"
     return resolve
+
+
+def fill_sparklines(all_rows: List[List[str]], token: str, pct_col: int,
+                    locale: str = "ru") -> None:
+    """Подменяет метку шкалы формулой SPARKLINE — рисует полоску прямо в ячейке.
+
+    Цвет задаём через IF по значению процента: 100% зелёная, 0% красная,
+    между — жёлтая. Делает это сама таблица, поэтому шкала живёт и при ручной
+    правке, и понятна без легенды.
+
+    Разделители зависят от локали таблицы: в русской аргументы разделяются `;`,
+    а столбцы массива `\\`; в английской — запятыми. Подставим не те — Sheets
+    покажет #ERROR! вместо шкалы.
+    """
+    arg = ";" if locale.startswith("ru") else ","
+    col = ("\\" if locale.startswith("ru") else ",")
+    letter = chr(ord("A") + pct_col)
+    for i, row in enumerate(all_rows):
+        for j, cell in enumerate(row):
+            if cell != token:
+                continue
+            ref = f"{letter}{i + 1}"
+            color = (f'IF({ref}>=0,999{arg}"#2e7d32"{arg}IF({ref}<=0,001{arg}"#c62828"{arg}"#f9a825"))'
+                     if locale.startswith("ru") else
+                     f'IF({ref}>=0.999,"#2e7d32",IF({ref}<=0.001,"#c62828","#f9a825"))')
+            row[j] = (f'=IFERROR(SPARKLINE({ref}{arg}'
+                      f'{{"charttype"{col}"bar"{arg}"max"{col}1{arg}"color1"{col}{color}}}){arg}"")')
+
+
+def sheet_locale(spreadsheet) -> str:
+    """Локаль таблицы — от неё зависят разделители в формулах."""
+    try:
+        meta = spreadsheet.fetch_sheet_metadata(params={"fields": "properties.locale"})
+        return (meta.get("properties", {}) or {}).get("locale", "ru_RU")
+    except Exception:
+        return "ru_RU"
