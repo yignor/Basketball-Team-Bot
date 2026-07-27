@@ -519,7 +519,25 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         seasons = ", ".join(sorted({str(c.get("season")) for c in career if c.get("season")},
                                    reverse=True))
         text += f"\n   сезоны в лиге: {seasons}"
+        text += "\n" + _coverage_note(parsed["player_id"], career)
     await msg.reply_text(text)
+
+
+def _coverage_note(player_id: str, career: List[Dict[str, Any]]) -> str:
+    """Честно говорим, всю ли карьеру видно. Копия лиги неполная, и молча
+    показывать «столько игр, сколько нашлось» — значит выдавать пробел за факт."""
+    import player_identity
+    league = 0
+    for c in career:
+        for st in (c.get("stats") or []):
+            league += int(st.get("games") or 0)
+    local = player_identity.have_games(player_identity.SOURCE_SLPRO, player_id)
+    if not league:
+        return ""
+    if local >= league:
+        return f"   охват: все {league} игр лиги уже в базе ✅"
+    return (f"   охват: {local} из {league} игр лиги — остальные подтянутся "
+            f"ночным обновлением копии")
 
 
 async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
