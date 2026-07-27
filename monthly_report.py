@@ -243,3 +243,117 @@ def _d(iso: str) -> str:
         return f"{d.day:02d}.{d.month:02d}"
     except (ValueError, TypeError):
         return iso
+
+
+# ─────────────────────────── Запуск и отправка ───────────────────────────────
+
+def _slpro_team_names() -> Dict[str, str]:
+    """Названия команд SLPRO — чтобы в отчёте был «Кирпичный Завод», а не №999.
+    Не вышло (сеть, смена сезона) — покажем идентификаторы, это не повод падать."""
+    try:
+        import asyncio
+        from slpro_client import SlproClient
+
+        async def go():
+            c = SlproClient()
+            ctx = await c.discover_context(["PullUp Farm", "Pull Up Farm"])
+            return await c.get_standings(ctx) if ctx else []
+
+        rows = asyncio.run(go()) or []
+        return {str(r.get("team_id")): str(r.get("name") or r.get("team_name") or "")
+                for r in rows if r.get("team_id")}
+    except Exception as e:
+        print(f"⚠️  Названия команд SLPRO не получены: {e}")
+        return {}
+
+
+def build_for(tg_user_id: Optional[str], source: Optional[str], player_id: Optional[str],
+              year: int, month: int) -> List[tuple]:
+    """[(имя файла, html)] по всем привязанным профилям (или по указанному)."""
+    import player_identity
+    if source and player_id:
+        pairs = [(source, player_id)]
+    else:
+        pairs = [(r["source"], r["player_id"])
+                 for r in player_identity.get_identities(tg_user_id or "")]
+    names = _slpro_team_names()
+    out = []
+    for src, pid in pairs:
+        title = player_identity.SOURCE_TITLES.get(src, src)
+        htm = build_html(title, src, pid, year, month,
+                         team_names=names if src == "slpro" else {})
+        if htm:
+            out.append((f"otchet_{src}_{year}-{month:02d}.html", htm))
+        else:
+            print(f"ℹ️  {title}: игр в {month:02d}.{year} не найдено")
+    return out
+
+
+def main() -> int:
+    import argparse
+    import os
+
+    ap = argparse.ArgumentParser(description="Месячный личный отчёт игрока (HTML)")
+    ap.add_argument("--tg", help="Telegram id игрока (берём его привязанные профили)")
+    ap.add_argument("--source", choices=["slpro", "infobasket"])
+    ap.add_argument("--player-id", help="id в лиге, если профиль ещё не привязан")
+    ap.add_argument("--month", help="YYYY-MM (по умолчанию прошлый месяц)")
+    ap.add_argument("--out-dir", default="/tmp", help="куда положить файлы")
+    ap.add_argument("--send", action="store_true",
+                    help="отправить файл в ЛИЧКУ (--tg обязателен)")
+    args = ap.parse_args()
+
+    if args.month:
+        year, month = (int(x) for x in args.month.split("-"))
+    else:
+        today = date.today()
+        year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+
+    files = build_for(args.tg, args.source, args.player_id, year, month)
+    if not files:
+        print("Нечего отправлять.")
+        return 0
+
+    paths = []
+    for name, htm in files:
+        path = os.path.join(args.out_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(htm)
+        os.chmod(path, 0o600)     # личная статистика — не для соседей по серверу
+        paths.append(path)
+        print(f"✅ {path} ({len(htm)} байт)")
+
+    if not args.send:
+        return 0
+    if not args.tg:
+        print("❌ --send без --tg: некуда слать")
+        return 2
+    if str(args.tg).startswith("-"):
+        # Ровно на этом уже обжигались: личная статистика ушла в общий чат.
+        print("❌ Отказ: id похож на групповой чат. Личный отчёт — только в приват.")
+        return 2
+
+    import asyncio
+    from telegram import Bot
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        print("❌ BOT_TOKEN не задан")
+        return 2
+
+    async def send():
+        bot = Bot(token)
+        for path in paths:
+            with open(path, "rb") as f:
+                await bot.send_document(
+                    chat_id=int(args.tg), document=f,
+                    filename=os.path.basename(path),
+                    caption="📊 Развёрнутый отчёт за месяц. Внизу файла — готовый "
+                            "запрос для ИИ, если захочешь разбор поглубже.")
+            print(f"📨 отправлено: {os.path.basename(path)}")
+
+    asyncio.run(send())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
