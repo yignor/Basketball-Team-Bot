@@ -563,7 +563,8 @@ async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         title = player_identity.SOURCE_TITLES.get(rec["source"], rec["source"])
         data = personal_report.compare(rec["source"], rec["player_id"],
                                        mode=prefs["compare_mode"],
-                                       since=prefs["compare_since"])
+                                       since=prefs["compare_since"],
+                                       metrics=personal_report.metrics_of(prefs))
         parts.append(personal_report.format_report(title, data, prefs["compare_mode"]))
         parts.append("")
     await update.message.reply_text("\n".join(parts).strip(),
@@ -584,6 +585,8 @@ def _report_prefs_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
             rows.append(row); row = []
     if row:
         rows.append(row)
+    rows.append([InlineKeyboardButton("🔍 Подробный разбор", callback_data="rep:deep"),
+                 InlineKeyboardButton("📌 Показатели", callback_data="rep:mets")])
     rows.append([InlineKeyboardButton("🔔 Присылать отчёт:", callback_data="rep:noop")])
     row = []
     for key, title in personal_report.NOTIFY_MODES.items():
@@ -596,6 +599,60 @@ def _report_prefs_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _metrics_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
+    """Какие показатели отслеживать. Одному важны подборы, другому фолы —
+    общий набор для всех превращает отчёт в простыню."""
+    import personal_report
+    chosen = {k for k, _, _ in personal_report.metrics_of(prefs)}
+    rows, row = [], []
+    for key, title, _ in personal_report.ALL_METRICS:
+        row.append(InlineKeyboardButton(("✅ " if key in chosen else "⬜️ ") + title,
+                                        callback_data=f"rep:met:{key}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _deep_text(user_id: Any) -> str:
+    """Подробный разбор: соперники, роль в команде, броски."""
+    import personal_report
+    import player_identity
+    out: List[str] = ["🔍 Подробный разбор", ""]
+    for rec in player_identity.get_identities(user_id):
+        src, pid = rec["source"], rec["player_id"]
+        title = player_identity.SOURCE_TITLES.get(src, src)
+        out.append(f"— {title} —")
+
+        role = personal_report.team_role(src, pid)
+        if role:
+            out.append(f"Твоя доля в команде за {role['games']} игр: "
+                       f"{role['pts_share']}% очков, {role['reb_share']}% подборов")
+
+        sh = personal_report.shooting(src, pid)
+        if sh:
+            out.append("Броски (форма против остального):")
+            for label, v in sh.items():
+                was = f"{v['was']}%" if v["was"] is not None else "—"
+                out.append(f"   • {label}: {v['now']}% против {was}, "
+                           f"{v['per_game']} попыток за игру")
+
+        vs = personal_report.vs_opponents(src, pid)
+        if vs:
+            out.append("Против тех, с кем играл не раз:")
+            for v in vs:
+                out.append(f"   • соперник {v['opponent']}: {v['meetings']} встреч, "
+                           f"побед {v['wins']}")
+                out.append(f"     было {v['prev']['pts']} очк → стало {v['last']['pts']} очк; "
+                           f"состав команды совпал на {v['roster_overlap']}%")
+        elif not role and not sh:
+            out.append("Данных пока мало — разбор появится после нескольких игр.")
+        out.append("")
+    return "\n".join(out).strip() or "Профиль не привязан."
+
+
 async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Кнопки настроек личного отчёта. Настройки персональные, поэтому никакой
     проверки на админа — но и чужие не тронуть: пишем по id нажавшего."""
@@ -606,12 +663,38 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
     import personal_report
     import player_identity
     parts = (query.data or "").split(":")
-    if len(parts) < 3:
+    uid = query.from_user.id
+    if len(parts) >= 2 and parts[1] == "deep":
+        await query.edit_message_text(
+            _deep_text(uid),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")]]))
         return
-    field = {"cmp": "compare_mode", "ntf": "notify_mode"}.get(parts[1])
-    if not field:
+    if len(parts) >= 2 and parts[1] == "mets":
+        await query.edit_message_reply_markup(
+            reply_markup=_metrics_markup(personal_report.get_prefs(uid)))
         return
-    prefs = personal_report.set_pref(query.from_user.id, field, parts[2])
+    if len(parts) >= 3 and parts[1] == "met":
+        prefs = personal_report.get_prefs(uid)
+        chosen = [k for k, _, _ in personal_report.metrics_of(prefs)]
+        key = parts[2]
+        # Последний показатель снять нельзя: пустой отчёт бессмыслен.
+        if key in chosen and len(chosen) > 1:
+            chosen.remove(key)
+        elif key not in chosen:
+            chosen.append(key)
+        prefs = personal_report.set_pref(uid, "metrics", ",".join(chosen))
+        await query.edit_message_reply_markup(reply_markup=_metrics_markup(prefs))
+        return
+    if len(parts) >= 2 and parts[1] == "back":
+        prefs = personal_report.get_prefs(uid)
+    else:
+        if len(parts) < 3:
+            return
+        field = {"cmp": "compare_mode", "ntf": "notify_mode"}.get(parts[1])
+        if not field:
+            return
+        prefs = personal_report.set_pref(uid, field, parts[2])
 
     ids = player_identity.get_identities(query.from_user.id)
     out = ["📊 Твой прогресс", ""]
@@ -619,7 +702,8 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
         title = player_identity.SOURCE_TITLES.get(rec["source"], rec["source"])
         data = personal_report.compare(rec["source"], rec["player_id"],
                                        mode=prefs["compare_mode"],
-                                       since=prefs["compare_since"])
+                                       since=prefs["compare_since"],
+                                       metrics=personal_report.metrics_of(prefs))
         out.append(personal_report.format_report(title, data, prefs["compare_mode"]))
         out.append("")
     try:
@@ -1503,7 +1587,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
-    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf):"))
+    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|deep|back)"))
     # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
     # но отвечает, только если в сообщении действительно есть ссылка.
     app.add_handler(MessageHandler(

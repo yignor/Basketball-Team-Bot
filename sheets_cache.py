@@ -373,6 +373,7 @@ CREATE TABLE IF NOT EXISTS player_report_prefs (
     compare_mode  TEXT NOT NULL DEFAULT 'all',    -- all|season|prev_season|since
     compare_since TEXT NOT NULL DEFAULT '',       -- ISO-дата для режима since
     notify_mode   TEXT NOT NULL DEFAULT 'game',   -- game|week|month|off
+    metrics       TEXT NOT NULL DEFAULT '',       -- какие показатели отслеживать
     last_sent     TEXT NOT NULL DEFAULT '',
     updated_at    TEXT NOT NULL DEFAULT ''
 );

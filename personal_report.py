@@ -20,15 +20,29 @@ from typing import Any, Dict, List, Optional, Tuple
 import sheets_cache
 import fantasy_stats
 
-# Метрики отчёта: ключ в БД -> (название, «больше — лучше»).
-METRICS: List[Tuple[str, str, bool]] = [
+# Каталог показателей: ключ в БД -> (название, «больше — лучше»). Игрок сам
+# выбирает, что отслеживать: одному важны подборы, другому фолы, и общий набор
+# для всех превращает отчёт в простыню.
+ALL_METRICS: List[Tuple[str, str, bool]] = [
     ("pts", "очки", True),
     ("reb", "подборы", True),
+    ("reb_off", "подборы в атаке", True),
+    ("reb_def", "подборы в защите", True),
     ("ast", "передачи", True),
     ("stl", "перехваты", True),
     ("blk", "блок-шоты", True),
     ("tur", "потери", False),
+    ("pf", "фолы", False),
 ]
+DEFAULT_METRICS = ["pts", "reb", "ast", "stl", "blk", "tur"]
+METRIC_TITLES = {k: t for k, t, _ in ALL_METRICS}
+
+
+def metrics_of(prefs: Optional[Dict[str, Any]] = None) -> List[Tuple[str, str, bool]]:
+    """Показатели, выбранные игроком (или набор по умолчанию)."""
+    chosen = (prefs or {}).get("metrics") or ""
+    keys = [k for k in chosen.split(",") if k] or DEFAULT_METRICS
+    return [(k, t, hb) for k, t, hb in ALL_METRICS if k in keys]
 
 # Режимы эталонного периода (с чем сравниваем текущую форму).
 COMPARE_MODES = {
@@ -87,7 +101,8 @@ def _avg(rows: List[Dict[str, Any]], key: str) -> float:
 
 def compare(source: str, player_id: str, mode: str = "all",
             since: Optional[str] = None,
-            form_games: int = DEFAULT_FORM_GAMES) -> Dict[str, Any]:
+            form_games: int = DEFAULT_FORM_GAMES,
+            metrics: Optional[List[Tuple[str, str, bool]]] = None) -> Dict[str, Any]:
     """Форма (последние игры) против эталонного периода.
 
     Эталон берём БЕЗ игр формы: иначе сравниваем период сам с собой, и разница
@@ -102,7 +117,7 @@ def compare(source: str, player_id: str, mode: str = "all",
            if (r["source"], r["game_id"]) not in form_ids]
 
     changes: List[Dict[str, Any]] = []
-    for key, title, higher_better in METRICS:
+    for key, title, higher_better in (metrics or metrics_of()):
         now, was = _avg(form, key), _avg(ref, key)
         if not ref:
             continue
@@ -130,7 +145,7 @@ def compare(source: str, player_id: str, mode: str = "all",
         "best": ({"date": best["game_date"], "pts": int(best.get("pts") or 0),
                   "reb": int(best.get("reb") or 0), "ast": int(best.get("ast") or 0),
                   "fp": fantasy_stats.fantasy_points(best)} if best else None),
-        "avg_now": {k: _avg(form, k) for k, _, _ in METRICS},
+        "avg_now": {k: _avg(form, k) for k, _, _ in (metrics or metrics_of())},
     }
 
 
@@ -195,7 +210,8 @@ NOTIFY_MODES = {
 }
 
 DEFAULT_PREFS = {"compare_mode": "all", "compare_since": "",
-                 "notify_mode": "game", "last_sent": ""}
+                 "notify_mode": "game", "last_sent": "",
+                 "metrics": ",".join(DEFAULT_METRICS)}
 
 
 def get_prefs(tg_user_id: Any) -> Dict[str, Any]:
@@ -209,7 +225,7 @@ def get_prefs(tg_user_id: Any) -> Dict[str, Any]:
 def set_pref(tg_user_id: Any, field: str, value: str) -> Dict[str, Any]:
     """Меняет одну настройку. Поле сверяем со списком — значение приходит из
     callback_data, то есть снаружи."""
-    if field not in ("compare_mode", "compare_since", "notify_mode"):
+    if field not in ("compare_mode", "compare_since", "notify_mode", "metrics"):
         return get_prefs(tg_user_id)
     prefs = get_prefs(tg_user_id)
     prefs[field] = value
@@ -217,15 +233,18 @@ def set_pref(tg_user_id: Any, field: str, value: str) -> Dict[str, Any]:
     with sheets_cache.get_connection() as conn:
         conn.execute(
             """INSERT INTO player_report_prefs
-               (tg_user_id, compare_mode, compare_since, notify_mode, last_sent, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (tg_user_id, compare_mode, compare_since, notify_mode, metrics,
+                last_sent, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(tg_user_id) DO UPDATE SET
                    compare_mode=excluded.compare_mode,
                    compare_since=excluded.compare_since,
                    notify_mode=excluded.notify_mode,
+                   metrics=excluded.metrics,
                    updated_at=excluded.updated_at""",
             (str(tg_user_id), prefs["compare_mode"], prefs["compare_since"],
-             prefs["notify_mode"], prefs.get("last_sent", ""), sheets_cache.now_iso()))
+             prefs["notify_mode"], prefs.get("metrics", ",".join(DEFAULT_METRICS)),
+             prefs.get("last_sent", ""), sheets_cache.now_iso()))
         conn.commit()
     return prefs
 
@@ -257,3 +276,130 @@ def due_for_report(prefs: Dict[str, Any], today: Optional[date] = None) -> bool:
     except ValueError:
         return True
     return gap >= (7 if mode == "week" else 30)
+
+
+# ─────────────── Углублённая аналитика ───────────────────────────────────────
+#
+# Здесь считается то, чего не видно в средних: как игрок выглядит против
+# конкретного соперника, какую долю командной работы берёт на себя и что у него
+# с броском. Всё — из бокс-скоров, которые мы и так храним целиком; выдумывать
+# «тренерские советы» сверх данных не будем, это были бы догадки.
+
+def _opponent_of(conn, source: str, game_id: str, my_team: str) -> Tuple[str, bool, int, int]:
+    """(id соперника, играли ли дома, мои очки команды, очки соперника)."""
+    row = conn.execute(
+        """SELECT home_team_id, guest_team_id, home_score, guest_score
+           FROM game_meta WHERE source = ? AND game_id = ?""",
+        (source, str(game_id))).fetchone()
+    if not row:
+        return "", False, 0, 0
+    home = str(row["home_team_id"] or "")
+    at_home = home == str(my_team)
+    opp = str(row["guest_team_id"] or "") if at_home else home
+    ours = int(row["home_score"] or 0) if at_home else int(row["guest_score"] or 0)
+    theirs = int(row["guest_score"] or 0) if at_home else int(row["home_score"] or 0)
+    return opp, at_home, ours, theirs
+
+
+def _teammates(conn, source: str, game_id: str, my_team: str, me: str) -> set:
+    """Кто ещё выходил за нашу команду в той игре — по бокс-скору."""
+    return {str(r["player_id"]) for r in conn.execute(
+        """SELECT player_id FROM game_player_stats
+           WHERE source = ? AND game_id = ? AND team_id = ? AND player_id != ?""",
+        (source, str(game_id), str(my_team), str(me)))}
+
+
+def vs_opponents(source: str, player_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+    """Как игрок выглядит против конкретных соперников.
+
+    Для последней встречи считаем, насколько совпал состав нашей команды с
+    прошлой встречей: «сыграл хуже» при полностью другой пятёрке — это другая
+    история, чем «сыграл хуже тем же составом»."""
+    rows = _games(source, player_id)
+    if not rows:
+        return []
+    sheets_cache.init_db()
+    by_opp: Dict[str, List[Dict[str, Any]]] = {}
+    with sheets_cache.get_connection() as conn:
+        for r in rows:
+            opp, at_home, ours, theirs = _opponent_of(conn, source, r["game_id"], r.get("team_id"))
+            if not opp:
+                continue          # нет меты — соперника не знаем, молчим
+            r = {**r, "_opp": opp, "_home": at_home, "_ours": ours, "_theirs": theirs,
+                 "_mates": _teammates(conn, source, r["game_id"], r.get("team_id"), player_id)}
+            by_opp.setdefault(opp, []).append(r)
+
+    out: List[Dict[str, Any]] = []
+    for opp, games in by_opp.items():
+        if len(games) < 2:
+            continue              # одна встреча — сравнивать не с чем
+        games.sort(key=lambda x: x["game_date"])
+        last, prev = games[-1], games[-2]
+        mates_now, mates_then = last["_mates"], prev["_mates"]
+        overlap = (len(mates_now & mates_then) / len(mates_now | mates_then) * 100
+                   if (mates_now | mates_then) else 0)
+        out.append({
+            "opponent": opp,
+            "meetings": len(games),
+            "last_date": last["game_date"],
+            "prev_date": prev["game_date"],
+            "last": {k: int(last.get(k) or 0) for k in ("pts", "reb", "ast", "tur")},
+            "prev": {k: int(prev.get(k) or 0) for k in ("pts", "reb", "ast", "tur")},
+            "avg_fp": round(sum(fantasy_stats.fantasy_points(g) for g in games) / len(games), 1),
+            "roster_overlap": round(overlap),
+            "wins": sum(1 for g in games if g["_ours"] > g["_theirs"]),
+        })
+    out.sort(key=lambda x: (-x["meetings"], x["last_date"]), reverse=False)
+    return out[:limit]
+
+
+def team_role(source: str, player_id: str, last_n: int = 5) -> Dict[str, Any]:
+    """Доля игрока в работе команды: сколько её очков и подборов на нём.
+
+    Средние не показывают роль: 8 очков в слабой игре команды весят больше, чем
+    8 в разгроме."""
+    rows = _games(source, player_id)
+    if not rows:
+        return {}
+    sheets_cache.init_db()
+    shares: List[Tuple[float, float]] = []
+    with sheets_cache.get_connection() as conn:
+        for r in rows[-last_n:]:
+            tot = conn.execute(
+                """SELECT SUM(pts) AS pts, SUM(reb) AS reb FROM game_player_stats
+                   WHERE source = ? AND game_id = ? AND team_id = ?""",
+                (source, str(r["game_id"]), str(r.get("team_id")))).fetchone()
+            tp, tr = int(tot["pts"] or 0), int(tot["reb"] or 0)
+            if tp or tr:
+                shares.append((int(r.get("pts") or 0) / tp * 100 if tp else 0,
+                               int(r.get("reb") or 0) / tr * 100 if tr else 0))
+    if not shares:
+        return {}
+    return {"games": len(shares),
+            "pts_share": round(sum(s[0] for s in shares) / len(shares)),
+            "reb_share": round(sum(s[1] for s in shares) / len(shares))}
+
+
+def shooting(source: str, player_id: str, last_n: int = 5) -> Dict[str, Any]:
+    """Броски: проценты за форму против остальной карьеры."""
+    rows = _games(source, player_id)
+    if not rows:
+        return {}
+    form, rest = rows[-last_n:], rows[:-last_n]
+
+    def pct(subset, made, att):
+        m = sum(int(r.get(made) or 0) for r in subset)
+        a = sum(int(r.get(att) or 0) for r in subset)
+        return (round(m / a * 100), m, a) if a else (None, m, a)
+
+    out = {}
+    for label, made, att in (("2-очковые", "fgm", "fga"),
+                             ("3-очковые", "tpm", "tpa"),
+                             ("штрафные", "ftm", "fta")):
+        now, m, a = pct(form, made, att)
+        was, _, ra = pct(rest, made, att)
+        if now is None or a < 3:
+            continue              # 1–2 броска процентом называть нельзя
+        out[label] = {"now": now, "was": was, "made": m, "att": a,
+                      "per_game": round(a / len(form), 1)}
+    return out
