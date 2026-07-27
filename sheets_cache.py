@@ -327,6 +327,25 @@ CREATE TABLE IF NOT EXISTS fantasy_weekly_scores (
 );
 CREATE INDEX IF NOT EXISTS idx_fantasy_scores_season ON fantasy_weekly_scores(season_id);
 
+-- Очки участника за КОНКРЕТНУЮ игру, зафиксированные в момент её результата.
+-- Состав теперь размораживается после каждой игры, поэтому пересчитывать неделю
+-- «текущим» составом нельзя: игрок увидел бы результат, переставил людей и
+-- получил их очки задним числом. Здесь лежит снимок: чей состав и сколько ему
+-- принесла именно эта игра. refs_json — состав на момент игры (для разбора
+-- спорных случаев).
+CREATE TABLE IF NOT EXISTS fantasy_game_scores (
+    user_id      TEXT NOT NULL,
+    season_id    INTEGER NOT NULL,
+    source       TEXT NOT NULL,
+    game_id      TEXT NOT NULL,
+    game_date    TEXT NOT NULL DEFAULT '',
+    points       REAL NOT NULL DEFAULT 0,
+    refs_json    TEXT NOT NULL DEFAULT '[]',
+    computed_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, season_id, source, game_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_season ON fantasy_game_scores(season_id, game_date);
+
 -- Личные настройки уведомлений фэнтези. По умолчанию (нет строки) — уведомляем.
 -- open — «открыт набор», lock — «набор закрыт».
 CREATE TABLE IF NOT EXISTS fantasy_notify_prefs (

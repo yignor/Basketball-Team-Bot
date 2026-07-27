@@ -144,19 +144,12 @@ class FantasyRunner:
         for season in seasons:
             if single:
                 await self._refresh_auto_scopes(season)
-            state, events = fantasy_schedule.tick(announce_hhmm=announce_hhmm, season=season)
+            # Рассылок о блокировке/открытии нет: состав закрыт ровно на время
+            # игры, игрок узнаёт об этом при попытке его сменить, а об открытии
+            # — из сообщения с результатом.
+            state, _ = fantasy_schedule.tick(announce_hhmm=announce_hhmm, season=season)
             print(f"🗓️ Фэнтези «{season['name']}»: неделя {state.get('active_week')}, "
-                  f"заблокирован={state.get('locked')}, событий={len(events)}")
-            for kind, text in events:
-                label = text if single else f"[{season['name']}] {text}"
-                chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
-                await self._send_to_chats(chat_ids, label, self.gsm.game_announcement_topic_id)
-                audience = fantasy.notify_audience(season["id"], kind)
-                # Кнопку обновляем на открытии набора — тогда офлайн-игрок сразу
-                # соберёт состав из свежего payload; на блокировке не нужна.
-                sent = await self._send_dms(audience, label,
-                                            with_fantasy_button=(kind == "open"))
-                print(f"📣 Фэнтези «{season['name']}»: событие «{kind}» — личка {sent}/{len(audience)}")
+                  f"заблокирован={state.get('locked')} (игра {state.get('locked_game')})")
         return True
 
     async def _send_to_chats(self, chat_ids: List[str], text: str, topic: Optional[int]) -> None:

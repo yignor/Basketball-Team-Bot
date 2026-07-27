@@ -510,7 +510,17 @@ class GameResultsMonitorFinal:
                 game_link=game_link,
                 our_team_leaders=our_team_leaders
             )
-            
+
+            # Напоминание про блокировку состава фэнтези (не чаще раза в неделю).
+            try:
+                import fantasy
+                hint = fantasy.result_hint()
+                if hint:
+                    message = f"{message}\n\n{hint}"
+            except Exception as e:
+                print(f"⚠️ Не удалось добавить напоминание фэнтези: {e}")
+
+
             if game_link:
                 print(f"🔗 Используется ссылка: {game_link}")
             else:

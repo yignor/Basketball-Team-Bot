@@ -23,7 +23,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl
-from datetime import date
+from datetime import date, timedelta
 
 from aiohttp import web
 
@@ -473,6 +473,56 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     return enriched
 
 
+TOP_PERIODS = ("last", "week", "month", "all")
+
+
+def _period_bounds(period: str, scopes: Any) -> Tuple[Optional[str], Optional[str], str]:
+    """(с какой даты, по какую, подпись) для среза топа игроков."""
+    today = date.today()
+    if period == "week":
+        return (today - timedelta(days=7)).isoformat(), None, "за последние 7 дней"
+    if period == "month":
+        return (today - timedelta(days=30)).isoformat(), None, "за последние 30 дней"
+    if period == "last":
+        d = fantasy_stats.last_game_date(scopes)
+        # Берём именно дату последней игры, а не «сегодня»: игры бывают раз в
+        # неделю, и срез «последняя игра» должен показывать её, а не пустоту.
+        return (d or None), (d or None), (f"игра {d[8:10]}.{d[5:7]}" if d else "последняя игра")
+    return None, None, "за всё время"
+
+
+async def handle_top(request: web.Request) -> web.Response:
+    """Топ игроков команды по фэнтези-очкам за период. Имена берём из пула —
+    транзитно из публичных API лиг, у себя ФИО не храним."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
+    season = _season(request)
+    period = request.query.get("period", "all")
+    if period not in TOP_PERIODS:
+        period = "all"
+
+    weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
+    scopes = fantasy.effective_scopes(season) if season else []
+    d_from, d_to, title = _period_bounds(period, scopes)
+    agg = fantasy_stats.player_aggregates(weights, date_from=d_from, date_to=d_to, scope=scopes)
+
+    rows = []
+    for p in await build_pool():
+        keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
+                for lr in fantasy_stats.expand_refs([p["ref"]])]
+        st = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], weights)
+        if not st or not st.get("games"):
+            continue        # не играл в этом срезе — в топе ему делать нечего
+        rows.append({"ref": p["ref"], "name": p["name"], "number": p.get("number", ""),
+                     "fp": st["fp"], "fp_avg": st["fp_avg"], "games": st["games"],
+                     "pts": st["pts"], "reb": st["reb"], "ast": st["ast"]})
+    rows.sort(key=lambda x: x["fp"], reverse=True)
+    return web.json_response({"period": period, "title": title, "top": rows[:30]})
+
+
 # ─── payload запасного входа (постоянная кнопка в Telegram) ──────────────────
 #
 # Живой вход (кнопка меню -> живой API) не работает у части игроков: то сеть до
@@ -607,11 +657,15 @@ async def handle_get_roster(request: web.Request) -> web.Response:
     if not season:
         return web.json_response({"roster": None, "week_start": None})
     week_start, locked = fantasy.active_selection(season)
-    r = fantasy.get_roster(str(user["id"]), season["id"], week_start)
+    # Состав держится, пока игрок его не поменял: на новой неделе показываем
+    # унаследованный, а не пустой — иначе кажется, что состав слетел.
+    r = fantasy.get_roster_effective(str(user["id"]), season["id"], week_start)
+    det = fantasy.lock_details() if locked else {}
     return web.json_response({
         "roster": r["refs"] if r else [],
-        # блокировка — по окну набора (расписание), даже если своей записи ещё нет
+        # блокировка — по идущей игре (расписание), даже если своей записи ещё нет
         "locked": locked or (bool(r["locked"]) if r else False),
+        "locked_since": det.get("started_hhmm", ""),
         "week_start": week_start,
     })
 
@@ -635,7 +689,11 @@ async def handle_save_roster(request: web.Request) -> web.Response:
 
     week_start, locked = fantasy.active_selection(season)
     if locked:
-        return web.json_response({"error": "locked"}, status=409)
+        # Игрок узнаёт о блокировке здесь (рассылок про неё больше нет), поэтому
+        # отдаём подробности: с какого времени и почему.
+        det = fantasy.lock_details()
+        return web.json_response({"error": "locked", "since": det.get("started_hhmm", "")},
+                                 status=409)
 
     all_pool = await build_pool()
     pool_refs = {p["ref"] for p in all_pool}
@@ -745,6 +803,7 @@ def create_app(bot_token: str) -> web.Application:
         web.post("/fantasy/exclude", handle_exclude),
         web.get("/fantasy/player", handle_player),
         web.get("/fantasy/standings", handle_standings),
+        web.get("/fantasy/top", handle_top),
         web.get("/health", lambda r: web.json_response({"ok": True})),
     ])
     return app

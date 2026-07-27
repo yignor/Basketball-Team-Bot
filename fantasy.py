@@ -47,13 +47,70 @@ def set_sched(sched: Dict[str, Any], season_id: Optional[int] = None) -> bool:
 
 
 def active_selection(season: Optional[Dict[str, Any]]) -> Tuple[str, bool]:
-    """(неделя_для_набора ISO, заблокирован ли). Пока расписание не посчитано —
-    календарная неделя, открыта (обратная совместимость)."""
+    """(неделя_для_набора ISO, заблокирован ли сейчас).
+
+    Блокировку считаем ВЖИВУЮ по расписанию игр: она должна включаться ровно на
+    стартовом свистке, а cron тикает раз в 20 минут. Состав хранится по
+    календарным неделям — между играми недели его можно менять, очки за уже
+    сыгранное зафиксированы (см. record_game_scores)."""
+    week = week_start_of(date.today()).isoformat()
     if not season:
-        return week_start_of(date.today()).isoformat(), False
+        return week, False
+    try:
+        import fantasy_schedule           # локально: fantasy_schedule импортирует нас
+        return week, bool(fantasy_schedule.lock_state()["locked"])
+    except Exception:
+        # Расписание недоступно — не запираем игроков на ровном месте.
+        return week, False
+
+
+def lock_details() -> Dict[str, Any]:
+    """Подробности текущей блокировки для объяснения игроку (какая игра, с
+    какого времени). Пусто — если сейчас не заблокировано."""
+    try:
+        import fantasy_schedule
+        return fantasy_schedule.lock_state()
+    except Exception:
+        return {"locked": False, "game_id": None, "started_at": None, "started_hhmm": ""}
+
+
+RESULT_HINT = ("🏆 Фэнтези: состав снова открыт. Он замораживается только на время "
+               "игры — собрать новый можно прямо сейчас, до следующего стартового свистка.")
+
+
+def result_hint() -> str:
+    """Напоминание про блокировку состава для сообщения с результатом игры.
+
+    Показываем не чаще раза в неделю: в каждом результате это быстро стало бы
+    шумом, который перестают читать. Пусто — если фэнтези сейчас не идёт."""
+    season = get_active_season()
+    if not season:
+        return ""
     sched = get_sched(season)
-    week = sched.get("active_week") or week_start_of(date.today()).isoformat()
-    return week, bool(sched.get("locked"))
+    today = date.today()
+    last = sched.get("hint_shown")
+    try:
+        if last and (today - date.fromisoformat(last)).days < 7:
+            return ""
+    except (ValueError, TypeError):
+        pass
+    sched["hint_shown"] = today.isoformat()
+    set_sched(sched, season["id"])
+    return RESULT_HINT
+
+
+def get_roster_effective(user_id: str, season_id: int, week_start: str) -> Optional[Dict[str, Any]]:
+    """Состав, который сейчас в игре у участника: за текущую неделю, а если её
+    ещё не собирали — унаследованный с прошлой. Состав держится, пока игрок его
+    не поменял, иначе новая неделя молча обнуляла бы человека."""
+    row = get_roster(user_id, season_id, week_start)
+    if row and row.get("refs"):
+        return row
+    inherited = effective_rosters(season_id, week_start).get(str(user_id))
+    if not inherited:
+        return row
+    return {"user_id": str(user_id), "season_id": season_id, "week_start": week_start,
+            "refs": inherited, "locked": 0, "inherited": True}
 
 
 # ─────────────────────────── Сезоны ──────────────────────────────────────────
@@ -427,45 +484,6 @@ def season_participants(season_id: int) -> List[str]:
     return [r["user_id"] for r in rows]
 
 
-# ─────────────── Личные настройки уведомлений о наборе ───────────────────────
-
-def get_notify_prefs(user_id: str) -> Dict[str, bool]:
-    """{open: bool, lock: bool}. Нет строки → уведомляем (оба True)."""
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        row = conn.execute(
-            "SELECT notify_open, notify_lock FROM fantasy_notify_prefs WHERE user_id=?",
-            (str(user_id),)).fetchone()
-    if not row:
-        return {"open": True, "lock": True}
-    return {"open": bool(row["notify_open"]), "lock": bool(row["notify_lock"])}
-
-
-def set_notify_pref(user_id: str, kind: str, value: bool) -> Dict[str, bool]:
-    """Меняет один тумблер (open/lock) и возвращает актуальные настройки."""
-    prefs = get_notify_prefs(user_id)
-    if kind in prefs:
-        prefs[kind] = value
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        conn.execute(
-            """INSERT INTO fantasy_notify_prefs (user_id, notify_open, notify_lock, updated_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET
-                   notify_open=excluded.notify_open, notify_lock=excluded.notify_lock,
-                   updated_at=excluded.updated_at""",
-            (str(user_id), 1 if prefs["open"] else 0, 1 if prefs["lock"] else 0,
-             sheets_cache.now_iso()))
-        conn.commit()
-    return prefs
-
-
-def notify_audience(season_id: int, kind: str) -> List[str]:
-    """user_id участников, которых надо уведомить о событии kind (open/lock)."""
-    return [u for u in season_participants(season_id)
-            if get_notify_prefs(u).get(kind, True)]
-
-
 # ─────────────────────────── Таблицы ─────────────────────────────────────────
 
 def weekly_standings(season_id: int, week_start: str) -> List[Dict[str, Any]]:
@@ -531,6 +549,9 @@ def apply_game_result(source: str, game_id: Any, game_date_iso: str) -> Dict[str
             (source, str(game_id)))}
     out: List[Dict[str, Any]] = []
     for season in active_seasons():
+        # Фиксируем очки ИМЕННО за эту игру, пока состав ещё заблокирован ею:
+        # дальше он разморозится, и пересчитать «как было» будет уже нельзя.
+        record_game_scores(season, source, game_id, game_date_iso)
         save_weekly_scores(season["id"], wk)          # обновляем кеш недели
         affected = []
         for r in get_week_rosters(season["id"], wk):
@@ -543,30 +564,110 @@ def apply_game_result(source: str, game_id: Any, game_date_iso: str) -> Dict[str
     return {"week": wk, "played": len(played), "seasons": out}
 
 
+def effective_rosters(season_id: int, at_date_iso: str) -> Dict[str, List[str]]:
+    """Составы участников, действовавшие на указанную дату: для каждого — его
+    последний состав, собранный НЕ ПОЗЖЕ этой даты. Состав держится, пока игрок
+    его не поменял, поэтому неделя без пересборки не обнуляет участника."""
+    sheets_cache.init_db()
+    try:
+        week = week_start_of(date.fromisoformat(at_date_iso)).isoformat()
+    except (ValueError, TypeError):
+        # Бэкфилл идёт по датам из базы — одна битая строка не должна валить всё.
+        week = week_start_of(date.today()).isoformat()
+    out: Dict[str, List[str]] = {}
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT user_id, player_refs_json, week_start FROM fantasy_rosters
+               WHERE season_id = ? AND week_start <= ?
+               ORDER BY week_start""", (season_id, week)).fetchall()
+    for r in rows:
+        try:
+            refs = json.loads(r["player_refs_json"]) or []
+        except (json.JSONDecodeError, TypeError):
+            refs = []
+        if refs:
+            out[str(r["user_id"])] = refs      # порядок ASC -> остаётся свежайший
+    return out
+
+
+def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
+                       game_date_iso: str) -> List[Dict[str, Any]]:
+    """Фиксирует очки участников за КОНКРЕТНУЮ игру — навсегда.
+
+    Вызывается в момент результата, когда состав ещё заблокирован этой игрой,
+    поэтому в снимок попадает именно тот состав, что играл. Пересчитывать потом
+    нельзя: состав размораживается после каждой игры, и «текущим» составом очки
+    уехали бы задним числом. Повторный вызов по той же игре ничего не меняет."""
+    sheets_cache.init_db()
+    weights = season_weights(season)
+    rosters = effective_rosters(season["id"], game_date_iso)
+    out: List[Dict[str, Any]] = []
+    with sheets_cache.get_connection() as conn:
+        for uid, refs in rosters.items():
+            pts = fantasy_stats.game_points(refs, source, game_id, weights)
+            conn.execute(
+                """INSERT INTO fantasy_game_scores
+                   (user_id, season_id, source, game_id, game_date, points, refs_json, computed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, season_id, source, game_id) DO NOTHING""",
+                (uid, season["id"], source, str(game_id), game_date_iso, pts,
+                 json.dumps(refs, ensure_ascii=False), sheets_cache.now_iso()))
+            out.append({"user_id": uid, "points": pts})
+        conn.commit()
+    return out
+
+
+def backfill_game_scores(season: Dict[str, Any]) -> int:
+    """Достраивает снимки по играм, которых ещё нет в fantasy_game_scores:
+    игры до перехода на поигровую фиксацию и те, чей результат бот пропустил
+    (статистика приехала ночным бэкфиллом). Уже зафиксированное не трогает."""
+    sheets_cache.init_db()
+    scope_sql, scope_params = fantasy_stats.scope_where(effective_scopes(season))
+    with sheets_cache.get_connection() as conn:
+        games = conn.execute(
+            f"""SELECT DISTINCT source, game_id, game_date FROM game_player_stats
+                WHERE game_date != ''{scope_sql}""", scope_params).fetchall()
+        done = {(r["source"], r["game_id"]) for r in conn.execute(
+            "SELECT DISTINCT source, game_id FROM fantasy_game_scores WHERE season_id = ?",
+            (season["id"],))}
+    added = 0
+    for g in games:
+        if (g["source"], g["game_id"]) in done:
+            continue
+        record_game_scores(season, g["source"], g["game_id"], g["game_date"])
+        added += 1
+    return added
+
+
 def season_standings_live(season_id: int) -> List[Dict[str, Any]]:
-    """Живая таблица лиги: суммарные очки участника за ВСЕ его недели + разбивка
-    по турам (для истории при тапе). Считается из составов, а не из кеша, —
-    обновляется сразу после каждой сыгранной игры. Так таблица не «пропадает»
-    при смене недели: всегда виден общий зачёт."""
+    """Живая таблица лиги: сумма зафиксированных очков участника за все игры +
+    разбивка по играм (для истории при тапе). Считается из снимков, поэтому
+    прошлые игры уже не пересчитываются — только прибавляются новые."""
     sheets_cache.init_db()
     season = _get_season(season_id)
-    weights = season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
-    scope = effective_scopes(season) if season else []
+    if season:
+        backfill_game_scores(season)      # самолечение: подхватываем пропущенное
     with sheets_cache.get_connection() as conn:
-        weeks = [r["week_start"] for r in conn.execute(
-            "SELECT DISTINCT week_start FROM fantasy_rosters WHERE season_id=? ORDER BY week_start",
-            (season_id,))]
+        rows = conn.execute(
+            """SELECT user_id, game_date, points FROM fantasy_game_scores
+               WHERE season_id = ? ORDER BY game_date""", (season_id,)).fetchall()
     totals: Dict[str, Dict[str, Any]] = {}
-    for wk in weeks:
-        d_from, d_to = week_bounds(wk)
-        for r in get_week_rosters(season_id, wk):
-            pts = fantasy_stats.player_points(r["refs"], weights, date_from=d_from,
-                                              date_to=d_to, scope=scope)
-            uid = str(r["user_id"])
-            e = totals.setdefault(uid, {"user_id": uid, "points": 0.0, "history": []})
-            e["points"] = round(e["points"] + pts, 2)
-            e["history"].append({"week": wk, "points": pts})
+    for r in rows:
+        uid = str(r["user_id"])
+        e = totals.setdefault(uid, {"user_id": uid, "points": 0.0, "history": []})
+        e["points"] = round(e["points"] + float(r["points"] or 0), 2)
+        e["history"].append({"label": _game_label(r["game_date"]),
+                             "week": r["game_date"], "points": r["points"]})
     return sorted(totals.values(), key=lambda x: x["points"], reverse=True)
+
+
+def _game_label(game_date: str) -> str:
+    """«2026-07-12» -> «Игра 12.07» — подпись строки истории."""
+    try:
+        d = date.fromisoformat(game_date)
+        return f"Игра {d.day:02d}.{d.month:02d}"
+    except (ValueError, TypeError):
+        return "Игра"
 
 
 def _get_season(season_id: int) -> Optional[Dict[str, Any]]:

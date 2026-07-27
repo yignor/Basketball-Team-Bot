@@ -423,35 +423,6 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _send_main_menu(update, with_keyboard=True)
 
 
-async def handle_fantasy_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/fantasy_notify — личные тумблеры уведомлений о наборе состава."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or chat.type != "private":
-        return
-    import fantasy
-    prefs = fantasy.get_notify_prefs(str(user.id))
-    await update.message.reply_text(
-        "🔔 Уведомления фэнтези о наборе состава.\nНажми, чтобы включить/выключить:",
-        reply_markup=_fantasy_notify_markup(prefs))
-
-
-async def handle_fantasy_notify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    await query.answer()
-    import fantasy
-    parts = (query.data or "").split(":")
-    if len(parts) < 3:
-        return
-    kind, value = parts[1], parts[2] == "1"
-    prefs = fantasy.set_notify_pref(str(query.from_user.id), kind, value)
-    await query.edit_message_text(
-        "🔔 Уведомления фэнтези о наборе состава.\nНажми, чтобы включить/выключить:",
-        reply_markup=_fantasy_notify_markup(prefs))
-
-
 async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Приём состава из Mini App (Telegram sendData). Валидируем на сервере и
     сохраняем — клиенту не доверяем."""
@@ -478,7 +449,11 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
         return
     week_start, sched_locked = fantasy.active_selection(season)
     if sched_locked:
-        await msg.reply_text("🔒 Набор на этот тур уже закрыт — игры начались.")
+        det = fantasy.lock_details()
+        since = f" (с {det['started_hhmm']})" if det.get("started_hhmm") else ""
+        await msg.reply_text(
+            f"🔒 Сейчас идёт игра{since} — состав заморожен.\n\n"
+            "Менять его можно будет сразу после того, как бот пришлёт результат.")
         return
     try:
         pool_refs = {p["ref"] for p in await fantasy_api.build_pool()}
@@ -1228,7 +1203,6 @@ async def on_startup(app: Application) -> None:
         await app.bot.set_my_commands([
             BotCommand("admin", "Админ-панель"),
             BotCommand("start", "Показать кнопку админ-панели"),
-            BotCommand("fantasy_notify", "Уведомления фэнтези вкл/выкл"),
         ])
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
@@ -1297,8 +1271,6 @@ def main() -> None:
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(CommandHandler("admin", handle_admin))
-    app.add_handler(CommandHandler("fantasy_notify", handle_fantasy_notify))
-    app.add_handler(CallbackQueryHandler(handle_fantasy_notify_callback, pattern=r"^fnotify:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))

@@ -346,6 +346,15 @@ class SlproManager:
             lines.append(f'🔗 <a href="https://slpro.basketstat.ru/game/{gid}">Протокол</a>')
         lines.append(f"📅 {date_ddmm}")
         lines.append(f"🏀 SLPRO · {ctx.get('division_name', '')}")
+        # Напоминание про блокировку состава (не чаще раза в неделю).
+        try:
+            import fantasy
+            hint = fantasy.result_hint()
+            if hint:
+                lines.append("")
+                lines.append(hint)
+        except Exception as e:
+            print(f"⚠️ SLPRO: не удалось добавить напоминание фэнтези: {e}")
         text = "\n".join(lines)
         # Результат публикуем в чат анонсов (или опросов — тот же общий чат).
         chat_ids = self._announce_chat_ids() or self._poll_chat_ids()

@@ -38,6 +38,9 @@
     .chip { background: var(--secondary-bg); color: var(--hint); border: none;
       border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap; }
     .chip.on { background: var(--button); color: var(--button-text); }
+    /* Четыре периода в один ряд не влезают на узком экране — даём горизонтальную
+       прокрутку вместо переноса, чтобы ряд читался как переключатель. */
+    #topPeriods { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .list { padding: 0 12px; }
     .card { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
       background: var(--secondary-bg); border-radius: 12px; margin: 8px 0;
@@ -113,6 +116,7 @@
   <div class="tabs">
     <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
+    <button class="tab" id="tab-top" onclick="showTab('top')">🔥 Топ</button>
   </div>
   <div id="draft">
     <div class="bar">
@@ -133,13 +137,23 @@
         <option value="name">Имя</option>
       </select>
     </div>
-    <div id="lockBanner" class="banner hidden">🔒 Набор на этот тур закрыт — игры начались. Открою на следующий тур после игр недели.</div>
+    <div id="lockBanner" class="banner hidden">🔒 Идёт игра — состав заморожен. Менять можно будет сразу после результата.</div>
     <div class="list" id="pool"></div>
     <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
   </div>
   <div id="table" class="hidden">
     <div class="bar"><div class="counter" id="weekLabel"></div></div>
     <div class="list" id="standings"></div>
+  </div>
+  <div id="top" class="hidden">
+    <div class="bar" id="topPeriods">
+      <button class="chip on" data-period="last" onclick="showTop('last')">Последняя игра</button>
+      <button class="chip" data-period="week" onclick="showTop('week')">Неделя</button>
+      <button class="chip" data-period="month" onclick="showTop('month')">Месяц</button>
+      <button class="chip" data-period="all" onclick="showTop('all')">Всё время</button>
+    </div>
+    <div class="bar"><div class="counter" id="topLabel"></div></div>
+    <div class="list" id="topList"></div>
   </div>
   <div id="player" class="hidden">
     <div class="phead">
@@ -191,7 +205,7 @@
   // прячем — рабочий вид приложения над текстом ошибки только сбивает с толку.
   function deadEnd(text) {
     for (const el of [$('leagueBar'), document.querySelector('.tabs'),
-                      $('draft'), $('table'), $('saveBar')]) {
+                      $('draft'), $('table'), $('top'), $('saveBar')]) {
       if (el) el.classList.add('hidden');
     }
     msg(text);
@@ -418,7 +432,7 @@
     invalid_roster: 'Неверное число игроков.',
     unknown_player: 'В составе есть игрок не из пула.',
     too_many_copies: 'Слишком много копий одного игрока.',
-    locked: 'Состав уже заблокирован до конца недели.',
+    locked: 'Идёт игра — состав заморожен. Менять можно будет сразу после результата.',
     not_a_member: 'У тебя нет доступа к фэнтези — она только для игроков команды.',
   };
 
@@ -559,7 +573,7 @@
       if (openRank === i && row.history && row.history.length) {
         for (const h of row.history.slice().reverse()) {
           const hr = document.createElement('div'); hr.className = 'row';
-          hr.innerHTML = `<span class="d">Тур с ${h.week}</span><b>${h.points}</b>`;
+          hr.innerHTML = `<span class="d">${esc(h.label || ('Тур с ' + h.week))}</span><b>${h.points}</b>`;
           el.appendChild(hr);
         }
       }
@@ -567,13 +581,77 @@
   }
 
   function showTab(name) {
-    $('draft').classList.toggle('hidden', name !== 'draft');
-    $('table').classList.toggle('hidden', name !== 'table');
-    $('tab-draft').classList.toggle('active', name === 'draft');
-    $('tab-table').classList.toggle('active', name === 'table');
+    for (const t of ['draft', 'table', 'top']) {
+      $(t).classList.toggle('hidden', name !== t);
+      $('tab-' + t).classList.toggle('active', name === t);
+    }
     syncButton();
+    if (name === 'top' && !$('topList').children.length) showTop(topPeriod);
   }
   window.showTab = showTab;
+
+  // ─── топ игроков по фэнтези-очкам ──────────────────────────────────────────
+
+  let topPeriod = 'last';
+  const topCache = {};
+
+  async function showTop(period) {
+    topPeriod = period;
+    haptic('light');
+    for (const b of document.querySelectorAll('#topPeriods .chip')) {
+      b.classList.toggle('on', b.dataset.period === period);
+    }
+    if (topCache[period]) { renderTop(topCache[period]); return; }
+
+    // Запасной режим: в payload лежат только суммарные очки за турнир, поэтому
+    // честно показываем всё время и не притворяемся, что знаем срезы.
+    if (!live) {
+      if (period !== 'all') {
+        $('topLabel').textContent = '';
+        $('topList').innerHTML = '<div class="banner">Срезы по периодам доступны ' +
+          'при связи с ботом. Здесь — только «Всё время».</div>';
+        return;
+      }
+      const rows = pool.filter(p => p.st && p.st.games)
+        .map(p => ({ref: p.ref, name: p.name, games: p.st.games, fp: p.st.fp,
+                    pts: p.st.pts, reb: p.st.reb, ast: p.st.ast}))
+        .sort((a, b) => b.fp - a.fp).slice(0, 30);
+      renderTop({title: 'за всё время', top: rows});
+      return;
+    }
+
+    $('topLabel').textContent = '';
+    $('topList').innerHTML = '<div class="banner">Загрузка…</div>';
+    try {
+      const d = await api('/fantasy/top?period=' + period);
+      topCache[period] = d;
+      renderTop(d);
+    } catch (e) {
+      $('topList').innerHTML = '<div class="banner">Не удалось загрузить топ.</div>';
+    }
+  }
+  window.showTop = showTop;
+
+  function renderTop(d) {
+    $('topLabel').textContent = d.title ? 'Фэнтези-очки ' + d.title : '';
+    const el = $('topList');
+    el.innerHTML = '';
+    if (!d.top || !d.top.length) {
+      el.innerHTML = '<div class="banner">За этот период игр не было.</div>';
+      return;
+    }
+    d.top.forEach((p, i) => {
+      const medal = ['🥇','🥈','🥉'][i] || (i + 1) + '.';
+      const div = document.createElement('div');
+      div.className = 'rank';
+      div.innerHTML = `<div class="place">${medal}</div>` +
+        `<div class="info"><div class="pname">${esc(p.name)}<span class="chev">›</span></div>` +
+        `<div class="pstat">${games(p.games)} · ${p.pts} очк · ${p.reb} подб · ${p.ast} пас</div></div>` +
+        `<div class="pts">${p.fp}</div>`;
+      div.onclick = () => openPlayer(p.ref);
+      el.appendChild(div);
+    });
+  }
 
   function togglePlayed() {
     playedOnly = !playedOnly;

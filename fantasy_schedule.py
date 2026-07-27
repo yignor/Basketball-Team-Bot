@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-Окно набора состава фэнтези, привязанное к расписанию игр.
+Блокировка состава фэнтези, привязанная к конкретной игре.
 
-Набор открыт не по календарю, а по реальным играм недели:
-  • закрывается на первом анонсе «игра сегодня» недели (в день первой игры,
-    во время оповещений) — составы фиксируются;
-  • открывается на СЛЕДУЮЩУЮ неделю после статистики по последней игре недели
-    (последняя игра + окно отслеживания), с сообщением участникам.
+Правило простое: состав замораживается с началом игры и оттаивает, когда бот
+отправил в чат её результат. Между играми — даже внутри одной недели — состав
+можно менять. Поэтому очки за каждую игру фиксируются в момент результата
+(fantasy.record_game_scores), иначе смена состава уводила бы уже начисленное.
 
-Даты игр бот знает заранее — он сам создаёт записи опросов/анонсов. Отсюда и
-берём расписание: game_date/game_time из service_records (обе лиги), без сети.
-Состояние (первая/последняя игра недели, активная неделя, что уже разослано)
-живёт в settings_json сезона; здесь — единственный, кто его пишет.
+Даты игр бот знает заранее — он сам создаёт записи опросов/анонсов, а на
+результат пишет запись РЕЗУЛЬТАТ. Отсюда и берём и время начала, и факт
+завершения: service_records, обе лиги, без сети.
 """
 
 import datetime as _dt
@@ -27,18 +25,14 @@ SCHEDULE_TYPES = (
     "ОПРОС_ИГРА_SLPRO", "АНОНС_ИГРА_SLPRO", "РЕЗУЛЬТАТ_ИГРА_SLPRO",
 )
 
-# Во сколько выходит анонс «игра сегодня» (тогда же закрываем набор).
-DEFAULT_ANNOUNCE_HHMM = "09:00"
+# Сколько держать состав закрытым, если результат так и не пришёл (бот лежал,
+# игру отменили). Без этого потолка одна потерянная запись заморозила бы
+# составы навсегда.
+MAX_LOCK_HOURS = GAME_TRACKING_WINDOW_HOURS
 
-LOCK_MSG = (
-    "🔒 Фэнтези: набор на этот тур закрыт — сегодня первая игра недели. "
-    "Составы зафиксированы. Удачи всем!"
-)
-OPEN_MSG = (
-    "🟢 Фэнтези: открыт набор команды на следующий тур!\n"
-    "Игры недели сыграны, очки подведены. Собери состав в приложении — "
-    "он закрепится с первой игрой следующего тура."
-)
+# Во сколько выходит анонс «игра сегодня». Оставлено ради совместимости вызова
+# из run_fantasy: на блокировку больше не влияет.
+DEFAULT_ANNOUNCE_HHMM = "09:00"
 
 
 def _parse_game_dt(game_date: str, game_time: str) -> Optional[_dt.datetime]:
@@ -60,105 +54,72 @@ def _parse_game_dt(game_date: str, game_time: str) -> Optional[_dt.datetime]:
         return None
 
 
-def collect_game_datetimes() -> List[_dt.datetime]:
-    """Даты-время игр нашей команды из записей опросов/анонсов/результатов.
-    Дедуп по game_id (у одной игры бывают и опрос, и результат)."""
+def collect_games() -> List[Dict[str, Any]]:
+    """Игры нашей команды: когда начало и отправлен ли результат.
+
+    У одной игры несколько записей (опрос, анонс, результат) — схлопываем по
+    game_id: время берём самое раннее непустое, а запись РЕЗУЛЬТАТ означает, что
+    итог уже ушёл в чат и держать состав закрытым больше незачем."""
     sheets_cache.init_db()
     placeholders = ",".join("?" for _ in SCHEDULE_TYPES)
-    by_game: Dict[str, _dt.datetime] = {}
+    by_game: Dict[str, Dict[str, Any]] = {}
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            f"""SELECT game_id, game_date, game_time FROM service_records
+            f"""SELECT game_id, game_date, game_time, data_type FROM service_records
                 WHERE deleted = 0 AND data_type IN ({placeholders})""",
             SCHEDULE_TYPES,
         ).fetchall()
     for r in rows:
         dt = _parse_game_dt(r["game_date"], r["game_time"])
-        if dt is None:
+        key = str(r["game_id"] or "") or (dt.isoformat() if dt else "")
+        if not key:
             continue
-        key = str(r["game_id"] or dt.isoformat())
-        # если у игры несколько записей — оставляем любую (дата одна)
-        by_game[key] = dt
-    return list(by_game.values())
+        g = by_game.setdefault(key, {"game_id": key, "dt": None, "has_result": False})
+        if dt and (g["dt"] is None or dt < g["dt"]):
+            g["dt"] = dt
+        if str(r["data_type"]).startswith("РЕЗУЛЬТАТ"):
+            g["has_result"] = True
+    return [g for g in by_game.values() if g["dt"] is not None]
 
 
-def _announce_dt(day: _dt.date, hhmm: str) -> _dt.datetime:
-    try:
-        hh, mm = (int(x) for x in hhmm.split(":")[:2])
-    except (ValueError, IndexError):
-        hh, mm = 9, 0
-    return _dt.datetime(day.year, day.month, day.day, hh, mm, tzinfo=MOSCOW_TZ)
+def lock_state(now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
+    """Идёт ли сейчас игра, на время которой состав заморожен.
+
+    Считается вживую, а не берётся из кеша расписания: cron тикает раз в 20
+    минут, а закрыться состав должен ровно на стартовом свистке."""
+    now = now or get_moscow_time()
+    for g in sorted(collect_games(), key=lambda x: x["dt"]):
+        if g["has_result"]:
+            continue
+        start = g["dt"]
+        if start <= now < start + _dt.timedelta(hours=MAX_LOCK_HOURS):
+            return {"locked": True, "game_id": g["game_id"],
+                    "started_at": start.isoformat(),
+                    "started_hhmm": start.strftime("%H:%M")}
+    return {"locked": False, "game_id": None, "started_at": None, "started_hhmm": ""}
 
 
 def tick(now: Optional[_dt.datetime] = None,
          announce_hhmm: str = DEFAULT_ANNOUNCE_HHMM,
          season: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], List[Tuple[str, str]]]:
-    """Пересчитывает окно набора конкретного сезона (или последнего активного)
-    и возвращает (состояние, события-к-рассылке).
+    """Обновляет кешированное состояние сезона (для админки и логов).
 
-    События — список (тип, текст) для отправки участникам. На ПЕРВОМ прогоне
-    (пустой sched) ничего не рассылается — только инициализируем состояние,
-    чтобы деплой в середине недели не выстрелил рассылкой задним числом."""
+    Рассылок больше нет: о блокировке игрок узнаёт в момент попытки сменить
+    состав, об открытии — из сообщения с результатом игры. Второй элемент
+    кортежа (события) всегда пуст — вызов сохранён ради совместимости."""
     if season is None:
         season = fantasy.get_active_season()
     if not season:
         return {"active_week": None, "locked": False}, []
 
     now = now or get_moscow_time()
+    state = lock_state(now)
+    week = fantasy.week_start_of(now.date()).isoformat()
+
     sched = fantasy.get_sched(season)
-    first_run = not sched
-    weeks: Dict[str, Dict[str, str]] = dict(sched.get("weeks") or {})
-
-    # Фиксируем first/last по каждой неделе; раз записанное не сдвигаем назад,
-    # даже когда игра прошла и выпала из выборки (важно после рестарта).
-    for dt in collect_game_datetimes():
-        wk = fantasy.week_start_of(dt.date()).isoformat()
-        w = weeks.setdefault(wk, {})
-        iso = dt.isoformat()
-        if not w.get("first") or iso < w["first"]:
-            w["first"] = iso
-        if not w.get("last") or iso > w["last"]:
-            w["last"] = iso
-
-    w0_start = fantasy.week_start_of(now.date())
-    w0 = w0_start.isoformat()
-    w1 = (w0_start + _dt.timedelta(days=7)).isoformat()
-    wk0 = weeks.get(w0)
-
-    if not wk0:
-        # На этой неделе игр нет — набор открыт на текущую неделю.
-        active, locked = w0, False
-    else:
-        first_dt = _dt.datetime.fromisoformat(wk0["first"])
-        last_dt = _dt.datetime.fromisoformat(wk0["last"])
-        lock_at = _announce_dt(first_dt.date(), announce_hhmm)
-        open_at = last_dt + _dt.timedelta(hours=GAME_TRACKING_WINDOW_HOURS)
-        if now < lock_at:
-            active, locked = w0, False        # набор на эту неделю открыт
-        elif now < open_at:
-            active, locked = w0, True         # игры идут — состав заморожен
-        else:
-            active, locked = w1, False        # неделя сыграна — открыт след. тур
-
-    lock_notified = sched.get("lock_notified", "")
-    open_notified = sched.get("open_notified", "")
-    events: List[Tuple[str, str]] = []
-
-    if locked and lock_notified != w0:
-        fantasy.lock_week(season["id"], w0)
-        if not first_run:
-            events.append(("lock", LOCK_MSG))
-        lock_notified = w0
-
-    if active == w1 and open_notified != w1:
-        if not first_run:
-            events.append(("open", OPEN_MSG))
-        open_notified = w1
-
-    sched.update(weeks=weeks, active_week=active, locked=locked,
-                 lock_notified=lock_notified, open_notified=open_notified,
-                 updated_at=now.isoformat())
+    sched.update(active_week=week, locked=state["locked"],
+                 locked_game=state["game_id"], updated_at=now.isoformat())
     fantasy.set_sched(sched, season["id"])
 
-    return ({"active_week": active, "locked": locked,
-             "first_run": first_run}, events)
+    return ({"active_week": week, "locked": state["locked"],
+             "locked_game": state["game_id"]}, [])

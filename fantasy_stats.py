@@ -360,6 +360,43 @@ def player_points(refs: List[str], weights: Optional[Dict[str, float]] = None,
     return round(total, 2)
 
 
+def last_game_date(scope: Optional[Any] = None) -> str:
+    """Дата последней игры, попавшей в локальную статистику (в рамках турниров
+    подсчёта). Нужна для среза «по последней игре»."""
+    sheets_cache.init_db()
+    scope_sql, scope_params = scope_where(scope)
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            f"""SELECT MAX(game_date) AS d FROM game_player_stats
+                WHERE game_date != ''{scope_sql}""", scope_params).fetchone()
+    return (row["d"] or "") if row else ""
+
+
+def game_points(refs: List[str], source: str, game_id: Any,
+                weights: Optional[Dict[str, float]] = None) -> float:
+    """Сколько состав набрал в ОДНОЙ конкретной игре. Нужно, чтобы зафиксировать
+    очки в момент результата: состав размораживается после каждой игры, и
+    пересчитывать задним числом «текущим» составом нельзя.
+
+    Повторы в refs умножают очки — как и в player_points (можно поставить
+    несколько слотов на одного игрока)."""
+    sheets_cache.init_db()
+    w = weights or DEFAULT_WEIGHTS
+    total = 0.0
+    with sheets_cache.get_connection() as conn:
+        for ref in expand_refs(refs):
+            src, pid = parse_ref(ref)
+            if src != source:
+                continue          # игрок из другой лиги — этой игры не касается
+            row = conn.execute(
+                """SELECT * FROM game_player_stats
+                   WHERE source = ? AND game_id = ? AND player_id = ?""",
+                (src, str(game_id), pid)).fetchone()
+            if row:
+                total += fantasy_points(dict(row), w)
+    return round(total, 2)
+
+
 # Колонки, по которым имеет смысл суммировать (покрывают любые веса сезона).
 AGG_COLUMNS = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur",
                "pf", "fgm", "fga", "tpm", "tpa", "ftm", "fta")
