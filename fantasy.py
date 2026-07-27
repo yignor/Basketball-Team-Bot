@@ -591,16 +591,27 @@ def effective_rosters(season_id: int, at_date_iso: str) -> Dict[str, List[str]]:
 
 
 def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
-                       game_date_iso: str) -> List[Dict[str, Any]]:
+                       game_date_iso: str, inherit: bool = True) -> List[Dict[str, Any]]:
     """Фиксирует очки участников за КОНКРЕТНУЮ игру — навсегда.
 
     Вызывается в момент результата, когда состав ещё заблокирован этой игрой,
     поэтому в снимок попадает именно тот состав, что играл. Пересчитывать потом
     нельзя: состав размораживается после каждой игры, и «текущим» составом очки
-    уехали бы задним числом. Повторный вызов по той же игре ничего не меняет."""
+    уехали бы задним числом. Повторный вызов по той же игре ничего не меняет.
+
+    inherit=False — считать строго по составу той недели, без переноса с
+    предыдущей. Так достраивается история: до перехода на поигровую модель
+    несобранная неделя означала ноль, и задним числом менять это нельзя."""
     sheets_cache.init_db()
     weights = season_weights(season)
-    rosters = effective_rosters(season["id"], game_date_iso)
+    if inherit:
+        rosters = effective_rosters(season["id"], game_date_iso)
+    else:
+        try:
+            wk = week_start_of(date.fromisoformat(game_date_iso)).isoformat()
+        except (ValueError, TypeError):
+            wk = week_start_of(date.today()).isoformat()
+        rosters = {str(r["user_id"]): r["refs"] for r in get_week_rosters(season["id"], wk)}
     out: List[Dict[str, Any]] = []
     with sheets_cache.get_connection() as conn:
         for uid, refs in rosters.items():
@@ -620,7 +631,11 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
 def backfill_game_scores(season: Dict[str, Any]) -> int:
     """Достраивает снимки по играм, которых ещё нет в fantasy_game_scores:
     игры до перехода на поигровую фиксацию и те, чей результат бот пропустил
-    (статистика приехала ночным бэкфиллом). Уже зафиксированное не трогает."""
+    (статистика приехала ночным бэкфиллом). Уже зафиксированное не трогает.
+
+    Считает строго по составу той недели (inherit=False), чтобы сложившийся
+    зачёт не поехал: раньше несобранная неделя давала ноль, и переносить в неё
+    состав задним числом нельзя."""
     sheets_cache.init_db()
     scope_sql, scope_params = fantasy_stats.scope_where(effective_scopes(season))
     with sheets_cache.get_connection() as conn:
@@ -634,7 +649,7 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
     for g in games:
         if (g["source"], g["game_id"]) in done:
             continue
-        record_game_scores(season, g["source"], g["game_id"], g["game_date"])
+        record_game_scores(season, g["source"], g["game_id"], g["game_date"], inherit=False)
         added += 1
     return added
 
