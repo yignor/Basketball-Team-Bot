@@ -556,10 +556,77 @@ async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "• https://www.fbp.ru/player.html?personId=XXXXXX&apiUrl=https://reg.infobasket.su\n\n"
             "Я запомню твой номер в лиге и буду показывать личный прогресс.")
         return
+    import personal_report
+    prefs = personal_report.get_prefs(user.id)
     parts = ["📊 Твой прогресс", ""]
     for rec in ids:
-        parts.append(_format_progress(rec["source"], rec["player_id"]))
-    await update.message.reply_text("\n".join(parts))
+        title = player_identity.SOURCE_TITLES.get(rec["source"], rec["source"])
+        data = personal_report.compare(rec["source"], rec["player_id"],
+                                       mode=prefs["compare_mode"],
+                                       since=prefs["compare_since"])
+        parts.append(personal_report.format_report(title, data, prefs["compare_mode"]))
+        parts.append("")
+    await update.message.reply_text("\n".join(parts).strip(),
+                                    reply_markup=_report_prefs_markup(prefs))
+
+
+def _report_prefs_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
+    """Настройки личного отчёта: с чем сравнивать и как часто присылать."""
+    import personal_report
+    rows = [[InlineKeyboardButton("⚙️ Сравнивать с периодом:", callback_data="rep:noop")]]
+    row = []
+    for key, title in personal_report.COMPARE_MODES.items():
+        if key == "since":
+            continue          # произвольная дата — отдельным вводом, не кнопкой
+        mark = "✅ " if prefs["compare_mode"] == key else ""
+        row.append(InlineKeyboardButton(f"{mark}{title}", callback_data=f"rep:cmp:{key}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔔 Присылать отчёт:", callback_data="rep:noop")])
+    row = []
+    for key, title in personal_report.NOTIFY_MODES.items():
+        mark = "✅ " if prefs["notify_mode"] == key else ""
+        row.append(InlineKeyboardButton(f"{mark}{title}", callback_data=f"rep:ntf:{key}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки настроек личного отчёта. Настройки персональные, поэтому никакой
+    проверки на админа — но и чужие не тронуть: пишем по id нажавшего."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    await query.answer()
+    import personal_report
+    import player_identity
+    parts = (query.data or "").split(":")
+    if len(parts) < 3:
+        return
+    field = {"cmp": "compare_mode", "ntf": "notify_mode"}.get(parts[1])
+    if not field:
+        return
+    prefs = personal_report.set_pref(query.from_user.id, field, parts[2])
+
+    ids = player_identity.get_identities(query.from_user.id)
+    out = ["📊 Твой прогресс", ""]
+    for rec in ids:
+        title = player_identity.SOURCE_TITLES.get(rec["source"], rec["source"])
+        data = personal_report.compare(rec["source"], rec["player_id"],
+                                       mode=prefs["compare_mode"],
+                                       since=prefs["compare_since"])
+        out.append(personal_report.format_report(title, data, prefs["compare_mode"]))
+        out.append("")
+    try:
+        await query.edit_message_text("\n".join(out).strip(),
+                                      reply_markup=_report_prefs_markup(prefs))
+    except Exception:
+        pass          # текст не изменился — Telegram ругается, это не ошибка
 
 
 async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1436,6 +1503,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
+    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf):"))
     # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
     # но отвечает, только если в сообщении действительно есть ссылка.
     app.add_handler(MessageHandler(

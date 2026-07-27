@@ -366,6 +366,17 @@ CREATE TABLE IF NOT EXISTS player_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_player_identities_player ON player_identities(source, player_id);
 
+-- Личные настройки отчёта: с чем сравнивать форму и как часто присылать.
+-- Отчёт уходит ТОЛЬКО в личку, поэтому и настройки персональные.
+CREATE TABLE IF NOT EXISTS player_report_prefs (
+    tg_user_id    TEXT PRIMARY KEY,
+    compare_mode  TEXT NOT NULL DEFAULT 'all',    -- all|season|prev_season|since
+    compare_since TEXT NOT NULL DEFAULT '',       -- ISO-дата для режима since
+    notify_mode   TEXT NOT NULL DEFAULT 'game',   -- game|week|month|off
+    last_sent     TEXT NOT NULL DEFAULT '',
+    updated_at    TEXT NOT NULL DEFAULT ''
+);
+
 -- Личные настройки уведомлений фэнтези. По умолчанию (нет строки) — уведомляем.
 -- open — «открыт набор», lock — «набор закрыт».
 CREATE TABLE IF NOT EXISTS fantasy_notify_prefs (
