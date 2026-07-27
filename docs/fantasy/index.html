@@ -165,13 +165,19 @@
   const tg = window.Telegram && window.Telegram.WebApp;
   if (tg) { tg.ready(); tg.expand(); }
 
-  // Живой бэкенд. Основной транспорт — Cloudflare quick-tunnel: его адрес
-  // меняется при рестарте, поэтому бот передаёт актуальный прямо в ссылке
-  // (?api=..., в кнопке меню и в reply-кнопке). Если адреса нет (туннель лежит)
-  // — откатываемся на Tailscale Funnel; если и он недоступен (у части игроков в
-  // РФ режет) — приложение уйдёт в запасной режим по #d=.
-  const FUNNEL = 'https://botpc.tail5ed4ef.ts.net';  // Tailscale Funnel — запасной транспорт
-  const API = (new URLSearchParams(location.search).get('api') || FUNNEL).replace(/\/+$/, '');
+  // Живой бэкенд: адрес может прийти в ссылке (?api=… — Cloudflare quick-tunnel,
+  // он меняется при каждом рестарте), запасной — Tailscale Funnel. Пробуем их
+  // ПО ОЧЕРЕДИ: ссылку Telegram кеширует (кнопка меню, старая reply-кнопка), так
+  // что адрес в ней легко оказывается мёртвым, и упираться в него, имея рабочий
+  // Funnel, нельзя. Если сервер ОТВЕТИЛ (пусть отказом) — перебор прекращаем:
+  // адреса ведут к одному серверу, его решение от смены адреса не изменится.
+  // Не достучались никуда — приложение уйдёт в запасной режим по #d=.
+  const FUNNEL = 'https://botpc.tail5ed4ef.ts.net';
+  const API_LIST = [...new Set([
+    (new URLSearchParams(location.search).get('api') || '').replace(/\/+$/, ''),
+    FUNNEL,
+  ])].filter(Boolean);
+  let API = API_LIST[0] || '';
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false;
   let pool = [], counts = {}, standings = [], weekStart = '';
@@ -603,23 +609,29 @@
     // Живой режим — если бэкенд доступен. Он даёт свежую статистику и позволяет
     // открывать приложение кнопкой меню (там sendData недоступен).
     let why = '';
-    const host = API.replace(/^https?:\/\//, '');
-    if (!API) why = 'бэкенд не настроен';
+    if (!API_LIST.length) why = 'бэкенд не настроен';
     else if (!tg) why = 'вне Telegram';
     else if (!tg.initData) why = 'Telegram не передал подпись';
     else {
-      try {
-        // Сервер ответил — значит решение за ним: либо работаем вживую, либо он
-        // нас отверг (нет сезона / не игрок) и откат бессмыслен.
-        // Первое обращение к спящему туннелю поднимает соединение и бывает
-        // медленным, поэтому одна повторная попытка после обрыва по времени.
-        let ok;
-        try { ok = await fromApi(); }
-        catch (e) { if (e.name !== 'AbortError') throw e; ok = await fromApi(); }
-        if (!ok) return;
-        live = true;
-      } catch (e) {
-        live = false;  // не достучались — запасной режим
+      let refusal = null;
+      for (const base of API_LIST) {
+        API = base;
+        try {
+          // Первое обращение к спящему туннелю поднимает соединение и бывает
+          // медленным, поэтому одна повторная попытка после обрыва по времени.
+          let ok;
+          try { ok = await fromApi(); }
+          catch (e) { if (e.name !== 'AbortError') throw e; ok = await fromApi(); }
+          if (!ok) return;
+          live = true;
+          break;
+        } catch (e) {
+          // Сервер ответил (e.data) — решение за ним, остальные адреса ведут к
+          // тому же серверу. Иначе адрес просто мёртв — пробуем следующий.
+          if (e.data) { refusal = e; break; }
+        }
+      }
+      if (!live) {
         // Если бот прислал запасную кнопку с данными (#d=), он уже подтвердил
         // игрока: показываем из payload, даже если живой API ответил «не член»
         // или «не подтверждён» (у части игроков это ложное срабатывание — ник
@@ -627,19 +639,19 @@
         // по числовому id, так что лишнего не сохранить.
         const hasHash = !!readHashData();
         // Сервер прямо отказал И запасных данных нет: откат не поможет.
-        if (!hasHash && e.data && e.data.error === 'not_a_member') {
+        if (!hasHash && refusal && refusal.data.error === 'not_a_member') {
           deadEnd(deniedText()); return;
         }
-        if (!hasHash && e.data && e.data.error === 'unauthorized') {
+        if (!hasHash && refusal && refusal.data.error === 'unauthorized') {
           deadEnd('Не удалось подтвердить вход. Открой фэнтези через бота.'); return;
         }
-        if (e.data) {
-          why = 'сервер ответил: ' + (e.data.error || e.message);
+        if (refusal) {
+          why = 'сервер ответил: ' + (refusal.data.error || refusal.message);
         } else {
           // Пинг только объясняет неудачу, но не мешает попытке: сделать его
           // шлагбаумом значило бы ронять живой режим на медленной сети.
           why = (await reachable()) ? 'запрос завис, хотя сервер отвечает'
-                                    : 'не открывается ' + host;
+                                    : 'не открывается ' + API.replace(/^https?:\/\//, '');
         }
       }
     }
