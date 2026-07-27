@@ -27,8 +27,10 @@ from typing import Dict, List, Optional, Tuple
 
 import gspread
 
+import attendance_summary
 from report_common import (
     MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
+    load_roster, make_resolver, apply_percent_gradient,
     init_sheets as _init_sheets,
     get_or_create as _get_or_create,
     load_players,
@@ -250,6 +252,10 @@ def build_report(
     Строит список строк для листа Тренировки.
     Структура: месячная сводка (новые вверху), затем детали по неделям.
     """
+    # ФИО берём из состава: ник в Telegram меняется, а тренер должен видеть
+    # человека. Голоса тех, кого в составе нет, помечаются отдельно.
+    roster = load_roster()
+    resolve = make_resolver(roster)
     by_training = group_by_training(votes)
 
     # Parse dates and sort descending (newest first)
@@ -290,71 +296,6 @@ def build_report(
     for (year, month) in sorted(months_seen.keys(), reverse=True):
         month_trainings = months_seen[(year, month)]
 
-        # ─ Monthly summary ─
-        sb = SheetBuilder()
-        sb.header_month(year, month, len(month_trainings))
-        sb.blank()
-
-        # Collect all unique players for this month
-        month_votes_all: List[Dict] = []
-        for dt_str, _ in month_trainings:
-            month_votes_all.extend(by_training[dt_str])
-
-        # Считаем всё, что нужно тренеру: явку, пропуски, молчание, смены мнения,
-        # по каким дням недели человек ходит и когда был в последний раз.
-        player_month: Dict[str, Dict] = defaultdict(
-            lambda: {"present": 0, "absent": 0, "nick": "", "revotes": 0,
-                     "voted": 0, "weekdays": defaultdict(int), "last": None})
-        date_by_training = {dt_str: d for dt_str, d in month_trainings}
-        for dt_str, _ in month_trainings:
-            for v in by_training[dt_str]:
-                full_name, nick = resolve_player(v, players)
-                p = player_month[full_name]
-                p["nick"] = nick
-                p["voted"] += 1
-                p["revotes"] += int(v.get("revotes") or 0)
-                if v["vote_type"] == "PRESENT":
-                    p["present"] += 1
-                    d = date_by_training.get(dt_str)
-                    if d:
-                        p["weekdays"][d.weekday()] += 1
-                        if p["last"] is None or d > p["last"]:
-                            p["last"] = d
-                elif v["vote_type"] == "ABSENT":
-                    p["absent"] += 1
-
-        # Per-training day counts for this month (sorted oldest→newest for readability)
-        month_day_counts: List[Tuple[date, int, int]] = []
-        for dt_str, d in sorted(month_trainings, key=lambda x: x[1]):
-            tvotes = by_training[dt_str]
-            p_cnt  = sum(1 for v in tvotes if v["vote_type"] == "PRESENT")
-            a_cnt  = sum(1 for v in tvotes if v["vote_type"] == "ABSENT")
-            month_day_counts.append((d, p_cnt, a_cnt))
-
-        # Итог по команде — первое, что видит тренер, открыв лист.
-        total_tr = len(month_trainings)
-        present_counts = [p for _, p, _ in month_day_counts]
-        avg_present = round(sum(present_counts) / len(present_counts), 1) if present_counts else 0
-        best = max(month_day_counts, key=lambda x: x[1])[:2] if month_day_counts else None
-        worst = min(month_day_counts, key=lambda x: x[1])[:2] if month_day_counts else None
-        silent = _silent_players(players, player_month)
-        sb.totals_line(total_tr, avg_present, best, worst,
-                       sum(p["revotes"] for p in player_month.values()), silent)
-        sb.training_days_line(month_day_counts)
-        sb.blank()
-        sb.summary_table_header()
-        # Sort by attendance desc
-        for pname, pdata in sorted(player_month.items(), key=lambda x: -x[1]["present"]):
-            sb.summary_row(
-                pname, pdata["nick"], pdata["present"], pdata["absent"],
-                max(0, total_tr - pdata["voted"]), pdata["revotes"],
-                _weekdays_label(pdata["weekdays"]),
-                _date_label(pdata["last"]),
-            )
-
-        sb.blank(2)
-        summary_sections.append(sb.rows)
-
         # ─ Detail section: weekly blocks ─
         db = SheetBuilder()
         db.meta_row(f"──────── Детальные данные: {MONTHS_RU.get(month, '')} {year} ────────")
@@ -389,7 +330,7 @@ def build_report(
                 # Sort: present first, then absent
                 ordered = sorted(training_votes, key=lambda v: (0 if v["vote_type"] == "PRESENT" else 1))
                 for v in ordered:
-                    full_name, nick = resolve_player(v, players)
+                    full_name, nick = resolve(v)
                     db.training_person_row(full_name, nick, v["vote_text"], v["vote_type"], v["revotes"])
 
                 db.blank()
@@ -405,8 +346,6 @@ def build_report(
         [f"ПОСЕЩАЕМОСТЬ ТРЕНИРОВОК · Обновлено: {now} МСК"],
         ["═" * 60],
         [""],
-        ["СВОДКИ ПО МЕСЯЦАМ"],
-        [""],
     ]
 
     detail_header = [
@@ -416,10 +355,21 @@ def build_report(
         [""],
     ]
 
+    # Сводки строим по ВСЕЙ истории, а не по выбранному периоду: лист
+    # перезаписывается целиком, и фильтр стирал бы прошлые месяцы. Фильтр
+    # оставлен для детальных секций — иначе лист разрастается без предела.
+    all_events: Dict[date, List[Dict]] = {}
+    for dt_str, vlist in by_training.items():
+        d = iso_to_date(dt_str)
+        if d:
+            all_events[d] = vlist
+    roster_names = [f"{p['surname']} {p['name']}".strip() for p in roster.values()]
+    summary_rows = attendance_summary.build_sections(
+        all_events, resolve, unit="тренировок", roster_names=roster_names)
+
     all_rows: List[List[str]] = []
     all_rows.extend(header)
-    for sec in summary_sections:
-        all_rows.extend(sec)
+    all_rows.extend(summary_rows)
     all_rows.extend(detail_header)
     for sec in detail_sections:
         all_rows.extend(sec)
@@ -497,6 +447,8 @@ def main(
         pass
 
     apply_formatting(report_ws, all_rows, extra_bold_patterns=["🏀 Тренировка"])
+    # Цветовая шкала на колонку «% посещений»: 0% красный → 100% зелёный.
+    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX, len(all_rows))
     print(f"\n✅  Отчёт записан: {len(all_rows)} строк → лист '{REPORT_SHEET}'")
 
 

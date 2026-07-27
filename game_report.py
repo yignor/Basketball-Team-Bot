@@ -19,10 +19,12 @@ from collections import defaultdict
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
+import attendance_summary
 import sheets_cache
 from report_common import (
     MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
     init_sheets, get_or_create, load_players, resolve_player,
+    load_roster, make_resolver, apply_percent_gradient,
     iso_to_date, week_range, parse_period_args, apply_formatting,
 )
 
@@ -173,6 +175,9 @@ def build_report(
     filter_months: Optional[List[Tuple[int, int]]] = None,
     filter_week: Optional[Tuple[date, date]] = None,
 ) -> List[List[str]]:
+    # ФИО — из состава (лист «Игроки»), а не из Telegram: ник меняется.
+    roster = load_roster()
+    resolve = make_resolver(roster)
     by_game = group_by_game(votes)
 
     game_dates_all = sorted(
@@ -198,44 +203,10 @@ def build_report(
     for dt_str, d in game_dates_all:
         months_seen[(d.year, d.month)].append((dt_str, d))
 
-    summary_sections: List[List[str]] = []
     detail_sections: List[List[str]] = []
 
     for (year, month) in sorted(months_seen.keys(), reverse=True):
         month_games = months_seen[(year, month)]
-
-        sb = GameSheetBuilder()
-        sb.header_month(year, month, len(month_games))
-        sb.blank()
-
-        month_votes_all: List[Dict] = []
-        for dt_str, _ in month_games:
-            month_votes_all.extend(by_game[dt_str])
-
-        player_month: Dict[str, Dict] = defaultdict(lambda: {"present": 0, "absent": 0, "nick": ""})
-        for v in month_votes_all:
-            full_name, nick = resolve_player(v, players)
-            player_month[full_name]["nick"] = nick
-            if v["vote_type"] == "PRESENT":
-                player_month[full_name]["present"] += 1
-            elif v["vote_type"] == "ABSENT":
-                player_month[full_name]["absent"] += 1
-
-        month_day_counts: List[Tuple[date, int, int]] = []
-        for dt_str, d in sorted(month_games, key=lambda x: x[1]):
-            gvotes = by_game[dt_str]
-            p_cnt = sum(1 for v in gvotes if v["vote_type"] == "PRESENT")
-            a_cnt = sum(1 for v in gvotes if v["vote_type"] == "ABSENT")
-            month_day_counts.append((d, p_cnt, a_cnt))
-
-        sb.game_days_line(month_day_counts)
-        sb.blank()
-        sb.summary_table_header()
-        for pname, pdata in sorted(player_month.items(), key=lambda x: -x[1]["present"]):
-            sb.summary_row(pname, pdata["nick"], pdata["present"], pdata["absent"])
-
-        sb.blank(2)
-        summary_sections.append(sb.rows)
 
         db = GameSheetBuilder()
         db.meta_row(f"──────── Детальные данные: {MONTHS_RU.get(month, '')} {year} ────────")
@@ -266,7 +237,7 @@ def build_report(
 
                 ordered = sorted(game_votes, key=lambda v: (0 if v["vote_type"] == "PRESENT" else 1))
                 for v in ordered:
-                    full_name, nick = resolve_player(v, players)
+                    full_name, nick = resolve(v)
                     db.game_person_row(full_name, nick, v["vote_text"], v["vote_type"], v["revotes"])
 
                 db.blank()
@@ -280,8 +251,6 @@ def build_report(
         [f"ПОСЕЩАЕМОСТЬ ИГР · Обновлено: {now} МСК"],
         ["═" * 60],
         [""],
-        ["СВОДКИ ПО МЕСЯЦАМ"],
-        [""],
     ]
     detail_header = [
         [""],
@@ -292,8 +261,15 @@ def build_report(
 
     all_rows: List[List[str]] = []
     all_rows.extend(header)
-    for sec in summary_sections:
-        all_rows.extend(sec)
+    # Сводки — по всей истории (месяц/квартал/полугодие/год), детали — по фильтру.
+    all_events: Dict[date, List[Dict]] = {}
+    for dt_str, vlist in by_game.items():
+        d = iso_to_date(dt_str)
+        if d:
+            all_events[d] = vlist
+    roster_names = [f"{p['surname']} {p['name']}".strip() for p in roster.values()]
+    all_rows.extend(attendance_summary.build_sections(
+        all_events, resolve, unit="игр", roster_names=roster_names))
     all_rows.extend(detail_header)
     for sec in detail_sections:
         all_rows.extend(sec)
@@ -363,6 +339,7 @@ def main(
         pass
 
     apply_formatting(report_ws, all_rows, extra_bold_patterns=["🏀 Игра"])
+    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX, len(all_rows))
     print(f"\n✅  Отчёт записан: {len(all_rows)} строк → лист '{REPORT_SHEET}'")
 
 

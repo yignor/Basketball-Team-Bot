@@ -166,8 +166,24 @@ def parse_period_args(args, format_error_month: str = "❌ Формат --month:
 
 # ─────────────────────────── Sheet formatting ────────────────────────────────
 
+# Заливаем ТОЛЬКО заголовки: строки с фамилиями остаются белыми, иначе таблица
+# превращается в сплошную полосу и читать её невозможно.
+# На тёмном фоне текст обязателен светлый — иначе чёрным по тёмно-синему.
+_DARK = ({"red": 0.23, "green": 0.27, "blue": 0.40}, {"red": 1.0, "green": 1.0, "blue": 1.0})
+_EVENT = ({"red": 0.17, "green": 0.23, "blue": 0.30}, {"red": 1.0, "green": 1.0, "blue": 1.0})
+_LIGHT = ({"red": 0.93, "green": 0.93, "blue": 0.93}, {"red": 0.0, "green": 0.0, "blue": 0.0})
+
+
+def _header_style(text: str):
+    if "═══" in text or "ПОСЕЩАЕМОСТЬ" in text or "СВОДКИ" in text:
+        return _DARK
+    if "🏀" in text or "🏋️" in text or "────" in text or "ДЕТАЛЬНЫЕ" in text:
+        return _EVENT
+    return _LIGHT
+
+
 def apply_formatting(ws, all_rows: List[List[str]], extra_bold_patterns: Optional[List[str]] = None) -> None:
-    """Применяет жирный шрифт к заголовочным строкам."""
+    """Оформляет заголовочные строки: жирный, фон и КОНТРАСТНЫЙ цвет текста."""
     bold_patterns = [
         "═══", "────", "ПОСЕЩАЕМОСТЬ",
         "СВОДКИ", "ДЕТАЛЬНЫЕ", "Неделя:", "Сводка за",
@@ -176,38 +192,110 @@ def apply_formatting(ws, all_rows: List[List[str]], extra_bold_patterns: Optiona
     if extra_bold_patterns:
         bold_patterns.extend(extra_bold_patterns)
 
+    width = max((len(r) for r in all_rows), default=1)
     requests = []
     for i, row in enumerate(all_rows):
         text = row[0] if row else ""
-        is_bold = any(p in text for p in bold_patterns)
-        if is_bold:
-            requests.append({
-                "repeatCell": {
-                    "range": {
-                        "sheetId": ws.id,
-                        "startRowIndex": i,
-                        "endRowIndex":   i + 1,
-                        "startColumnIndex": 0,
-                        # 9 колонок: в сводке к явке добавились «без ответа»,
-                        # смены мнения, дни недели и дата последнего прихода.
-                        "endColumnIndex":   9,
-                    },
-                    "cell": {
-                        "userEnteredFormat": {
-                            "textFormat": {"bold": True},
-                            "backgroundColor": {
-                                "red":   0.23 if "═══" in text else (0.17 if ("🏀" in text or "🏋️" in text) else 0.95),
-                                "green": 0.27 if "═══" in text else (0.23 if ("🏀" in text or "🏋️" in text) else 0.95),
-                                "blue":  0.40 if "═══" in text else (0.30 if ("🏀" in text or "🏋️" in text) else 0.95),
-                            },
-                        }
-                    },
-                    "fields": "userEnteredFormat(textFormat,backgroundColor)",
-                }
-            })
+        if not any(p in text for p in bold_patterns):
+            continue
+        bg, fg = _header_style(text)
+        requests.append({
+            "repeatCell": {
+                "range": {"sheetId": ws.id, "startRowIndex": i, "endRowIndex": i + 1,
+                          "startColumnIndex": 0, "endColumnIndex": max(width, 9)},
+                "cell": {"userEnteredFormat": {
+                    "textFormat": {"bold": True, "foregroundColor": fg},
+                    "backgroundColor": bg,
+                }},
+                "fields": "userEnteredFormat(textFormat,backgroundColor)",
+            }
+        })
 
     if requests:
         try:
             ws.spreadsheet.batch_update({"requests": requests})
         except Exception as e:
             print(f"   ⚠️  Форматирование: {e}")
+
+
+def apply_percent_gradient(ws, column_index: int, last_row: int) -> None:
+    """Цветовая шкала на колонку с процентом посещений: 0% — красный,
+    50% — жёлтый, 100% — зелёный. Делается правилом самой таблицы, поэтому
+    работает и при ручной правке, и не зависит от того, что мы записали."""
+    rng = {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": max(last_row, 1),
+           "startColumnIndex": column_index, "endColumnIndex": column_index + 1}
+    try:
+        # Старые правила снимаем — иначе они копятся при каждом перезапуске.
+        existing = ws.spreadsheet.fetch_sheet_metadata().get("sheets", [])
+        drops = []
+        for sh in existing:
+            if sh.get("properties", {}).get("sheetId") != ws.id:
+                continue
+            for idx in range(len(sh.get("conditionalFormats") or []) - 1, -1, -1):
+                drops.append({"deleteConditionalFormatRule": {"sheetId": ws.id, "index": idx}})
+        ws.spreadsheet.batch_update({"requests": drops + [{
+            "addConditionalFormatRule": {
+                "index": 0,
+                "rule": {"ranges": [rng], "gradientRule": {
+                    "minpoint": {"color": {"red": 0.96, "green": 0.60, "blue": 0.60},
+                                 "type": "NUMBER", "value": "0"},
+                    "midpoint": {"color": {"red": 1.0, "green": 0.90, "blue": 0.60},
+                                 "type": "NUMBER", "value": "0.5"},
+                    "maxpoint": {"color": {"red": 0.65, "green": 0.85, "blue": 0.65},
+                                 "type": "NUMBER", "value": "1"},
+                }},
+            }
+        }]})
+    except Exception as e:
+        print(f"   ⚠️  Цветовая шкала: {e}")
+
+
+# ─────────────── Состав: ФИО берём из листа «Игроки», не из Telegram ─────────
+
+def load_roster() -> Dict[str, Dict]:
+    """Состав из локального зеркала листа «Игроки».
+
+    Ключи для поиска: `id:<числовой telegram id>` и ник в нижнем регистре.
+    Числовой id берём из колонки «Числовой TG ID» и из player_links (её бот
+    заполняет сам при первом входе). Раньше сопоставление по числовому id не
+    работало вовсе: ключи строились из колонки «Telegram ID», а там @ники —
+    поэтому в отчёте появлялись имена из Telegram вместо состава.
+    """
+    import sheets_cache
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        players = [dict(r) for r in conn.execute(
+            "SELECT row_index, surname, name, nickname, telegram_id, tg_user_id FROM players")]
+        links = {str(r["player_row"]): str(r["tg_user_id"]) for r in conn.execute(
+            "SELECT player_row, tg_user_id FROM player_links")}
+
+    roster: Dict[str, Dict] = {}
+    for p in players:
+        if not (p.get("surname") or p.get("name")):
+            continue
+        entry = {"surname": p.get("surname", ""), "name": p.get("name", ""),
+                 "nick": (p.get("telegram_id") or p.get("nickname") or "").lstrip("@")}
+        for raw in (p.get("telegram_id"), p.get("nickname")):
+            uname = (raw or "").strip().lstrip("@").lower()
+            if uname and not uname.isdigit():
+                roster[uname] = entry
+        for numeric in (str(p.get("tg_user_id") or "").strip(),
+                        links.get(str(p.get("row_index")), "")):
+            if numeric.isdigit():
+                roster[f"id:{numeric}"] = entry
+    return roster
+
+
+def make_resolver(roster: Dict[str, Dict]):
+    """(ФИО из состава, ник) по голосу. Сначала числовой id — он не меняется,
+    в отличие от ника. Кого в составе нет, помечаем: молча показать имя из
+    Telegram — значит выдать чужака за игрока команды."""
+    def resolve(vote: Dict) -> Tuple[str, str]:
+        uname = (vote.get("username") or "").strip().lstrip("@").lower()
+        p = roster.get(f"id:{vote.get('user_id')}") or (roster.get(uname) if uname else None)
+        if p:
+            return f"{p['surname']} {p['name']}".strip(), p["nick"] or uname
+        shown = (f"{vote.get('first_name', '')} {vote.get('last_name', '')}".strip()
+                 or uname or str(vote.get("user_id", "")))
+        return f"{shown} (нет в составе)", uname
+    return resolve
