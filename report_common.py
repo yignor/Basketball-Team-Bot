@@ -218,12 +218,16 @@ def apply_formatting(ws, all_rows: List[List[str]], extra_bold_patterns: Optiona
             print(f"   ⚠️  Форматирование: {e}")
 
 
-def apply_percent_gradient(ws, column_index: int, last_row: int) -> None:
+def apply_percent_gradient(ws, column_index: int, last_row: int,
+                           locale: str = "ru_RU") -> None:
     """Цветовая шкала на колонку с процентом посещений: 0% — красный,
     50% — жёлтый, 100% — зелёный. Делается правилом самой таблицы, поэтому
     работает и при ручной правке, и не зависит от того, что мы записали."""
     rng = {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": max(last_row, 1),
            "startColumnIndex": column_index, "endColumnIndex": column_index + 1}
+    # InterpolationPoint.value разбирается по локали ТАБЛИЦЫ: в русской «0.5»
+    # отвергается с Invalid InterpolationPoint.value — нужна запятая.
+    half = "0,5" if locale.startswith("ru") else "0.5"
     try:
         # Старые правила снимаем — иначе они копятся при каждом перезапуске.
         # fields обязателен: без него метаданные приходят БЕЗ conditionalFormats,
@@ -244,7 +248,7 @@ def apply_percent_gradient(ws, column_index: int, last_row: int) -> None:
                     "minpoint": {"color": {"red": 0.96, "green": 0.60, "blue": 0.60},
                                  "type": "NUMBER", "value": "0"},
                     "midpoint": {"color": {"red": 1.0, "green": 0.90, "blue": 0.60},
-                                 "type": "NUMBER", "value": "0.5"},
+                                 "type": "NUMBER", "value": half},
                     "maxpoint": {"color": {"red": 0.65, "green": 0.85, "blue": 0.65},
                                  "type": "NUMBER", "value": "1"},
                 }},

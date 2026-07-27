@@ -283,8 +283,23 @@ def build_report(
             if week_start <= d <= week_end
         ]
 
+    # ВАЖНО: пустой период НЕ должен обнулять лист. Сводки строятся по всей
+    # истории и не зависят от фильтра; пусто может быть только в деталях —
+    # например, в понедельник, когда на новой неделе тренировок ещё не было.
+    all_events: Dict[date, List[Dict]] = {}
+    for _dt_str, _vlist in by_training.items():
+        _d = iso_to_date(_dt_str)
+        if _d:
+            all_events[_d] = _vlist
+    summary_rows_all = attendance_summary.build_sections(
+        all_events, resolve, unit="тренировок", roster_total=roster_size(roster))
+
     if not training_dates_all:
-        return [["Нет данных о тренировках."]]
+        now = get_moscow_time().strftime("%d.%m.%Y %H:%M")
+        return ([[f"ПОСЕЩАЕМОСТЬ ТРЕНИРОВОК · Обновлено: {now} МСК"], ["═" * 60], [""]]
+                + summary_rows_all
+                + [[""], ["За выбранный период событий не было — показаны сводки."]])
+
 
     # Group by (year, month)
     months_seen: Dict[Tuple[int, int], List[Tuple[str, date]]] = defaultdict(list)
@@ -362,17 +377,11 @@ def build_report(
     # Сводки строим по ВСЕЙ истории, а не по выбранному периоду: лист
     # перезаписывается целиком, и фильтр стирал бы прошлые месяцы. Фильтр
     # оставлен для детальных секций — иначе лист разрастается без предела.
-    all_events: Dict[date, List[Dict]] = {}
-    for dt_str, vlist in by_training.items():
-        d = iso_to_date(dt_str)
-        if d:
-            all_events[d] = vlist
-    summary_rows = attendance_summary.build_sections(
-        all_events, resolve, unit="тренировок", roster_total=roster_size(roster))
+
 
     all_rows: List[List[str]] = []
     all_rows.extend(header)
-    all_rows.extend(summary_rows)
+    all_rows.extend(summary_rows_all)
     all_rows.extend(detail_header)
     for sec in detail_sections:
         all_rows.extend(sec)
@@ -456,7 +465,8 @@ def main(
 
     apply_formatting(report_ws, all_rows, extra_bold_patterns=["🏀 Тренировка"])
     # Цветовая шкала на колонку «% посещений»: 0% красный → 100% зелёный.
-    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX, len(all_rows))
+    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX,
+                           len(all_rows), sheet_locale(spreadsheet))
     print(f"\n✅  Отчёт записан: {len(all_rows)} строк → лист '{REPORT_SHEET}'")
 
 

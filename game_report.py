@@ -199,8 +199,23 @@ def build_report(
         week_start, week_end = filter_week
         game_dates_all = [(s, d) for s, d in game_dates_all if week_start <= d <= week_end]
 
+    # ВАЖНО: пустой период НЕ должен обнулять лист. Сводки строятся по всей
+    # истории и не зависят от фильтра; пусто может быть только в деталях —
+    # например, в понедельник, когда на новой неделе тренировок ещё не было.
+    all_events: Dict[date, List[Dict]] = {}
+    for _dt_str, _vlist in by_game.items():
+        _d = iso_to_date(_dt_str)
+        if _d:
+            all_events[_d] = _vlist
+    summary_rows_all = attendance_summary.build_sections(
+        all_events, resolve, unit="игр", roster_total=roster_size(roster))
+
     if not game_dates_all:
-        return [["Нет данных об играх."]]
+        now = get_moscow_time().strftime("%d.%m.%Y %H:%M")
+        return ([[f"ПОСЕЩАЕМОСТЬ ИГР · Обновлено: {now} МСК"], ["═" * 60], [""]]
+                + summary_rows_all
+                + [[""], ["За выбранный период событий не было — показаны сводки."]])
+
 
     months_seen: Dict[Tuple[int, int], List[Tuple[str, date]]] = defaultdict(list)
     for dt_str, d in game_dates_all:
@@ -266,13 +281,7 @@ def build_report(
     all_rows: List[List[str]] = []
     all_rows.extend(header)
     # Сводки — по всей истории (месяц/квартал/полугодие/год), детали — по фильтру.
-    all_events: Dict[date, List[Dict]] = {}
-    for dt_str, vlist in by_game.items():
-        d = iso_to_date(dt_str)
-        if d:
-            all_events[d] = vlist
-    all_rows.extend(attendance_summary.build_sections(
-        all_events, resolve, unit="игр", roster_total=roster_size(roster)))
+    all_rows.extend(summary_rows_all)
     all_rows.extend(detail_header)
     for sec in detail_sections:
         all_rows.extend(sec)
@@ -347,7 +356,8 @@ def main(
         pass
 
     apply_formatting(report_ws, all_rows, extra_bold_patterns=["🏀 Игра"])
-    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX, len(all_rows))
+    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX,
+                           len(all_rows), sheet_locale(spreadsheet))
     print(f"\n✅  Отчёт записан: {len(all_rows)} строк → лист '{REPORT_SHEET}'")
 
 
