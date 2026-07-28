@@ -180,8 +180,14 @@ async def _ib_calendar(session: aiohttp.ClientSession, comp_id: int) -> List[Dic
 
 
 async def fetch_infobasket_roster(team_id: Any, comp_id: Any) -> List[Dict[str, Any]]:
-    """Ростер команды Инфобаскета: [{player_id, number, name, active}]. Имена —
-    транзитно (в наших таблицах не храним). Widget/TeamRoster/<team>?compId=<comp>."""
+    """Ростер команды Инфобаскета: [{player_id, number, name, active}]."""
+    return (await fetch_infobasket_team(team_id, comp_id))["players"]
+
+
+async def fetch_infobasket_team(team_id: Any, comp_id: Any) -> Dict[str, Any]:
+    """{name, players} — название команды берём из ответа лиги, а не выдумываем.
+    Имена транзитно (в наших таблицах не храним).
+    Widget/TeamRoster/<team>?compId=<comp>."""
     url = f"{IB_API}/Widget/TeamRoster/{team_id}?compId={comp_id}&format=json&lang=ru"
     out: List[Dict[str, Any]] = []
     try:
@@ -189,11 +195,11 @@ async def fetch_infobasket_roster(team_id: Any, comp_id: Any) -> List[Dict[str, 
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                 if r.status != 200:
                     log.warning("ростер infobasket %s/%s -> HTTP %s", team_id, comp_id, r.status)
-                    return []
+                    return {"name": "", "players": []}
                 data = await r.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         log.warning("ростер infobasket %s/%s — %s", team_id, comp_id, type(e).__name__)
-        return []
+        return {"name": "", "players": []}
     for p in (data or {}).get("Players", []):
         pid = p.get("PersonID")
         if not pid:
@@ -206,7 +212,13 @@ async def fetch_infobasket_roster(team_id: Any, comp_id: Any) -> List[Dict[str, 
             "name": name,                    # транзитно
             "active": bool(p.get("IsActive")),
         })
-    return out
+    # TeamName у Инфобаскета — объект, а не строка: имя лежит внутри.
+    tn = (data or {}).get("TeamName")
+    if isinstance(tn, dict):
+        name = tn.get("CompTeamNameRu") or tn.get("CompTeamShortNameRu") or ""
+    else:
+        name = str(tn or "")
+    return {"name": str(name).strip(), "players": out}
 
 
 async def backfill_infobasket(comp_ids: List[int], limit: int = DEFAULT_LIMIT,

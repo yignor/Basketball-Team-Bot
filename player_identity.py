@@ -132,3 +132,14 @@ def have_games(source: str, player_id: str) -> int:
 
 
 SOURCE_TITLES = {SOURCE_SLPRO: "SLPRO", SOURCE_INFOBASKET: "Инфобаскет"}
+
+
+def profile_url(source: str, player_id: Any) -> str:
+    """Ссылка на страницу игрока в лиге. Нужна там, где у нас есть только id:
+    ФИО мы не храним, и опознать человека можно только на сайте лиги."""
+    src = (source or "").lower()
+    if src in ("slpro", SOURCE_SLPRO):
+        return f"https://slpro.basketstat.ru/player/{player_id}"
+    if src in ("ib", "infobasket", SOURCE_INFOBASKET):
+        return f"https://www.fbp.ru/player.html?personId={player_id}"
+    return ""

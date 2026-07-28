@@ -38,6 +38,11 @@
     .adm-players { margin: 6px 0; }
     .adm-players > summary { cursor: pointer; font-size: 13px; padding: 6px 0; color: var(--hint); }
     .adm-players .card { padding: 6px 8px; }
+    .plinks a { color: var(--button); text-decoration: none; }
+    #newSeason { flex-wrap: wrap; }
+    #seasonName { flex: 1; min-width: 160px; background: var(--secondary-bg); color: var(--text);
+      border: none; border-radius: 10px; padding: 9px 12px; font-size: 15px;
+      font-family: inherit; -webkit-appearance: none; }
     .note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
       line-height: 1.35; background: var(--secondary-bg); color: var(--hint); }
     .counter { color: var(--hint); font-size: 14px; flex: 1; }
@@ -627,6 +632,13 @@
   // увидит JS, поэтому экранируем тем же esc.
   const jattr = o => esc(JSON.stringify(o));
 
+  function plural(n, one, few, many) {
+    const a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b > 1 && b < 5) return few;
+    return b === 1 ? one : many;
+  }
+
   function teamChip(seasonId, t) {
     const act = t.in_pool ? 'pool_remove' : 'pool_add';
     // Убираем по team_id, добавляем целиком (нужны source/comp_id для ростера).
@@ -638,10 +650,18 @@
 
   function playerRow(seasonId, p) {
     const act = jattr({action: 'player_toggle', season_id: seasonId, value: p.ref});
+    // У выпавших из заявки вместо имени номер — опознать человека можно только
+    // по ссылке на его профиль в лиге, поэтому ссылки показываем всегда.
+    const links = (p.profiles || []).map(l =>
+      `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>`).join(' · ');
+    const games = p.games ? `${p.games} ${plural(p.games, 'игра', 'игры', 'игр')}` : 'игр нет';
     return `<div class="card${p.excluded ? ' disabled' : ''}">` +
+      `<div class="num">${esc(p.number || '—')}</div>` +
       `<div class="info"><div class="pname">${esc(p.name)}` +
+      (p.off_roster ? ' <span class="pteam">(нет в заявке)</span>' : '') +
       (p.excluded ? ' <span class="pteam">(убран)</span>' : '') + `</div>` +
-      `<div class="pstat">${esc(p.team || '')}</div></div>` +
+      `<div class="pstat">${esc(p.team || '')} · ${games}</div>` +
+      (links ? `<div class="pstat plinks">${links}</div>` : '') + `</div>` +
       `<div class="ctrl"><button class="step wide" onclick='adminDo(${act})'>` +
       `${p.excluded ? 'Вернуть' : 'Убрать'}</button></div></div>`;
   }
@@ -658,6 +678,14 @@
     head.style.padding = '0 0 8px';
     head.innerHTML = `<button class="chip" onclick="createSeason()">➕ Новый сезон</button>`;
     el.appendChild(head);
+    const form = document.createElement('div');
+    form.className = 'bar hidden';
+    form.id = 'newSeason';
+    form.innerHTML =
+      `<input id="seasonName" type="text" placeholder="Название, например «Осень 2026»">` +
+      `<select id="seasonFormat"><option value="3x3">3×3</option><option value="5x5">5×5</option></select>` +
+      `<button class="chip on" onclick="submitSeason()">Создать</button>`;
+    el.appendChild(form);
     for (const s of d.seasons) {
       const box = document.createElement('div');
       box.className = 'rank';
@@ -702,17 +730,23 @@
   }
 
   function createSeason() {
-    // Имя спрашиваем всегда: сезонов может идти несколько параллельно, и без
-    // внятного названия админ потом не поймёт, какой из них какой.
-    const ask = 'Название нового сезона (например «Осень 2026»)';
-    if (tg && tg.showPopup) {
-      // В Telegram нет поля ввода в попапе — просим прислать боту командой.
-      tg.showAlert('Создание сезона: пришли боту команду\n/season Название сезона');
-      return;
-    }
-    const name = prompt(ask);
-    if (name) adminDo({action: 'start', name: name, format: '3x3'});
+    // В попапе Telegram нет поля ввода, но само приложение — обычная страница:
+    // показываем свою строку ввода. Команда боту (/season …) остаётся как
+    // запасной путь для тех, у кого живой API недоступен.
+    const box = $('newSeason');
+    box.classList.toggle('hidden');
+    if (!box.classList.contains('hidden')) $('seasonName').focus();
   }
+
+  function submitSeason() {
+    const name = ($('seasonName').value || '').trim();
+    if (!name) { $('seasonName').focus(); return; }
+    const fmt = $('seasonFormat').value || '3x3';
+    $('seasonName').value = '';
+    $('newSeason').classList.add('hidden');
+    adminDo({action: 'start', name: name, format: fmt});
+  }
+  window.submitSeason = submitSeason;
   window.createSeason = createSeason;
 
   function confirmFinish(id, name) {

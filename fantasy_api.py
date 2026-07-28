@@ -189,7 +189,10 @@ async def derive_pool_teams() -> List[Dict[str, Any]]:
             if tid and tid not in seen_ids:
                 seen_ids.add(tid)
                 teams.append({"source": "slpro", "team_id": tid,
-                              "name": ctx.get("team_name", "SLPRO")})
+                              "name": ctx.get("team_name", "SLPRO"),
+                              # Имя лиги: как назвал админ в «Конфиге», иначе —
+                              # сезон и дивизион из справочника лиги.
+                              "league": slpro_client.scope_of(ctx)["name"]})
     except Exception as e:
         log.warning(f"пул: SLPRO-команда — {e}")
     try:
@@ -198,11 +201,34 @@ async def derive_pool_teams() -> List[Dict[str, Any]]:
         comps = cfg.get("comp_ids") or []
         comp = comps[0] if comps else None
         for tid in (cfg.get("team_ids") or []):
+            # Название команды спрашиваем у лиги, а лигу называем так, как её
+            # назвал админ в «Конфиге» (АЛЬТЕРНАТИВНОЕ ИМЯ). Хардкод «Инфобаскет»
+            # был неверен: команда там называется иначе, чем в SLPRO.
+            entry = (cfg.get("teams") or {}).get(tid) or {}
             teams.append({"source": "infobasket", "team_id": tid, "comp_id": comp,
-                          "name": "Инфобаскет"})
+                          "name": await _ib_team_name(tid, comp),
+                          "league": entry.get("alt_name") or "Инфобаскет"})
     except Exception as e:
         log.warning(f"пул: команды Инфобаскета — {e}")
     return teams
+
+
+_ib_names: Dict[str, str] = {}
+
+
+async def _ib_team_name(team_id: Any, comp_id: Any) -> str:
+    """Название команды Инфобаскета из ответа лиги (с кешем на процесс:
+    имя меняется раз в сезон, а админку открывают часто)."""
+    key = f"{team_id}:{comp_id}"
+    if key not in _ib_names:
+        try:
+            import stats_backfill
+            info = await stats_backfill.fetch_infobasket_team(team_id, comp_id)
+            _ib_names[key] = info.get("name") or f"Команда {team_id}"
+        except Exception as e:
+            log.warning(f"название команды Инфобаскета {key}: {e}")
+            return f"Команда {team_id}"
+    return _ib_names[key]
 
 
 def _protocol_players(source: str, team_id: Any) -> List[Dict[str, Any]]:
@@ -219,6 +245,14 @@ def _protocol_players(source: str, team_id: Any) -> List[Dict[str, Any]]:
             (source, str(team_id))).fetchall()
     return [{"pid": r["player_id"], "number": r["number"] or "",
              "games": r["games"], "last_game": r["last_game"]} for r in rows]
+
+
+async def _current_pool_teams(season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Команды пула ПЕРЕД правкой из админки. Пока админ ничего не выбирал, в
+    сезоне пусто, а действуют «наши» команды по умолчанию — их и материализуем,
+    иначе первое «убрать» вычитало бы из пустого списка и не делало ничего."""
+    explicit = fantasy.pool_teams(season) if season else []
+    return explicit if explicit else await derive_pool_teams()
 
 
 async def _resolve_pool_teams(season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -293,6 +327,7 @@ async def build_pool(force: bool = False,
             seen.add(ref)
             pool.append({"ref": ref, "number": str(p["number"] or ""),
                          "name": p["name"], "team": team.get("name", ""),
+                         "league": team.get("league") or team.get("name", ""),
                          "off_roster": bool(p.get("off_roster"))})
 
     # Один физический игрок может быть в ДВУХ лигах (SLPRO Farm + Инфобаскет) с
@@ -361,6 +396,10 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             hit["ref"] = "+".join(sorted(set(hit["ref"].split("+")) | set(e["ref"].split("+"))))
             if not hit["number"]:
                 hit["number"] = e["number"]
+            for lg in e.get("leagues") or []:
+                if lg not in hit.setdefault("leagues", []):
+                    hit["leagues"].append(lg)
+            hit["team"] = " · ".join(hit.get("leagues") or [])
         else:
             result.append(dict(e))
     return result
@@ -378,18 +417,24 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if key not in by_name:
             by_name[key] = {"refs": [p["ref"]], "number": p["number"],
                             "name": p["name"], "team": p["team"],
+                            "leagues": [p.get("league") or p["team"]],
                             "off_roster": bool(p.get("off_roster"))}
             order.append(key)
         else:
             by_name[key]["refs"].append(p["ref"])
+            lg = p.get("league") or p["team"]
+            if lg and lg not in by_name[key]["leagues"]:
+                by_name[key]["leagues"].append(lg)
             if not by_name[key]["number"]:
                 by_name[key]["number"] = p["number"]
     merged = []
     for key in order:
         e = by_name[key]
+        # Подпись под именем — ЛИГИ игрока: человек играет и в SLPRO, и в
+        # Инфобаскете, и видеть одну команду вместо обеих лиг бесполезно.
         merged.append({"ref": "+".join(sorted(e["refs"])), "number": e["number"],
-                       "name": e["name"], "team": e["team"],
-                       "off_roster": e["off_roster"]})
+                       "name": e["name"], "team": " · ".join(e["leagues"]),
+                       "leagues": e["leagues"], "off_roster": e["off_roster"]})
     return _consolidate_similar(merged)
 
 
@@ -456,6 +501,19 @@ def _is_admin(user: Optional[Dict[str, Any]]) -> bool:
     admins = {x.strip() for x in
               os.getenv("ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
     return str(user.get("id")) in admins
+
+
+def _profile_links(ref: str) -> List[Dict[str, str]]:
+    """[{title, url}] по каждой лиге, где у игрока есть id."""
+    import player_identity
+    out = []
+    for one in fantasy_stats.expand_refs([ref]):
+        src, pid = fantasy_stats.parse_ref(one)
+        url = player_identity.profile_url(src, pid)
+        if url:
+            out.append({"title": f"{player_identity.SOURCE_TITLES.get(src, src)} · {pid}",
+                        "url": url})
+    return out
 
 
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -581,7 +639,13 @@ async def handle_admin_state(request: web.Request) -> web.Response:
         in_pool = {(str(t.get("source")), str(t.get("team_id")))
                    for t in (teams or candidates)}
         players = [{"ref": p["ref"], "name": p["name"], "team": p.get("team", ""),
-                    "excluded": p["excluded"]}
+                    "number": p.get("number", ""), "excluded": p["excluded"],
+                    # ФИО не храним, поэтому «кто это» решается только ссылкой
+                    # на профиль в лиге — особенно для тех, кто выпал из заявки
+                    # и подписан номером.
+                    "off_roster": bool(p.get("off_roster")),
+                    "games": (p.get("stats") or {}).get("games", 0),
+                    "profiles": _profile_links(p["ref"])}
                    for p in _pool_with_stats(await build_pool(season=s), s)]
         players.sort(key=lambda p: (p["excluded"], p["name"]))
         seasons.append({
@@ -659,7 +723,7 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         if not isinstance(team, dict) or not team.get("team_id"):
             return web.json_response({"error": "bad_value"}, status=400)
         season = fantasy._get_season(sid)
-        teams = [t for t in fantasy.pool_teams(season)
+        teams = [t for t in await _current_pool_teams(season)
                  if str(t.get("team_id")) != str(team["team_id"])] + [team]
         fantasy.set_pool_teams(teams, sid)
         _pool_cache.pop(str(sid), None)
@@ -667,7 +731,7 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         season = fantasy._get_season(sid)
         tid = str(body.get("value") or "")
         fantasy.set_pool_teams(
-            [t for t in fantasy.pool_teams(season) if str(t.get("team_id")) != tid], sid)
+            [t for t in await _current_pool_teams(season) if str(t.get("team_id")) != tid], sid)
         _pool_cache.pop(str(sid), None)
     elif action == "player_toggle":
         # Игрока убираем по ИМЕНИ: у него бывает по id в каждой лиге, а решение
