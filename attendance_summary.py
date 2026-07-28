@@ -68,6 +68,27 @@ def _vote_days(vote: Dict[str, Any], event_date: date) -> set:
     return days_in_text(vote.get("vote_text")) or {event_date.weekday()}
 
 
+def is_day_poll(votes: Sequence[Dict[str, Any]]) -> bool:
+    """Опрос по дням («Среда», «Пятница», «Среда и пятница») или простой
+    («Готов»/«Не готов»). В первом ЯВКА — это названный день."""
+    return any(days_in_text(v.get("vote_text")) for v in votes)
+
+
+def counts_as_present(vote: Dict[str, Any], day_poll: bool) -> bool:
+    """Пришёл ли человек по этому голосу.
+
+    В опросе по дням не полагаемся на vote_type: он ставится по списку слов
+    («нет», «не приду»…), и вариант вроде «Не смогу» или «Пропускаю» проходил
+    как ЯВКА — человек с отказами показывался со 100%. Надёжный признак здесь
+    один: назван ли день. Не назван — значит не придёт, как бы это ни было
+    сформулировано."""
+    if vote.get("vote_type") != "PRESENT":
+        return False
+    if day_poll and not days_in_text(vote.get("vote_text")):
+        return False
+    return True
+
+
 def _offered_days(votes: Sequence[Dict[str, Any]], event_date: date) -> set:
     """Какие дни вообще предлагал этот опрос — объединение дней из всех
     ответов. Это знаменатель: нельзя пропустить пятницу, которой не было."""
@@ -92,6 +113,7 @@ def aggregate(events: Sequence[Tuple[date, List[Dict[str, Any]]]],
                  "last": None})
     for idx, (d, votes) in enumerate(sorted(events, key=lambda x: x[0])):
         offered = _offered_days(votes, d)
+        day_poll = is_day_poll(votes)
         for v in votes:
             name, nick, key = resolve(v)
             p = out[name]
@@ -99,7 +121,7 @@ def aggregate(events: Sequence[Tuple[date, List[Dict[str, Any]]]],
                 p["nick"] = nick
             p["key"] = key
             p["revotes"] += int(v.get("revotes") or 0)
-            if v.get("vote_type") == "PRESENT":
+            if counts_as_present(v, day_poll):
                 # Считаем в ДНЯХ: «Среда и пятница» — это две тренировки, а не
                 # одна. Иначе тот, кто ходит дважды в неделю, и тот, кто раз,
                 # выглядят одинаково.
@@ -115,7 +137,7 @@ def aggregate(events: Sequence[Tuple[date, List[Dict[str, Any]]]],
                     p["by_weekday"][wd] += 1
                 if p["last"] is None or d > p["last"]:
                     p["last"] = d
-            elif v.get("vote_type") == "ABSENT":
+            else:
                 for wd in offered:
                     if (idx, wd) in p["slots"]:
                         continue
@@ -148,9 +170,10 @@ def summary_rows(title: str, events: Sequence[Tuple[date, List[Dict[str, Any]]]]
     present_per_event = []
     for d, votes in events:
         offered = _offered_days(votes, d)
+        day_poll = is_day_poll(votes)
         present_per_event.append(sum(
             len(_vote_days(v, d) & offered) or 0
-            for v in votes if v.get("vote_type") == "PRESENT"))
+            for v in votes if counts_as_present(v, day_poll)))
     avg = round(sum(present_per_event) / len(present_per_event), 1) if present_per_event else 0
     best_i = max(range(len(dates)), key=lambda i: present_per_event[i]) if dates else None
     worst_i = min(range(len(dates)), key=lambda i: present_per_event[i]) if dates else None
