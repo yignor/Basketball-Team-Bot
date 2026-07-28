@@ -535,12 +535,20 @@ async def available_scopes() -> List[Dict[str, Any]]:
     Нужны, чтобы убранный турнир можно было ВЕРНУТЬ. Раньше интерфейс показывал
     только выбранные, и снятый со счёта турнир исчезал безвозвратно."""
     out: List[Dict[str, Any]] = []
+    # Сначала лист «Конфиг»: там админ ведёт турниры команды сам. Автоопределение
+    # по названию — запасной путь, пока SLPRO в «Конфиг» не внесён.
+    try:
+        import slpro_client
+        for lg in slpro_client.leagues_from_config():
+            out.append({k: v for k, v in lg.items() if k != "team_id"})
+    except Exception as e:
+        log.warning(f"админка: SLPRO из «Конфига» не прочитан: {e}")
     try:
         from slpro_client import SlproClient
         import os
         names = [n.strip() for n in
                  os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",") if n.strip()]
-        ctx = await SlproClient().discover_context(names)
+        ctx = await SlproClient().discover_context(names) if not out else None
         if ctx and ctx.get("stage_id") is not None:
             out.append({"source": "slpro", "season_id": str(ctx["season_id"]),
                         "stage_id": str(ctx["stage_id"]),

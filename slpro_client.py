@@ -192,3 +192,47 @@ async def _demo() -> None:
 
 if __name__ == "__main__":
     asyncio.run(_demo())
+
+
+# ─────────────── Лига из листа «Конфиг» (а не из env) ────────────────────────
+
+def leagues_from_config() -> List[Dict[str, Any]]:
+    """Турниры SLPRO, заданные в листе «Конфиг».
+
+    Формат строки:
+        ТИП = SLPRO
+        ИД  = <season_id>:<stage_id>   (можно только <stage_id>)
+        ИД КОМАНДЫ = <team_id>
+        АЛЬТЕРНАТИВНОЕ ИМЯ = как показывать
+
+    Зачем: раньше лига жила только в env (SLPRO_TEAM_NAMES), и добавить новый
+    сезон или выключить закончившийся можно было лишь правкой переменных на
+    сервере. Теперь это делается в таблице, как и для Инфобаскета.
+    Пустой список — не ошибка: значит SLPRO в «Конфиге» не заведён, и вызывающий
+    откатывается на автоопределение по названию команды.
+    """
+    try:
+        import sheets_cache
+        rows = sheets_cache.get_config_rows() or []
+    except Exception:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        cells = list(row) + [""] * 4
+        if str(cells[0]).strip().upper() != "SLPRO":
+            continue
+        ident = str(cells[1]).strip()
+        team = str(cells[2]).strip()
+        name = str(cells[3]).strip()
+        season_id, _, stage_id = ident.partition(":")
+        if not stage_id:                       # указали только стадию
+            season_id, stage_id = "", season_id
+        if not stage_id.isdigit():
+            continue
+        out.append({"source": "slpro",
+                    "season_id": season_id if season_id.isdigit() else "",
+                    "stage_id": stage_id,
+                    "team_id": team if team.isdigit() else "",
+                    "name": name or f"SLPRO стадия {stage_id}"})
+    return out
