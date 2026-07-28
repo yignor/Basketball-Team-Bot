@@ -85,31 +85,6 @@ def load_votes(spreadsheet) -> List[Dict]:
     return votes
 
 
-def load_poll_registry(spreadsheet) -> Dict[str, Dict]:
-    """Возвращает {training_date: {config_poll_id, options, ...}}."""
-    try:
-        ws = spreadsheet.worksheet("Сервисный")
-    except gspread.WorksheetNotFound:
-        return {}
-
-    rows = ws.get_all_values()
-    registry: Dict[str, Dict] = {}
-    for row in rows:
-        if len(row) >= 1 and row[0].upper() == "TRAINING_POLL_REG":
-            try:
-                meta = json.loads(row[4]) if len(row) > 4 else {}
-                dt_str = row[11] if len(row) > 11 else ""
-                if dt_str:
-                    registry[dt_str] = {
-                        "config_poll_id": row[8] if len(row) > 8 else "",
-                        "options": meta.get("options", []),
-                        "tg_poll_id": str(meta.get("tg_poll_id", "")),
-                    }
-            except (json.JSONDecodeError, IndexError):
-                pass
-    return registry
-
-
 # ─────────────────────────── Data grouping ───────────────────────────────────
 
 def group_by_training(votes: List[Dict]) -> Dict[str, List[Dict]]:
@@ -219,30 +194,6 @@ class SheetBuilder:
 
 
 # ─────────────────────────── Report generation ───────────────────────────────
-
-def _weekdays_label(counts: Dict[int, int]) -> str:
-    """{1: 4, 4: 2} -> «вт 4 · пт 2» — по каким дням человек реально ходит."""
-    if not counts:
-        return ""
-    order = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
-    return " · ".join(f"{DAYS_RU[wd]} {n}" for wd, n in order if n)
-
-
-def _date_label(d: Optional[date]) -> str:
-    return f"{d.day} {MONTHS_RU_GEN.get(d.month, '')}" if d else "—"
-
-
-def _silent_players(players: Dict[str, Dict], voted: Dict[str, Dict]) -> int:
-    """Сколько человек из состава не ответили НИ РАЗУ. В таблицу их построчно не
-    выводим (там осели бы и те, кто давно не в команде), но тренеру важно
-    видеть само число."""
-    seen = {name.strip().lower() for name in voted}
-    roster = set()
-    for p in players.values():
-        full = f"{p.get('surname', '')} {p.get('name', '')}".strip()
-        if full:
-            roster.add(full.lower())
-    return len(roster - seen)
 
 
 def build_report(

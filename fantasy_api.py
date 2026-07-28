@@ -116,11 +116,6 @@ def verify_init_data_detailed(init_data: str, bot_token: str,
     return user, ""
 
 
-def verify_init_data(init_data: str, bot_token: str, max_age_sec: int = 86400) -> Optional[Dict[str, Any]]:
-    """Совместимая обёртка: только пользователь, без причины отказа."""
-    return verify_init_data_detailed(init_data, bot_token, max_age_sec)[0]
-
-
 def _is_team_member(telegram_id: Any, username: str = "") -> bool:
     """Участвуют только игроки команды (лист «Игроки»).
 
@@ -537,23 +532,15 @@ async def available_scopes() -> List[Dict[str, Any]]:
     Нужны, чтобы убранный турнир можно было ВЕРНУТЬ. Раньше интерфейс показывал
     только выбранные, и снятый со счёта турнир исчезал безвозвратно."""
     out: List[Dict[str, Any]] = []
-    # Сначала лист «Конфиг»: там админ ведёт турниры команды сам. Автоопределение
-    # по названию — запасной путь, пока SLPRO в «Конфиг» не внесён.
+    # Турниры SLPRO — из листа «Конфиг» (а если он пуст, автоопределением по
+    # названию команды): и то и другое отдаёт team_contexts.
     try:
         import slpro_client
-        for lg in await slpro_client.resolve_config_leagues():
-            out.append({k: v for k, v in lg.items() if k != "team_id"})
+        for ctx in await slpro_client.team_contexts():
+            if ctx.get("stage_id") is not None:
+                out.append(slpro_client.scope_of(ctx))
     except Exception as e:
-        log.warning(f"админка: SLPRO из «Конфига» не прочитан: {e}")
-    if not out:
-        # «Конфиг» пуст — показываем то, что нашли автоопределением по названию.
-        try:
-            import slpro_client
-            for ctx in await slpro_client.team_contexts():
-                if ctx.get("stage_id") is not None:
-                    out.append(slpro_client.scope_of(ctx))
-        except Exception as e:
-            log.warning(f"админка: активная стадия SLPRO не определена: {e}")
+        log.warning(f"админка: турниры SLPRO не определены: {e}")
     try:
         from enhanced_duplicate_protection import duplicate_protection
         for comp in (duplicate_protection.get_config_ids().get("comp_ids") or []):
@@ -725,11 +712,15 @@ def encode_webapp_payload(shared: Dict[str, Any], user_id: str) -> str:
     """Персональный payload = общая часть + состав игрока, base64url для #d=.
     Состав берём из БД по числовому id — тому же, под которым пишет живой вход,
     поэтому оба входа показывают один состав, а очки не задваиваются."""
-    r = fantasy.get_roster(str(user_id), shared["season_id"], shared["week_start"])
+    # Состав держится, пока игрок его не поменял, — значит и в запасном входе
+    # показываем унаследованный. Иначе офлайн-игрок видел бы пустой экран и
+    # думал, что состав слетел (в живом API он при этом есть).
+    r = fantasy.get_roster_effective(str(user_id), shared["season_id"], shared["week_start"])
     data = {
         "season": shared["season"],
         "pool": shared["pool"],
         "roster": r["refs"] if r else [],
+        "inherited": bool(r.get("inherited")) if r else False,
         "locked": shared["sched_locked"] or (bool(r["locked"]) if r else False),
         "week_start": shared["week_start"],
         "standings": shared["standings"],
@@ -803,6 +794,8 @@ async def handle_get_roster(request: web.Request) -> web.Response:
     det = fantasy.lock_details() if locked else {}
     return web.json_response({
         "roster": r["refs"] if r else [],
+        # перенесён с прошлого раза, а не собран заново — покажем это игроку
+        "inherited": bool(r.get("inherited")) if r else False,
         # блокировка — по идущей игре (расписание), даже если своей записи ещё нет
         "locked": locked or (bool(r["locked"]) if r else False),
         "locked_since": det.get("started_hhmm", ""),

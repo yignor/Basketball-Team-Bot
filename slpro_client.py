@@ -359,7 +359,3 @@ def scope_of(ctx: Dict[str, Any]) -> Dict[str, Any]:
     return {"source": "slpro", "season_id": str(ctx.get("season_id") or ""),
             "stage_id": str(ctx.get("stage_id") or ""), "name": name}
 
-
-async def resolve_config_leagues() -> List[Dict[str, Any]]:
-    """Турниры «Конфига» в виде scope'ов для фэнтези (без team_id)."""
-    return [scope_of(ctx) for ctx in await resolve_config_contexts()]

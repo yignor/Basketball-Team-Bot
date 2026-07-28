@@ -39,27 +39,6 @@ def staleness_banner() -> list:
     return warnings
 
 
-def render_users_table() -> str:
-    """Список пользователей → По таблице (из кэша листов Игроки/Посещаемость)."""
-    players = sheets_cache.get_players_stats()
-    attendance = sheets_cache.get_attendance_stats()
-
-    lines = [f"👥 Пользователи по таблице — {datetime.now().strftime('%d.%m.%Y %H:%M')}", ""]
-    lines.extend(staleness_banner())
-
-    lines.append("Игроки")
-    lines.append(f"• Всего в базе: {players['total']}")
-    lines.append(f"• С привязанным Telegram ID: {players['linked']}")
-    lines.append("")
-
-    lines.append("Голосования по тренировкам")
-    lines.append(f"• Уникальных пользователей: {attendance['unique_users']}")
-    lines.append(f"• Активны за 30 дней: {attendance['unique_30d']}")
-    lines.append(f"• Всего голосов: {attendance['total_votes']}")
-
-    return "\n".join(lines)
-
-
 def render_bot_log(since_days: int = 1) -> str:
     """Лог действий → Лог бота: события за сегодня и since_days назад."""
     events = sheets_cache.get_recent_service_events(since_days=since_days)

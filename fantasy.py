@@ -75,8 +75,9 @@ def lock_details() -> Dict[str, Any]:
         return {"locked": False, "game_id": None, "started_at": None, "started_hhmm": ""}
 
 
-RESULT_HINT = ("🏆 Фэнтези: состав снова открыт. Он замораживается только на время "
-               "игры — собрать новый можно прямо сейчас, до следующего стартового свистка.")
+RESULT_HINT = ("🏆 Фэнтези: состав снова открыт. Твой состав остаётся в силе, пока ты "
+               "сам его не поменяешь, — он сыграет и следующий матч. Поменять можно "
+               "прямо сейчас, до стартового свистка.")
 
 
 def result_hint() -> str:
@@ -274,10 +275,6 @@ def pool_excluded_names(season: Dict[str, Any]) -> List[str]:
     Исключаем по имени, а не по id: устойчиво к склейке лиг и смене id."""
     ex = season_settings(season).get("pool_exclude_names")
     return [str(x) for x in ex] if isinstance(ex, list) else []
-
-
-def is_excluded(season: Dict[str, Any], name: str) -> bool:
-    return norm_player_name(name) in set(pool_excluded_names(season))
 
 
 def toggle_pool_exclude_name(name: str, season_id: Optional[int] = None) -> Tuple[bool, List[str]]:
@@ -490,17 +487,6 @@ def lock_week(season_id: int, week_start: str) -> int:
         )
         conn.commit()
     return cur.rowcount
-
-
-def season_participants(season_id: int) -> List[str]:
-    """Все, кто хоть раз собирал состав в этом сезоне — аудитория личных
-    уведомлений о наборе."""
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT user_id FROM fantasy_rosters WHERE season_id=?", (season_id,)
-        ).fetchall()
-    return [r["user_id"] for r in rows]
 
 
 # ─────────────────────────── Таблицы ─────────────────────────────────────────

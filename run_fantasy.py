@@ -106,7 +106,10 @@ class FantasyRunner:
             if not single:
                 text = f"🏆 {season['name']}\n{text}"
             await self._send_to_chats(chat_ids, text, topic)
-            participants = [r["user_id"] for r in fantasy.get_week_rosters(season["id"], report_week)]
+            # Не только те, кто пересобирал состав на этой неделе: у кого он
+            # перенёсся с прошлой, очки тоже идут — и таблица им нужна.
+            participants = [str(r["user_id"]) for r in
+                            fantasy.weekly_standings(season["id"], report_week)]
             sent_dm = await self._send_dms(participants, text, with_fantasy_button=True)
             print(f"📊 «{season['name']}»: таблица в {len(chat_ids)} чат(ов), личка {sent_dm}/{len(participants)}")
         return True
@@ -214,11 +217,6 @@ class FantasyRunner:
             await self.schedule()
         if only in (None, "weekly"):
             await self.weekly()
-
-
-def fantasy_env_team_names() -> List[str]:
-    import slpro_client
-    return slpro_client.env_team_names()
 
 
 async def main(only: Optional[str]) -> None:

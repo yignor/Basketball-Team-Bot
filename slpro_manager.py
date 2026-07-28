@@ -29,6 +29,7 @@ from game_system_manager import (
     format_date_without_year,
     AUTOMATION_KEY_GAME_POLLS,
     AUTOMATION_KEY_GAME_ANNOUNCEMENTS,
+    AUTOMATION_KEY_GAME_UPDATES,
 )
 import slpro_client
 from slpro_client import SlproClient
@@ -91,6 +92,40 @@ class SlproManager:
     def _announce_chat_ids(self) -> List[str]:
         entry = self.gsm._get_automation_entry(AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
         return get_chat_ids_for_automation(AUTOMATION_KEY_GAME_ANNOUNCEMENTS, entry)
+
+    def _updates_chat_ids(self) -> List[str]:
+        entry = self.gsm._get_automation_entry(AUTOMATION_KEY_GAME_UPDATES)
+        return get_chat_ids_for_automation(AUTOMATION_KEY_GAME_UPDATES, entry)
+
+    def _calendar_game_info(self, game: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """Игра в том виде, в каком её понимают общие методы GameSystemManager
+        (календарь, лог действий). Ключи — как у Infobasket-ветки, иначе .ics
+        и запись КАЛЕНДАРЬ_ИГРА пришлось бы дублировать своим кодом."""
+        team_id = ctx["team_id"]
+        our, opp, _, _, is_home = self._our_side(game, team_id)
+        return {
+            "game_id": self._slpro_game_id(game),
+            "date": self._date_ddmmyyyy(game["game_date"]),
+            "time": self._time_hhmm(game["game_time"]),
+            "venue": game.get("game_address", ""),
+            "our_team_name": our,
+            "our_team_id": team_id,
+            "opponent": opp,
+            "team1_id": game.get("home_id"),
+            "team2_id": game.get("guest_id"),
+            "is_home": is_home,
+        }
+
+    async def _send_calendar(self, game: Dict[str, Any], ctx: Dict[str, Any]) -> None:
+        """Файл встречи (.ics) — тот же механизм, что у основной команды.
+        Ошибка календаря не должна ронять опрос, поэтому глушим её здесь."""
+        info = self._calendar_game_info(game, ctx)
+        form = "светлая" if info["is_home"] else "тёмная"
+        try:
+            await self.gsm._send_calendar_event(self.bot, info, info["our_team_name"],
+                                                info["opponent"], form)
+        except Exception as e:
+            print(f"⚠️ SLPRO: календарное событие не отправлено: {e}")
 
     async def _send_to_chats(self, chat_ids: List[str], text: str,
                              topic_id: Optional[int]) -> List[Any]:
@@ -171,9 +206,12 @@ class SlproManager:
 
         bot = self.bot
         topic_id = self.gsm.game_poll_topic_id
-        # Если игра менялась — предупреждаем чат перед новым опросом.
+        # Игра менялась — предупреждаем в топике «Изменения» (там же, где о
+        # переносах пишет основная команда), а не в топике опросов: там уже
+        # висит устаревший опрос, и новое сообщение рядом с ним теряется.
         if change_note:
-            await self._send_to_chats(chat_ids, change_note, topic_id)
+            await self._send_to_chats(self._updates_chat_ids() or chat_ids,
+                                      change_note, self.gsm.game_updates_topic_id)
         poll_messages = []
         for chat_id in chat_ids:
             kwargs: Dict[str, Any] = {
@@ -221,6 +259,9 @@ class SlproManager:
                 game_date=game_date_iso,
             )
         print(f"   📋 SLPRO: зарегистрировано опросов: {len(poll_messages)}")
+
+        # Файл встречи в календарь — тем же способом, что у основной команды.
+        await self._send_calendar(game, ctx)
 
         # Дедуп-запись опроса. При переопросе прежнюю запись мы сняли выше, так
         # что здесь вставляется свежая — с новыми датой/временем/соперником, и

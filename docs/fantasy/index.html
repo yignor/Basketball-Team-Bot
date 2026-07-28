@@ -34,7 +34,10 @@
        переноса они уезжали за край экрана и были недоступны. */
     #adminBody .bar { flex-wrap: wrap; }
     #adminBody .chip { white-space: normal; text-align: left; }
-    .counter { color: var(--hint); font-size: 14px; flex: 1; }
+    .note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
+    line-height: 1.35; background: var(--tg-theme-secondary-bg-color, #f1f1f1);
+    color: var(--tg-theme-hint-color, #707579); }
+  .counter { color: var(--hint); font-size: 14px; flex: 1; }
     select { background: var(--secondary-bg); color: var(--text); border: none;
       border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
     #search { flex: 1; background: var(--secondary-bg); color: var(--text); border: none;
@@ -127,6 +130,7 @@
     <div class="bar">
       <input id="search" type="search" placeholder="🔎 Поиск по фамилии" autocomplete="off">
     </div>
+    <div class="note hidden" id="carryNote"></div>
     <div class="bar">
       <div class="counter" id="counter"></div>
       <button class="chip" id="playedChip" onclick="togglePlayed()">Только с играми</button>
@@ -206,7 +210,7 @@
   ])].filter(Boolean);
   let API = API_LIST[0] || '';
 
-  let live = false, rosterSize = 3, maxPer = 3, locked = false;
+  let live = false, rosterSize = 3, maxPer = 3, locked = false, inherited = false;
   let pool = [], counts = {}, standings = [], weekStart = '';
   let search = '', playedOnly = false, isAdmin = false;
   let seasonId = null, seasons = [];
@@ -302,6 +306,7 @@
         last: {fp: s.lf, date: s.ld} };
     });
     for (const r of (D.roster || [])) counts[r] = (counts[r] || 0) + 1;
+    inherited = !!D.inherited;
     $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
   }
 
@@ -327,6 +332,7 @@
       excluded: !!x.excluded,
     }));
     for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
+    inherited = !!r.inherited;
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
     return true;
   }
@@ -424,6 +430,13 @@
   function updateCounter() {
     const hint = maxPer < rosterSize ? ` · до ${maxPer} на игрока` : '';
     $('counter').textContent = `Выбрано: ${total()} / ${rosterSize}${hint}`;
+    // Состав живёт, пока его не поменяли: человек должен видеть, что этот
+    // набор перенесён с прошлой игры и уже играет — заново собирать не нужно.
+    const note = $('carryNote');
+    note.textContent = inherited
+      ? '↩️ Состав перенесён с прошлой игры — он играет и дальше, пока ты его не поменяешь.'
+      : '';
+    note.classList.toggle('hidden', !inherited);
   }
 
   // Плашку показываем только на вкладке состава и только когда набран полный
@@ -457,6 +470,7 @@
     btn.disabled = true; btn.textContent = 'Сохраняю…';
     try {
       await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs }) });
+      inherited = false;
       tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
                                    buttons:[{type:'close'}]}, () => tg.close())
                    : tg.close();

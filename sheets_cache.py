@@ -817,23 +817,6 @@ def get_attendance_stats() -> Dict[str, int]:
     }
 
 
-def get_service_activity_stats() -> Dict[str, Dict[str, int]]:
-    init_db()
-    stats: Dict[str, Dict[str, int]] = {}
-    with _connection() as conn:
-        rows = conn.execute(
-            "SELECT data_type, status, COUNT(*) as cnt FROM service_log GROUP BY data_type, status"
-        ).fetchall()
-    for row in rows:
-        bucket = stats.setdefault(row["data_type"], {"total": 0, "active": 0, "done": 0})
-        bucket["total"] += row["cnt"]
-        if row["status"] in PENDING_STATUSES:
-            bucket["active"] += row["cnt"]
-        else:
-            bucket["done"] += row["cnt"]
-    return stats
-
-
 def get_recent_service_events(limit: int = 8, since_days: Optional[int] = None) -> List[sqlite3.Row]:
     """limit — обычный лимит по количеству; since_days — вместо/вместе с
     limit можно попросить все события за последние N дней (для "Лог бота",
