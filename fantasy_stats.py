@@ -104,12 +104,14 @@ def _store_game_meta(conn, source: str, game_id: Any, meta: Dict[str, Any]) -> N
                home_score=excluded.home_score, guest_score=excluded.guest_score,
                quarters_json=excluded.quarters_json, arena=excluded.arena,
                video_vk=excluded.video_vk, fetched_at=excluded.fetched_at""",
-        (source, str(game_id), meta.get("game_date", ""), meta.get("game_time", ""),
-         str(meta.get("season_id", "")), str(meta.get("stage_id", "")),
-         str(meta.get("home_team_id", "")), str(meta.get("guest_team_id", "")),
+        # У старых игр arena/video приходят как null. `.get(k, "")` тут не
+        # помогает: ключ есть, а значение None — колонки NOT NULL это роняло.
+        (source, str(game_id), meta.get("game_date") or "", meta.get("game_time") or "",
+         str(meta.get("season_id") or ""), str(meta.get("stage_id") or ""),
+         str(meta.get("home_team_id") or ""), str(meta.get("guest_team_id") or ""),
          int(meta.get("home_score", 0) or 0), int(meta.get("guest_score", 0) or 0),
          json.dumps(meta.get("quarters") or [], ensure_ascii=False),
-         meta.get("arena", ""), meta.get("video_vk", ""), sheets_cache.now_iso()),
+         meta.get("arena") or "", meta.get("video_vk") or "", sheets_cache.now_iso()),
     )
 
 

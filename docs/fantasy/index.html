@@ -30,6 +30,10 @@
       cursor: pointer; border: none; font-size: 15px; }
     .tab.active { background: var(--button); color: var(--button-text); }
     .bar { display: flex; align-items: center; gap: 10px; padding: 4px 16px 8px; }
+    /* В админке рядов кнопок много и подписи турниров длинные — без
+       переноса они уезжали за край экрана и были недоступны. */
+    #adminBody .bar { flex-wrap: wrap; }
+    #adminBody .chip { white-space: normal; text-align: left; }
     .counter { color: var(--hint); font-size: 14px; flex: 1; }
     select { background: var(--secondary-bg); color: var(--text); border: none;
       border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
@@ -630,6 +634,11 @@
       const box = document.createElement('div');
       box.className = 'rank';
       box.style.display = 'block';
+      // Снятый турнир должен возвращаться: иначе один промах и очки не
+      // считаются, а вернуть нечем.
+      const add = (s.can_add || []).map(sc =>
+        `<button class="chip" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${JSON.stringify(sc)}})'>` +
+        `+ ${esc(sc.name || sc.source)}</button>`).join(' ');
       const scopes = (s.scopes || []).map(sc =>
         `<button class="chip on" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${JSON.stringify(sc)}})'>` +
         `${esc(sc.name || (sc.source + " " + (sc.stage_id || sc.season_id || "")))} ✕</button>`).join(' ');
@@ -646,7 +655,8 @@
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:${s.roster_size}})'>без лимита</button>` +
         `</div>` +
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
-        `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны</span>'}</div>` +
+        `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны — очки не считаются!</span>'}</div>` +
+        (add ? `<div class="pstat">Можно добавить:</div><div class="bar" style="padding-left:0">${add}</div>` : '') +
         `<div class="bar" style="padding-left:0">` +
           `<button class="chip" onclick='confirmFinish(${s.id}, ${JSON.stringify(s.name)})'>🏁 Завершить лигу</button>` +
         `</div>`;

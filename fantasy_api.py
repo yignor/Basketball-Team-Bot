@@ -528,6 +528,36 @@ async def handle_top(request: web.Request) -> web.Response:
                               "top": rows[:30], "guessers": guessers})
 
 
+async def available_scopes() -> List[Dict[str, Any]]:
+    """Турниры, которые вообще можно поставить в зачёт: активная стадия SLPRO и
+    соревнования Инфобаскета из листа «Конфиг».
+
+    Нужны, чтобы убранный турнир можно было ВЕРНУТЬ. Раньше интерфейс показывал
+    только выбранные, и снятый со счёта турнир исчезал безвозвратно."""
+    out: List[Dict[str, Any]] = []
+    try:
+        from slpro_client import SlproClient
+        import os
+        names = [n.strip() for n in
+                 os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",") if n.strip()]
+        ctx = await SlproClient().discover_context(names)
+        if ctx and ctx.get("stage_id") is not None:
+            out.append({"source": "slpro", "season_id": str(ctx["season_id"]),
+                        "stage_id": str(ctx["stage_id"]),
+                        "name": f"SLPRO {ctx.get('season')} · "
+                                f"{ctx.get('division_name') or ctx.get('division')}"})
+    except Exception as e:
+        log.warning(f"админка: активная стадия SLPRO не определена: {e}")
+    try:
+        from enhanced_duplicate_protection import duplicate_protection
+        for comp in (duplicate_protection.get_config_ids().get("comp_ids") or []):
+            out.append({"source": "infobasket", "season_id": str(comp),
+                        "name": f"Инфобаскет comp {comp}"})
+    except Exception as e:
+        log.warning(f"админка: comp_id Инфобаскета не прочитаны: {e}")
+    return out
+
+
 async def handle_admin_state(request: web.Request) -> web.Response:
     """Состояние админки: все активные лиги со своими настройками.
 
@@ -551,7 +581,11 @@ async def handle_admin_state(request: web.Request) -> web.Response:
             "scopes_title": fantasy.scopes_title(scopes),
             "manual_scopes": bool(fantasy.season_scopes(s)),
         })
-    return web.json_response({"seasons": seasons,
+    avail = await available_scopes()
+    for s_ in seasons:
+        keys = {fantasy._scope_key(x) for x in s_["scopes"]}
+        s_["can_add"] = [a for a in avail if fantasy._scope_key(a) not in keys]
+    return web.json_response({"seasons": seasons, "available": avail,
                               "weight_keys": list(fantasy_stats.DEFAULT_WEIGHTS)})
 
 
