@@ -66,13 +66,19 @@ class FantasyRunner:
         self.client = SlproClient()
 
     async def ingest(self) -> int:
-        team_names = fantasy_env_team_names()
-        ctx = await self.client.discover_context(team_names)
-        if not ctx or not ctx.get("team_id"):
-            print("⚠️ Фэнтези ingest: команда не найдена в активных стадиях")
+        import slpro_client
+        contexts = await slpro_client.team_contexts()
+        if not contexts:
+            print("⚠️ Фэнтези ingest: турниров SLPRO не найдено "
+                  "(строки ТИП=SLPRO в листе «Конфиг»)")
             return 0
-        n = await fantasy_stats.ingest_slpro(self.client, ctx)
-        print(f"📥 Фэнтези ingest: новых игр выкачано {n}")
+        n = 0
+        for ctx in contexts:
+            if not ctx.get("team_id"):
+                continue
+            n += await fantasy_stats.ingest_slpro(self.client, ctx)
+        print(f"📥 Фэнтези ingest: новых игр выкачано {n} "
+              f"(турниров {len(contexts)})")
         # TODO(F1): ingest основы (Infobasket) по связке ID.
         return n
 
@@ -111,12 +117,10 @@ class FantasyRunner:
         когда админ не выбрал турниры вручную (fantasy.effective_scopes)."""
         scopes: List[dict] = []
         try:
-            ctx = await self.client.discover_context(fantasy_env_team_names())
-            if ctx and ctx.get("stage_id") is not None:
-                scopes.append({"source": "slpro", "season_id": str(ctx["season_id"]),
-                               "stage_id": str(ctx["stage_id"]),
-                               "name": f"SLPRO {ctx.get('season')} · "
-                                       f"{ctx.get('division_name') or ctx.get('division')}"})
+            import slpro_client
+            for ctx in await slpro_client.team_contexts():
+                if ctx.get("stage_id") is not None:
+                    scopes.append(slpro_client.scope_of(ctx))
         except Exception as e:
             print(f"⚠️ auto-scope SLPRO: {e}")
         for comp in (self.gsm.config_comp_ids or []):
@@ -213,9 +217,8 @@ class FantasyRunner:
 
 
 def fantasy_env_team_names() -> List[str]:
-    import os
-    raw = os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm")
-    return [n.strip() for n in raw.split(",") if n.strip()]
+    import slpro_client
+    return slpro_client.env_team_names()
 
 
 async def main(only: Optional[str]) -> None:

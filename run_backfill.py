@@ -47,8 +47,9 @@ def _ib_comps() -> list:
 
 
 def _team_names() -> list:
-    raw = os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm")
-    return [n.strip() for n in raw.split(",") if n.strip()]
+    """Названия наших команд SLPRO: сперва лист «Конфиг», иначе env."""
+    import slpro_client
+    return slpro_client.config_team_names() or slpro_client.env_team_names()
 
 
 async def main() -> int:

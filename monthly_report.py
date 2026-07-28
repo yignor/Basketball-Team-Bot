@@ -255,9 +255,12 @@ def _slpro_team_names() -> Dict[str, str]:
         from slpro_client import SlproClient
 
         async def go():
+            import slpro_client
             c = SlproClient()
-            ctx = await c.discover_context(["PullUp Farm", "Pull Up Farm"])
-            return await c.get_standings(ctx) if ctx else []
+            rows = []
+            for ctx in await slpro_client.team_contexts():
+                rows.extend(await c.get_standings(ctx))
+            return rows
 
         rows = asyncio.run(go()) or []
         return {str(r.get("team_id")): str(r.get("name") or r.get("team_name") or "")

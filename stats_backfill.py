@@ -68,21 +68,25 @@ class BackfillStats:
 # ─────────────────────────── SLPRO ───────────────────────────────────────────
 
 async def _slpro_stages(client, scope: str, team_names: List[str]) -> List[Dict[str, Any]]:
-    """Стадии для обхода. team — только та, где играем; league — все стадии
-    текущего сезона; all — вообще все."""
-    if scope == "team":
-        ctx = await client.discover_context(team_names)
-        return [ctx] if ctx else []
+    """Стадии для обхода. team — только те, где играем; league — все стадии
+    тех же сезонов; all — вообще все.
 
-    stages = await client.iter_stages()
+    Наши турниры берутся из листа «Конфиг» (ТИП=SLPRO), а не из одного
+    автоопределения: команда может играть в двух турнирах сразу."""
+    import slpro_client
     if scope == "all":
-        return stages
+        return await client.iter_stages()
 
-    # league: сезон, в котором сейчас играет наша команда
-    ctx = await client.discover_context(team_names)
-    if not ctx:
+    ours = await slpro_client.team_contexts(team_names)
+    if scope == "team":
+        return ours
+
+    # league: все стадии сезонов, в которых играет наша команда
+    stages = await client.iter_stages()
+    seasons = {c.get("season_id") for c in ours if c.get("season_id") is not None}
+    if not seasons:
         return stages
-    return [s for s in stages if s.get("season_id") == ctx.get("season_id")]
+    return [s for s in stages if s.get("season_id") in seasons]
 
 
 async def backfill_slpro(client, scope: str = "league", team_names: Optional[List[str]] = None,

@@ -985,15 +985,10 @@ async def _derive_scopes() -> List[Dict[str, Any]]:
     нашей команды + comp_id Инфобаскета из Конфига. Названия — транзитно."""
     scopes: List[Dict[str, Any]] = []
     try:
-        from slpro_client import SlproClient
-        names = [n.strip() for n in os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",")
-                 if n.strip()]
-        ctx = await SlproClient().discover_context(names)
-        if ctx and ctx.get("stage_id") is not None:
-            scopes.append({"source": "slpro", "season_id": str(ctx["season_id"]),
-                           "stage_id": str(ctx["stage_id"]),
-                           "name": f"SLPRO {ctx.get('season')} · "
-                                   f"{ctx.get('division_name') or ctx.get('division')}"})
+        import slpro_client
+        for ctx in await slpro_client.team_contexts():
+            if ctx.get("stage_id") is not None:
+                scopes.append(slpro_client.scope_of(ctx))
     except Exception as e:
         log.warning(f"derive SLPRO scope: {e}")
     for comp in _config_comp_ids():

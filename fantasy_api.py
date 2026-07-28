@@ -187,12 +187,14 @@ async def derive_pool_teams() -> List[Dict[str, Any]]:
     команда(ы) Инфобаскета (team_id × comp_id из Конфига)."""
     teams: List[Dict[str, Any]] = []
     try:
-        from slpro_client import SlproClient
-        names = [n.strip() for n in os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",") if n.strip()]
-        ctx = await SlproClient().discover_context(names)
-        if ctx and ctx.get("team_id"):
-            teams.append({"source": "slpro", "team_id": ctx["team_id"],
-                          "name": ctx.get("team_name", "SLPRO")})
+        import slpro_client
+        seen_ids = set()
+        for ctx in await slpro_client.team_contexts():
+            tid = ctx.get("team_id")
+            if tid and tid not in seen_ids:
+                seen_ids.add(tid)
+                teams.append({"source": "slpro", "team_id": tid,
+                              "name": ctx.get("team_name", "SLPRO")})
     except Exception as e:
         log.warning(f"пул: SLPRO-команда — {e}")
     try:
@@ -543,19 +545,15 @@ async def available_scopes() -> List[Dict[str, Any]]:
             out.append({k: v for k, v in lg.items() if k != "team_id"})
     except Exception as e:
         log.warning(f"админка: SLPRO из «Конфига» не прочитан: {e}")
-    try:
-        from slpro_client import SlproClient
-        import os
-        names = [n.strip() for n in
-                 os.getenv("SLPRO_TEAM_NAMES", "PullUp Farm,Pull Up Farm").split(",") if n.strip()]
-        ctx = await SlproClient().discover_context(names) if not out else None
-        if ctx and ctx.get("stage_id") is not None:
-            out.append({"source": "slpro", "season_id": str(ctx["season_id"]),
-                        "stage_id": str(ctx["stage_id"]),
-                        "name": f"SLPRO {ctx.get('season')} · "
-                                f"{ctx.get('division_name') or ctx.get('division')}"})
-    except Exception as e:
-        log.warning(f"админка: активная стадия SLPRO не определена: {e}")
+    if not out:
+        # «Конфиг» пуст — показываем то, что нашли автоопределением по названию.
+        try:
+            import slpro_client
+            for ctx in await slpro_client.team_contexts():
+                if ctx.get("stage_id") is not None:
+                    out.append(slpro_client.scope_of(ctx))
+        except Exception as e:
+            log.warning(f"админка: активная стадия SLPRO не определена: {e}")
     try:
         from enhanced_duplicate_protection import duplicate_protection
         for comp in (duplicate_protection.get_config_ids().get("comp_ids") or []):

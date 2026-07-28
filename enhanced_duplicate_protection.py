@@ -72,6 +72,14 @@ CONFIG_SECTION_END_MARKERS = {
     "=== END ===",
 }
 DEFAULT_END_MARKER = "--- END ---"
+# ТИП админ заполняет по-человечески (выпадающий список ИНФОБАСКЕТ / SLPRO),
+# а не служебными CONFIG_TEAM/CONFIG_COMP. Раньше такая строка попадала в
+# ветку «неизвестный тип» и молча отбрасывалась — команда исчезала из поиска
+# игр. Держим синонимы здесь, чтобы список пополнялся в одном месте.
+INFOBASKET_TYPE_ALIASES = {"ИНФОБАСКЕТ", "INFOBASKET", "ИБ", "IB", "ФБП", "FBP"}
+# SLPRO-строки читает slpro_client: там ИД — код дивизиона (SUMC), а «ИД
+# команды» — её название, поэтому числовой парсер к ним неприменим.
+SLPRO_TYPE_ALIASES = {"SLPRO", "СЛПРО", "SL PRO", "SL-PRO"}
 VOTING_SECTION_END_MARKER = "--- END VOTING ---"
 VOTING_SECTION_HEADER = [
     "ID голосования",
@@ -1682,6 +1690,12 @@ class EnhancedDuplicateProtection:
                             fallback_entry["metadata"]["team_ids"] = row_team_ids
                         fallback_sources.append(fallback_entry)
                         # Продолжаем обработку, чтобы также добавить команды в teams, если есть team_ids
+
+                    # Человекочитаемый ТИП из выпадающего списка → служебный.
+                    if normalized_type in SLPRO_TYPE_ALIASES:
+                        continue
+                    if normalized_type in INFOBASKET_TYPE_ALIASES:
+                        normalized_type = "CONFIG_TEAM" if row_team_ids else "CONFIG_COMP"
 
                     if not normalized_type:
                         if row_team_ids:

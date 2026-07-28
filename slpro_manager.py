@@ -19,7 +19,6 @@ game_id внутри записей — с префиксом slpro-<id> для 
 import asyncio
 import datetime
 import json
-import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from enhanced_duplicate_protection import duplicate_protection
@@ -31,6 +30,7 @@ from game_system_manager import (
     AUTOMATION_KEY_GAME_POLLS,
     AUTOMATION_KEY_GAME_ANNOUNCEMENTS,
 )
+import slpro_client
 from slpro_client import SlproClient
 from slpro_game import parse_box_score, format_quarters, format_leaders
 from datetime_utils import get_moscow_time, is_within_game_tracking_window
@@ -43,22 +43,17 @@ DT_RESULT = "РЕЗУЛЬТАТ_ИГРА_SLPRO"
 
 POLL_OPTIONS = ["✅ Готов", "❌ Нет", "👨‍🏫 Тренер"]
 
-# Имена нашей команды в SLPRO (для автоопределения сезона). Переопределяются
-# без правки кода через env SLPRO_TEAM_NAMES (имена через запятую).
-DEFAULT_TEAM_NAMES = ["PullUp Farm", "Pull Up Farm", "Pull-Up Farm"]
-
-
-def _team_names_from_env() -> List[str]:
-    raw = os.getenv("SLPRO_TEAM_NAMES", "").strip()
-    if not raw:
-        return DEFAULT_TEAM_NAMES
-    return [n.strip() for n in raw.split(",") if n.strip()]
+# Турниры команды берутся из листа «Конфиг» (строки ТИП=SLPRO): код дивизиона
+# + название команды. env SLPRO_TEAM_NAMES остался запасным путём на случай
+# пустого «Конфига» — определение одно на весь проект, в slpro_client.
 
 
 class SlproManager:
     def __init__(self, team_names: Optional[List[str]] = None):
         self.client = SlproClient()
-        self.team_names = team_names or _team_names_from_env()
+        # Явный аргумент нужен только тестам; в бою турниры берутся из листа
+        # «Конфиг» (см. run), а env остаётся запасным путём.
+        self.team_names = team_names
         # Экземпляр GameSystemManager нужен только как источник разрешённого
         # конфига (бот, топики, chat_id) — Infobasket-методы не вызываем.
         self.gsm = GameSystemManager()
@@ -375,21 +370,17 @@ class SlproManager:
     # ── Оркестрация ──────────────────────────────────────────────────────────
 
     async def run(self, only: Optional[str] = None) -> None:
-        print("🚀 SLPRO: запуск мониторинга (команда Pull Up Farm)")
-        ctx = await self.client.discover_context(self.team_names)
-        if not ctx or ctx.get("team_id") is None:
-            print(f"⚠️ SLPRO: команда {self.team_names} не найдена в активных стадиях")
+        print("🚀 SLPRO: запуск мониторинга")
+        # Турниры берём из листа «Конфиг» (строки ТИП=SLPRO). Их может быть
+        # несколько — кубок и регулярка идут параллельно, и по каждому нужны
+        # свои опросы/анонсы/результаты.
+        contexts = await slpro_client.team_contexts(self.team_names)
+        if not contexts:
+            names = (self.team_names or slpro_client.config_team_names()
+                     or slpro_client.env_team_names())
+            print(f"⚠️ SLPRO: турниров не найдено (команда {names}). "
+                  f"Проверь строки ТИП=SLPRO в листе «Конфиг»")
             return
-        print(f"🔎 SLPRO: {ctx['team_name']} — сезон {ctx.get('season')}, "
-              f"{ctx.get('division_name')} (team_id={ctx['team_id']}, stage_id={ctx['stage_id']})")
-
-        games = await self.client.get_our_games(ctx)
-        if not games:
-            print("⚠️ SLPRO: игр нашей команды не найдено")
-            return
-
-        today = get_moscow_time().date()
-        polls = announces = results = 0
 
         # Опросы/анонсы — не раньше настроенного времени (тот же столбец
         # «Время (МСК)» в Конфиге, что и у основной команды), чтобы cron рано
@@ -397,27 +388,40 @@ class SlproManager:
         # публиковать сразу по завершении игры.
         polls_time_ok = self.gsm._notify_time_reached(AUTOMATION_KEY_GAME_POLLS)
         announce_time_ok = self.gsm._notify_time_reached(AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
+        today = get_moscow_time().date()
+        polls = announces = results = 0
 
-        for game in games:
-            try:
-                gdate = datetime.datetime.strptime(game["game_date"], "%Y-%m-%d").date()
-            except (ValueError, KeyError):
+        for ctx in contexts:
+            if ctx.get("team_id") is None:
+                continue
+            print(f"🔎 SLPRO: {ctx.get('team_name')} — {ctx.get('name') or ctx.get('division_name')}, "
+                  f"сезон {ctx.get('season')} (team_id={ctx['team_id']}, stage_id={ctx.get('stage_id')})")
+
+            games = await self.client.get_our_games(ctx)
+            if not games:
+                print("   ⚠️ игр нашей команды в этом турнире не найдено")
                 continue
 
-            status = game.get("status")
-            if status == 2:
-                # Завершена — публикуем результат, пока в окне отслеживания.
-                if only in (None, "results") and is_within_game_tracking_window(
-                        self._date_ddmmyyyy(game["game_date"]), self._time_hhmm(game["game_time"])):
-                    if await self.post_result(game, ctx):
-                        results += 1
-            elif status == 0:
-                if gdate > today:
-                    if only in (None, "polls") and polls_time_ok and await self.create_poll(game, ctx):
-                        polls += 1
-                elif gdate == today:
-                    if only in (None, "announcements") and announce_time_ok and await self.send_announcement(game, ctx):
-                        announces += 1
+            for game in games:
+                try:
+                    gdate = datetime.datetime.strptime(game["game_date"], "%Y-%m-%d").date()
+                except (ValueError, KeyError):
+                    continue
+
+                status = game.get("status")
+                if status == 2:
+                    # Завершена — публикуем результат, пока в окне отслеживания.
+                    if only in (None, "results") and is_within_game_tracking_window(
+                            self._date_ddmmyyyy(game["game_date"]), self._time_hhmm(game["game_time"])):
+                        if await self.post_result(game, ctx):
+                            results += 1
+                elif status == 0:
+                    if gdate > today:
+                        if only in (None, "polls") and polls_time_ok and await self.create_poll(game, ctx):
+                            polls += 1
+                    elif gdate == today:
+                        if only in (None, "announcements") and announce_time_ok and await self.send_announcement(game, ctx):
+                            announces += 1
 
         print(f"\n📊 SLPRO ИТОГИ: опросов {polls}, анонсов {announces}, результатов {results}")
 
