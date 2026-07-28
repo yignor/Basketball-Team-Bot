@@ -539,7 +539,7 @@ async def available_scopes() -> List[Dict[str, Any]]:
     # по названию — запасной путь, пока SLPRO в «Конфиг» не внесён.
     try:
         import slpro_client
-        for lg in slpro_client.leagues_from_config():
+        for lg in await slpro_client.resolve_config_leagues():
             out.append({k: v for k, v in lg.items() if k != "team_id"})
     except Exception as e:
         log.warning(f"админка: SLPRO из «Конфига» не прочитан: {e}")

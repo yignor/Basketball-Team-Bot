@@ -197,19 +197,19 @@ if __name__ == "__main__":
 # ─────────────── Лига из листа «Конфиг» (а не из env) ────────────────────────
 
 def leagues_from_config() -> List[Dict[str, Any]]:
-    """Турниры SLPRO, заданные в листе «Конфиг».
+    """Турниры SLPRO из листа «Конфиг».
 
-    Формат строки:
-        ТИП = SLPRO
-        ИД  = <season_id>:<stage_id>   (можно только <stage_id>)
-        ИД КОМАНДЫ = <team_id>
-        АЛЬТЕРНАТИВНОЕ ИМЯ = как показывать
+    Формат под то, что человек ВИДИТ, а не под внутренние id:
+        ТИП        = SLPRO
+        ИД         = код дивизиона из ссылки (например SUMC)
+        ИД КОМАНДЫ = НАЗВАНИЕ команды (числового id команды на сайте не видно)
+        АЛЬТ. ИМЯ  = как показывать
 
-    Зачем: раньше лига жила только в env (SLPRO_TEAM_NAMES), и добавить новый
-    сезон или выключить закончившийся можно было лишь правкой переменных на
-    сервере. Теперь это делается в таблице, как и для Инфобаскета.
+    Числовые season_id/stage_id бот находит сам по коду дивизиона и названию —
+    заставлять админа выковыривать их из запросов неправильно.
+
     Пустой список — не ошибка: значит SLPRO в «Конфиге» не заведён, и вызывающий
-    откатывается на автоопределение по названию команды.
+    откатывается на автоопределение по названию команды из env.
     """
     try:
         import sheets_cache
@@ -219,20 +219,47 @@ def leagues_from_config() -> List[Dict[str, Any]]:
 
     out: List[Dict[str, Any]] = []
     for row in rows:
-        cells = list(row) + [""] * 4
-        if str(cells[0]).strip().upper() != "SLPRO":
+        cells = [str(c).strip() for c in list(row) + [""] * 4]
+        if cells[0].upper() != "SLPRO":
             continue
-        ident = str(cells[1]).strip()
-        team = str(cells[2]).strip()
-        name = str(cells[3]).strip()
-        season_id, _, stage_id = ident.partition(":")
-        if not stage_id:                       # указали только стадию
-            season_id, stage_id = "", season_id
-        if not stage_id.isdigit():
+        division, team_name, alt = cells[1], cells[2], cells[3]
+        if not team_name:
+            continue
+        out.append({"source": "slpro", "division": division.upper(),
+                    "team_name": team_name, "name": alt or f"SLPRO {division.upper()}"})
+    return out
+
+
+async def resolve_config_leagues() -> List[Dict[str, Any]]:
+    """Достраивает строки «Конфига» до полноценных турниров: находит season_id,
+    stage_id и team_id по коду дивизиона и названию команды.
+
+    Ходит в сеть, поэтому вызывать редко (админка, обновление auto-scope)."""
+    rows = leagues_from_config()
+    if not rows:
+        return []
+    client = SlproClient()
+    stages = await client.iter_stages()
+    out: List[Dict[str, Any]] = []
+    for cfg in rows:
+        # Дивизион указан — сузим поиск; не указан — ищем по всем стадиям.
+        cands = [st for st in stages
+                 if not cfg["division"] or str(st.get("division", "")).upper() == cfg["division"]]
+        found = None
+        for st in cands:
+            for team in await client.get_standings(st):
+                if _normalize_name(team.get("name")) == _normalize_name(cfg["team_name"]):
+                    found = {**st, "team_id": team.get("team_id")}
+                    break
+            if found:
+                break
+        if not found:
+            print(f"⚠️ SLPRO «Конфиг»: не нашёл команду «{cfg['team_name']}» "
+                  f"в дивизионе {cfg['division'] or '(любом)'}")
             continue
         out.append({"source": "slpro",
-                    "season_id": season_id if season_id.isdigit() else "",
-                    "stage_id": stage_id,
-                    "team_id": team if team.isdigit() else "",
-                    "name": name or f"SLPRO стадия {stage_id}"})
+                    "season_id": str(found.get("season_id") or ""),
+                    "stage_id": str(found.get("stage_id") or ""),
+                    "team_id": found.get("team_id"),
+                    "name": cfg["name"]})
     return out
