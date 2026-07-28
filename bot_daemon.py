@@ -541,6 +541,29 @@ def _coverage_note(player_id: str, career: List[Dict[str, Any]]) -> str:
             f"ночным обновлением копии")
 
 
+async def handle_season(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/season <название> — создать сезон фэнтези.
+
+    Через команду, а не кнопкой: в попапе Telegram нет поля ввода, а название
+    сезону нужно осмысленное — их может идти несколько параллельно."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private" or not _is_admin(user):
+        return
+    name = " ".join(context.args or []).strip()
+    if not name:
+        await update.message.reply_text(
+            "Укажи название: /season Осень 2026\n\n"
+            "Дальше турниры и команды настраиваются в приложении (вкладка ⚙️).")
+        return
+    import fantasy
+    season = fantasy.start_season(name)
+    await update.message.reply_text(
+        f"✅ Сезон «{season['name']}» создан.\n\n"
+        "Открой приложение → ⚙️ и выбери турниры в зачёте: пока их нет, "
+        "очки не считаются.")
+
+
 async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/profile — какие профили привязаны и что по ним видно."""
     user = update.effective_user
@@ -1567,6 +1590,7 @@ async def on_startup(app: Application) -> None:
             BotCommand("admin", "Админ-панель"),
             BotCommand("start", "Показать кнопку админ-панели"),
             BotCommand("profile", "Мой профиль и прогресс"),
+            BotCommand("season", "Создать сезон фэнтези (админ)"),
         ])
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
@@ -1638,6 +1662,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
+    app.add_handler(CommandHandler("season", handle_season))
     app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file)"))
     # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
     # но отвечает, только если в сообщении действительно есть ссылка.

@@ -630,6 +630,11 @@
       el.innerHTML = '<div class="banner">Активных лиг нет. Запусти сезон из чат-админки.</div>';
       return;
     }
+    const head = document.createElement('div');
+    head.className = 'bar';
+    head.style.padding = '0 0 8px';
+    head.innerHTML = `<button class="chip" onclick="createSeason()">➕ Новый сезон</button>`;
+    el.appendChild(head);
     for (const s of d.seasons) {
       const box = document.createElement('div');
       box.className = 'rank';
@@ -654,6 +659,9 @@
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:1})'>по 1</button>` +
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:${s.roster_size}})'>без лимита</button>` +
         `</div>` +
+        `<div class="pstat">Команды в пуле: ${(s.pool_teams || []).length
+            ? (s.pool_teams || []).map(t => esc(t.name || (t.source + ':' + t.team_id))).join(', ')
+            : 'по умолчанию (наши)'}</div>` +
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
         `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны — очки не считаются!</span>'}</div>` +
         (add ? `<div class="pstat">Можно добавить:</div><div class="bar" style="padding-left:0">${add}</div>` : '') +
@@ -663,6 +671,20 @@
       el.appendChild(box);
     }
   }
+
+  function createSeason() {
+    // Имя спрашиваем всегда: сезонов может идти несколько параллельно, и без
+    // внятного названия админ потом не поймёт, какой из них какой.
+    const ask = 'Название нового сезона (например «Осень 2026»)';
+    if (tg && tg.showPopup) {
+      // В Telegram нет поля ввода в попапе — просим прислать боту командой.
+      tg.showAlert('Создание сезона: пришли боту команду\n/season Название сезона');
+      return;
+    }
+    const name = prompt(ask);
+    if (name) adminDo({action: 'start', name: name, format: '3x3'});
+  }
+  window.createSeason = createSeason;
 
   function confirmFinish(id, name) {
     // Завершение необратимо — спрашиваем, иначе один промах закрывает сезон.

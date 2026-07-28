@@ -580,6 +580,7 @@ async def handle_admin_state(request: web.Request) -> web.Response:
             "scopes": scopes,
             "scopes_title": fantasy.scopes_title(scopes),
             "manual_scopes": bool(fantasy.season_scopes(s)),
+            "pool_teams": fantasy.pool_teams(s),
         })
     avail = await available_scopes()
     for s_ in seasons:
@@ -633,6 +634,21 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         if not isinstance(scope, dict):
             return web.json_response({"error": "bad_value"}, status=400)
         fantasy.toggle_season_scope(scope, season_id=sid)
+    elif action == "pool_add":
+        # Команды пула — на сезон. Отсюда и масштабирование: фэнтези для чужой
+        # команды или для дивизиона — это просто сезон с другими командами.
+        team = body.get("value")
+        if not isinstance(team, dict) or not team.get("team_id"):
+            return web.json_response({"error": "bad_value"}, status=400)
+        season = fantasy._get_season(sid)
+        teams = [t for t in fantasy.pool_teams(season)
+                 if str(t.get("team_id")) != str(team["team_id"])] + [team]
+        fantasy.set_pool_teams(teams, sid)
+    elif action == "pool_remove":
+        season = fantasy._get_season(sid)
+        tid = str(body.get("value") or "")
+        fantasy.set_pool_teams(
+            [t for t in fantasy.pool_teams(season) if str(t.get("team_id")) != tid], sid)
     elif action == "finish":
         fantasy.end_season(sid)
     else:
