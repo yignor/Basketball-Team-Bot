@@ -457,6 +457,10 @@ def init_db() -> None:
         _ensure_column(conn, "game_player_stats", "plus_minus", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "tg_user_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_player_stats", "stage_id", "TEXT NOT NULL", "''")
+        # Колонка появилась вместе с выбором показателей в личной статистике:
+        # на сервере таблица уже существовала, и кнопка настроек падала на
+        # «no column named metrics».
+        _ensure_column(conn, "player_report_prefs", "metrics", "TEXT NOT NULL", "''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_gps_scope "
                      "ON game_player_stats(source, season_id, stage_id)")
         conn.commit()
