@@ -196,13 +196,6 @@ if __name__ == "__main__":
 
 # ─────────────── Лига из листа «Конфиг» (а не из env) ────────────────────────
 
-# Ниже маркера в «Конфиге» лежат другие секции (голосования, автоматизации) и
-# дописанная ботом памятка с ПРИМЕРАМИ строк — если читать лист целиком, пример
-# «SLPRO / SUMC / PullUp Farm» приедет как настоящий турнир. Набор маркеров тот
-# же, что в enhanced_duplicate_protection, но продублирован намеренно: импорт
-# того модуля поднимает глобальный экземпляр с походом в Google Sheets.
-_CONFIG_END_MARKERS = {"END", "END_CONFIG", "CONFIG_END", "END OF CONFIG",
-                       "КОНЕЦ", "--- END ---", "=== END ==="}
 _SLPRO_TYPES = {"SLPRO", "СЛПРО", "SL PRO", "SL-PRO"}
 # Заголовок таблицы (и его вариант из памятки) — не данные.
 _HEADER_CELLS = {"ТИП", "ИД", "ИД КОМАНДЫ"}
@@ -235,8 +228,9 @@ def leagues_from_config() -> List[Dict[str, Any]]:
     откатывается на автоопределение по названию команды из env.
     """
     try:
+        import config_sheet
         import sheets_cache
-        rows = sheets_cache.get_config_rows() or []
+        rows = config_sheet.split(sheets_cache.get_config_rows() or [])[config_sheet.GAME]
     except Exception:
         return []
 
@@ -244,10 +238,7 @@ def leagues_from_config() -> List[Dict[str, Any]]:
     seen = set()
     for row in rows:
         cells = [str(c or "").strip() for c in list(row) + [""] * 4]
-        head = cells[0].upper()
-        if head in _CONFIG_END_MARKERS:
-            break
-        if head not in _SLPRO_TYPES:
+        if cells[0].upper() not in _SLPRO_TYPES:
             continue
         division, team_name, alt = cells[1].strip(), cells[2].strip(), cells[3].strip()
         if not team_name or team_name.upper() in _HEADER_CELLS:

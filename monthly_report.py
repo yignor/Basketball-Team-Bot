@@ -320,6 +320,58 @@ def build_for(tg_user_id: Optional[str], source: Optional[str], player_id: Optio
     return out
 
 
+async def send_all(year: int, month: int, dry_run: bool = False) -> int:
+    """Месячная рассылка: каждому, кто привязал профиль и не выключил
+    уведомления, — один файл по всем его лигам, в ЛИЧКУ.
+
+    Идемпотентно по last_sent: повторный запуск в том же месяце никого не
+    задваивает, поэтому крон можно перезапускать без опаски."""
+    import os
+    import io
+    import personal_report
+    import player_identity
+    from telegram import Bot
+
+    token = os.getenv("BOT_TOKEN", "")
+    if not token:
+        print("❌ BOT_TOKEN не задан")
+        return 2
+    bot = Bot(token)
+    sent = skipped = empty = 0
+    for uid in player_identity.linked_users():
+        prefs = personal_report.get_prefs(uid)
+        if not personal_report.monthly_file_due(prefs):
+            skipped += 1
+            continue
+        profiles = [(r["source"], r["player_id"])
+                    for r in player_identity.get_identities(uid)]
+        html_doc = build_combined(profiles, year, month)
+        if not html_doc:
+            empty += 1
+            continue
+        if dry_run:
+            print(f"→ {uid}: файл готов ({len(html_doc)} байт), отправка отключена")
+            sent += 1
+            continue
+        bio = io.BytesIO(html_doc.encode("utf-8"))
+        name = f"otchet_{year}-{month:02d}.html"
+        try:
+            await bot.send_document(
+                chat_id=int(uid), document=bio, filename=name,
+                caption="📊 Отчёт за месяц по всем твоим лигам. Внизу файла — "
+                        "готовый запрос для ИИ, если захочешь разбор поглубже.")
+        except Exception as e:
+            # Человек мог не запускать бота или заблокировать его — не повод
+            # ронять рассылку остальным.
+            print(f"⚠️ {uid}: не отправилось ({e})")
+            continue
+        personal_report.mark_sent(uid)
+        sent += 1
+    print(f"📨 Месячная рассылка {month:02d}.{year}: отправлено {sent}, "
+          f"без игр {empty}, не время/выключено {skipped}")
+    return 0
+
+
 def main() -> int:
     import argparse
     import os
@@ -332,6 +384,10 @@ def main() -> int:
     ap.add_argument("--out-dir", default="/tmp", help="куда положить файлы")
     ap.add_argument("--send", action="store_true",
                     help="отправить файл в ЛИЧКУ (--tg обязателен)")
+    ap.add_argument("--all", action="store_true",
+                    help="месячная рассылка всем, кто привязал профиль (для крона)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="с --all: собрать файлы, но не отправлять")
     args = ap.parse_args()
 
     if args.month:
@@ -339,6 +395,10 @@ def main() -> int:
     else:
         today = date.today()
         year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+
+    if args.all:
+        import asyncio as _asyncio
+        return _asyncio.run(send_all(year, month, dry_run=args.dry_run))
 
     files = build_for(args.tg, args.source, args.player_id, year, month)
     if not files:

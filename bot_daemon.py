@@ -896,8 +896,54 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
+        [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
+
+
+def _config_screen_text() -> str:
+    """Что бот вычитал из «Конфига» — чтобы админ видел результат разметки, не
+    лазая в логи. Лист бот не правит, поэтому единственная обратная связь по
+    неудачно поставленному маркеру — этот экран."""
+    import config_sheet
+    from enhanced_duplicate_protection import duplicate_protection
+
+    rows = sheets_cache.get_config_rows() or []
+    if not rows:
+        return "🧾 Конфиг\n\nЗеркало листа пустое — нажми «Синхронизация»."
+    blocks = config_sheet.split(rows, strict=True)
+    cfg = duplicate_protection.get_config_ids()
+    lines = [f"🧾 {config_sheet.describe(rows)}", ""]
+
+    lines.append("🎮 GAME — турниры")
+    for row in blocks[config_sheet.GAME]:
+        cells = [str(c or "").strip() for c in list(row) + [""] * 4]
+        lines.append(f"• {cells[0] or '—'} · {cells[1] or '—'} · {cells[2] or '—'}"
+                     + (f" · {cells[3]}" if cells[3] else ""))
+    if not blocks[config_sheet.GAME]:
+        lines.append("• пусто (проверь --- START GAME --- / --- END GAME ---)")
+    lines.append(f"  → соревнования: {cfg.get('comp_ids') or '—'}, "
+                 f"команды: {cfg.get('team_ids') or '—'}")
+
+    lines.append("")
+    lines.append("🗳 VOTING — опросы")
+    for poll in duplicate_protection.get_full_config().get("voting_polls") or []:
+        opts = ", ".join(o["text"] for o in poll.get("options") or [])
+        lines.append(f"• «{poll.get('topic_template') or poll.get('poll_id')}»: {opts or '—'}")
+        lines.append(f"  дни: {poll.get('weekdays') or '—'}, топик: {poll.get('topic_id') or '—'}")
+    if not blocks[config_sheet.VOTING]:
+        lines.append("• пусто (проверь --- START VOTING --- / --- END VOTING ---)")
+
+    lines.append("")
+    lines.append("⚙️ AUTOMATIONS — автосообщения")
+    for key, entry in sorted((duplicate_protection.get_config_ids()
+                              .get("automation_topics") or {}).items()):
+        lines.append(f"• {entry.get('name') or key}: топик {entry.get('topic_id') or '—'}, "
+                     f"время {entry.get('notify_time') or '—'}")
+    if not blocks[config_sheet.AUTOMATIONS]:
+        lines.append("• маркеры стоят не вокруг строк автосообщений — "
+                     "бот прочитал секцию по заголовку")
+    return "\n".join(lines)[:4000]
 
 
 def _fantasy_menu_markup() -> InlineKeyboardMarkup:
@@ -1411,6 +1457,10 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
             elif screen == "fantasy":
                 await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+            elif screen == "config":
+                await query.edit_message_text(
+                    _config_screen_text(),
+                    reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:main")]))
 
         elif parts[1] == "fantasy":
             await _handle_fantasy_action(query, parts[2] if len(parts) > 2 else "",

@@ -280,21 +280,22 @@ def mark_sent(tg_user_id: Any, when_iso: Optional[str] = None) -> None:
         conn.commit()
 
 
-def due_for_report(prefs: Dict[str, Any], today: Optional[date] = None) -> bool:
-    """Пора ли слать по расписанию. Для режима «после игры» решает не расписание,
-    а факт сыгранной игры — здесь всегда False."""
+def monthly_file_due(prefs: Dict[str, Any], today: Optional[date] = None) -> bool:
+    """Пора ли слать месячный файл.
+
+    Раз в месяц и только тем, кто не выключил уведомления совсем. Порог 25
+    дней, а не 30: крон ходит первого числа, а месяцы разной длины — со
+    строгими 30 февральская рассылка уехала бы на месяц вперёд."""
     today = today or date.today()
-    mode = prefs.get("notify_mode", "game")
-    if mode in ("off", "game"):
+    if (prefs.get("notify_mode") or "game") == "off":
         return False
     last = (prefs.get("last_sent") or "")[:10]
     if not last:
         return True
     try:
-        gap = (today - date.fromisoformat(last)).days
+        return (today - date.fromisoformat(last)).days >= 25
     except ValueError:
         return True
-    return gap >= (7 if mode == "week" else 30)
 
 
 # ─────────────── Углублённая аналитика ───────────────────────────────────────

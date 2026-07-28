@@ -79,6 +79,16 @@ def get_identities(tg_user_id: Any) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def linked_users() -> List[str]:
+    """Telegram-id всех, кто привязал хотя бы один профиль лиги."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT tg_user_id FROM player_identities ORDER BY tg_user_id"
+        ).fetchall()
+    return [str(r["tg_user_id"]) for r in rows]
+
+
 def link_identity(tg_user_id: Any, parsed: Dict[str, str]) -> Dict[str, Any]:
     """Привязывает профиль. Возвращает {ok, changed, previous}.
 
