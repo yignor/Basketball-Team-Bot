@@ -1091,7 +1091,7 @@ async def _handle_fantasy_pool(query, parts: List[str]) -> None:
         if not fantasy.pool_teams(fantasy.get_active_season()):
             fantasy.set_pool_teams(candidates)  # материализуем дефолт «все»
         fantasy.toggle_pool_team(target)
-        fantasy_api._pool_cache["data"] = None  # сбросить кеш пула
+        fantasy_api._pool_cache.clear()   # пул считается на сезон — сбрасываем весь кеш
     await query.edit_message_text(
         "👥 Чьи ростеры в пуле фэнтези?\n\nОтмечай команды — их игроков можно "
         "будет ставить в состав. ✅ — в пуле.",

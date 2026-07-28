@@ -173,7 +173,7 @@ def _push_tg_id_to_sheet(player_row: int, tg_user_id: str) -> None:
 
 # ─────────────────────────── Пул драфта ──────────────────────────────────────
 
-_pool_cache: Dict[str, Any] = {"at": 0.0, "data": None}
+_pool_cache: Dict[str, Dict[str, Any]] = {}      # season_id -> {at, data}
 _POOL_TTL = 3600.0
 
 
@@ -221,25 +221,35 @@ def _protocol_players(source: str, team_id: Any) -> List[Dict[str, Any]]:
              "games": r["games"], "last_game": r["last_game"]} for r in rows]
 
 
-async def _resolve_pool_teams() -> List[Dict[str, Any]]:
-    """Команды пула: явный выбор админа (fantasy.pool_teams) или дефолт —
-    все кандидаты из настроек поиска игр."""
-    season = fantasy.get_active_season()
+async def _resolve_pool_teams(season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Команды пула сезона: явный выбор админа (fantasy.pool_teams) или
+    дефолт — все кандидаты из настроек поиска игр."""
+    if season is None:
+        season = fantasy.get_active_season()
     explicit = fantasy.pool_teams(season) if season else []
     return explicit if explicit else await derive_pool_teams()
 
 
-async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
+async def build_pool(force: bool = False,
+                     season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Пул драфта: игроки команд из fantasy.pool_teams (SLPRO + Инфобаскет).
     Ref = source:team_id:player_id. Имя — транзитно из публичного ростера,
-    в наших таблицах не хранится. Кешируется в памяти (TTL 1ч)."""
+    в наших таблицах не хранится.
+
+    Кеш в памяти на час и ОТДЕЛЬНО НА СЕЗОН: параллельные лиги набираются из
+    разных команд (в этом и смысл «фэнтези для чужой команды»), общий кеш
+    показывал бы всем пул той лиги, которая обновилась последней."""
+    if season is None:
+        season = fantasy.get_active_season()
+    key = str((season or {}).get("id") or "-")
     now = time.time()
-    if not force and _pool_cache["data"] is not None and (now - _pool_cache["at"]) < _POOL_TTL:
-        return _pool_cache["data"]
+    entry = _pool_cache.get(key)
+    if not force and entry and (now - entry["at"]) < _POOL_TTL:
+        return entry["data"]
 
     pool: List[Dict[str, Any]] = []
     seen = set()
-    for team in await _resolve_pool_teams():
+    for team in await _resolve_pool_teams(season):
         src = team.get("source")
         tid = team.get("team_id")
         if tid is None:
@@ -289,8 +299,7 @@ async def build_pool(force: bool = False) -> List[Dict[str, Any]]:
     # разными id. Склеиваем по ФИО в одну карточку с составной ссылкой
     # «slpro:..+ib:..» — очки суммируются, а не задваиваются.
     pool = _merge_pool_by_name(pool)
-    _pool_cache["data"] = pool
-    _pool_cache["at"] = now
+    _pool_cache[key] = {"at": now, "data": pool}
     return pool
 
 
@@ -562,9 +571,19 @@ async def handle_admin_state(request: web.Request) -> web.Response:
     if not _is_admin(user):
         return web.json_response({"error": "forbidden"}, status=403)
 
+    candidates = await derive_pool_teams()
     seasons = []
     for s in fantasy.active_seasons():
         scopes = fantasy.effective_scopes(s)
+        teams = fantasy.pool_teams(s)
+        # Пул явно не задан — значит действуют «наши» команды по умолчанию;
+        # показываем их отмеченными, иначе кажется, что пул пуст.
+        in_pool = {(str(t.get("source")), str(t.get("team_id")))
+                   for t in (teams or candidates)}
+        players = [{"ref": p["ref"], "name": p["name"], "team": p.get("team", ""),
+                    "excluded": p["excluded"]}
+                   for p in _pool_with_stats(await build_pool(season=s), s)]
+        players.sort(key=lambda p: (p["excluded"], p["name"]))
         seasons.append({
             "id": s["id"], "name": s["name"], "format": s.get("format", "3x3"),
             "roster_size": fantasy.roster_size(s),
@@ -573,7 +592,13 @@ async def handle_admin_state(request: web.Request) -> web.Response:
             "scopes": scopes,
             "scopes_title": fantasy.scopes_title(scopes),
             "manual_scopes": bool(fantasy.season_scopes(s)),
-            "pool_teams": fantasy.pool_teams(s),
+            "pool_teams": teams,
+            "manual_pool": bool(teams),
+            # Команды-кандидаты с отметкой «в пуле» — чтобы команду можно было
+            # и убрать, и вернуть, а не только увидеть список выбранных.
+            "teams": [{**t, "in_pool": (str(t.get("source")), str(t.get("team_id"))) in in_pool}
+                      for t in candidates],
+            "players": players,
         })
     avail = await available_scopes()
     for s_ in seasons:
@@ -637,11 +662,23 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         teams = [t for t in fantasy.pool_teams(season)
                  if str(t.get("team_id")) != str(team["team_id"])] + [team]
         fantasy.set_pool_teams(teams, sid)
+        _pool_cache.pop(str(sid), None)
     elif action == "pool_remove":
         season = fantasy._get_season(sid)
         tid = str(body.get("value") or "")
         fantasy.set_pool_teams(
             [t for t in fantasy.pool_teams(season) if str(t.get("team_id")) != tid], sid)
+        _pool_cache.pop(str(sid), None)
+    elif action == "player_toggle":
+        # Игрока убираем по ИМЕНИ: у него бывает по id в каждой лиге, а решение
+        # админа — про человека, а не про строчку ростера. Уже набранные на нём
+        # очки зафиксированы снимками по играм и не пропадают.
+        ref = str(body.get("value") or "")
+        season = fantasy._get_season(sid)
+        entry = next((p for p in await build_pool(season=season) if p["ref"] == ref), None)
+        if not entry:
+            return web.json_response({"error": "unknown_player"}, status=404)
+        fantasy.toggle_pool_exclude_name(entry["name"], season_id=sid)
     elif action == "finish":
         fantasy.end_season(sid)
     else:
@@ -690,7 +727,7 @@ async def webapp_shared() -> Optional[Dict[str, Any]]:
     season = fantasy.get_active_season()
     if not season:
         return None
-    pool = _compress_pool(_pool_with_stats(await build_pool(), season))
+    pool = _compress_pool(_pool_with_stats(await build_pool(season=season), season))
     week_start, sched_locked = fantasy.active_selection(season)
     table = fantasy.season_standings_live(season["id"])
     names = fantasy.display_names([str(r["user_id"]) for r in table])
@@ -742,7 +779,7 @@ async def handle_pool(request: web.Request) -> web.Response:
     if not _can_view(user):
         return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
-    pool = _pool_with_stats(await build_pool(), season)
+    pool = _pool_with_stats(await build_pool(season=season), season)
     # Список активных лиг — для переключателя в Mini App (когда их несколько).
     seasons = [{"id": s["id"], "name": s["name"], "format": s["format"]}
                for s in fantasy.active_seasons()]
@@ -755,27 +792,6 @@ async def handle_pool(request: web.Request) -> web.Response:
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
         "admin": _is_admin(user),
     })
-
-
-async def handle_exclude(request: web.Request) -> web.Response:
-    """Админ убирает/возвращает игрока в пул (по ФИО из пула). Только админ."""
-    user = _auth_user(request)
-    if not user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-    if not _is_admin(user):
-        return web.json_response({"error": "forbidden"}, status=403)
-    try:
-        body = await request.json()
-        ref = str(body.get("ref") or "")
-    except (json.JSONDecodeError, TypeError):
-        return web.json_response({"error": "bad_request"}, status=400)
-    entry = next((p for p in await build_pool() if p["ref"] == ref), None)
-    if not entry:
-        return web.json_response({"error": "unknown_player"}, status=404)
-    season = _season(request)
-    now_excluded, _ = fantasy.toggle_pool_exclude_name(entry["name"],
-                                                       season["id"] if season else None)
-    return web.json_response({"ok": True, "ref": ref, "excluded": now_excluded})
 
 
 async def handle_get_roster(request: web.Request) -> web.Response:
@@ -933,7 +949,6 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/pool", handle_pool),
         web.get("/fantasy/roster", handle_get_roster),
         web.post("/fantasy/roster", handle_save_roster),
-        web.post("/fantasy/exclude", handle_exclude),
         web.get("/fantasy/player", handle_player),
         web.get("/fantasy/standings", handle_standings),
         web.get("/fantasy/top", handle_top),

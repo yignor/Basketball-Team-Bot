@@ -34,10 +34,13 @@
        переноса они уезжали за край экрана и были недоступны. */
     #adminBody .bar { flex-wrap: wrap; }
     #adminBody .chip { white-space: normal; text-align: left; }
+    /* Список игроков в админке — свёрнутый, иначе карточка лиги разъезжается. */
+    .adm-players { margin: 6px 0; }
+    .adm-players > summary { cursor: pointer; font-size: 13px; padding: 6px 0; color: var(--hint); }
+    .adm-players .card { padding: 6px 8px; }
     .note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
-    line-height: 1.35; background: var(--tg-theme-secondary-bg-color, #f1f1f1);
-    color: var(--tg-theme-hint-color, #707579); }
-  .counter { color: var(--hint); font-size: 14px; flex: 1; }
+      line-height: 1.35; background: var(--secondary-bg); color: var(--hint); }
+    .counter { color: var(--hint); font-size: 14px; flex: 1; }
     select { background: var(--secondary-bg); color: var(--text); border: none;
       border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
     #search { flex: 1; background: var(--secondary-bg); color: var(--text); border: none;
@@ -357,28 +360,15 @@
   }
 
   function passesFilter(p) {
-    // Убранных админом показываем только админу (чтобы вернуть); остальным — нет.
-    if (p.excluded && !isAdmin) return false;
+    // Убранные админом не показываются никому: вернуть их можно на вкладке ⚙️,
+    // а в общем списке они только мешали выбирать состав.
+    if (p.excluded) return false;
     // Выбранных всегда показываем, чтобы не терять свой состав из виду.
     if (counts[p.ref]) return true;
     if (search && p.name.toLowerCase().indexOf(search) < 0) return false;
     if (playedOnly && !(p.st && p.st.games)) return false;
     return true;
   }
-
-  async function toggleExclude(ref) {
-    if (!live) return;
-    haptic('medium');
-    try {
-      const res = await api('/fantasy/exclude', { method: 'POST', body: JSON.stringify({ ref }) });
-      const p = pool.find(x => x.ref === ref);
-      if (p) p.excluded = !!res.excluded;
-      renderPool();
-    } catch (e) {
-      tg && tg.showAlert ? tg.showAlert('Не удалось изменить пул.') : 0;
-    }
-  }
-  window.toggleExclude = toggleExclude;
 
   function renderPool() {
     sortPool();
@@ -388,27 +378,22 @@
     $('poolEmpty').classList.toggle('hidden', visible.length > 0);
     for (const p of visible) {
       const n = counts[p.ref] || 0;
-      const canAdd = !locked && !full && n < maxPer && !p.excluded;
+      const canAdd = !locked && !full && n < maxPer;
       const c = document.createElement('div');
-      c.className = 'card' + (n ? ' sel' : '') + ((locked || p.excluded || (!n && full)) ? ' disabled' : '');
-      const ctrl = p.excluded
-        ? (isAdmin ? `<button class="step wide" data-act="restore">Вернуть</button>` : '')
-        : `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
-          `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
-          `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>` +
-          (isAdmin ? `<button class="step del" data-act="remove" title="Убрать из пула">✕</button>` : '');
+      c.className = 'card' + (n ? ' sel' : '') + ((locked || (!n && full)) ? ' disabled' : '');
+      const ctrl =
+        `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
+        `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
+        `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>`;
       c.innerHTML =
         `<div class="num">${esc(p.number || '—')}</div>` +
         `<div class="info"><div class="pname">${esc(p.name)}` +
-        (p.excluded ? ' <span class="pteam">(убран)</span>' : (live ? '<span class="chev">›</span>' : '')) + `</div>` +
+        (live ? '<span class="chev">›</span>' : '') + `</div>` +
         `<div class="pstat">${esc(statLine(p))}</div></div>` +
         `<div class="ctrl">${ctrl}</div>`;
       const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
       const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
-      const rm = c.querySelector('[data-act=remove]'); if (rm) rm.onclick = e => { e.stopPropagation(); toggleExclude(p.ref); };
-      const rs = c.querySelector('[data-act=restore]'); if (rs) rs.onclick = e => { e.stopPropagation(); toggleExclude(p.ref); };
-      // Тап по имени — профиль игрока (у исключённых тоже можно посмотреть).
-      c.querySelector('.info').onclick = () => { if (!p.excluded) openPlayer(p.ref); };
+      c.querySelector('.info').onclick = () => openPlayer(p.ref);
       el.appendChild(c);
     }
     updateCounter();
@@ -637,6 +622,30 @@
   }
   window.adminDo = adminDo;
 
+  // JSON внутри onclick='...' : апостроф в названии («Кубок 'A'») закрывал бы
+  // атрибут и ломал кнопку. Браузер разворачивает сущности до того, как строку
+  // увидит JS, поэтому экранируем тем же esc.
+  const jattr = o => esc(JSON.stringify(o));
+
+  function teamChip(seasonId, t) {
+    const act = t.in_pool ? 'pool_remove' : 'pool_add';
+    // Убираем по team_id, добавляем целиком (нужны source/comp_id для ростера).
+    const val = t.in_pool ? jattr(String(t.team_id)) : jattr(t);
+    return `<button class="chip${t.in_pool ? ' on' : ''}" ` +
+      `onclick='adminDo({action:"${act}",season_id:${seasonId},value:${val}})'>` +
+      `${t.in_pool ? '✅' : '⚪'} ${esc(t.name || (t.source + ':' + t.team_id))}</button>`;
+  }
+
+  function playerRow(seasonId, p) {
+    const act = jattr({action: 'player_toggle', season_id: seasonId, value: p.ref});
+    return `<div class="card${p.excluded ? ' disabled' : ''}">` +
+      `<div class="info"><div class="pname">${esc(p.name)}` +
+      (p.excluded ? ' <span class="pteam">(убран)</span>' : '') + `</div>` +
+      `<div class="pstat">${esc(p.team || '')}</div></div>` +
+      `<div class="ctrl"><button class="step wide" onclick='adminDo(${act})'>` +
+      `${p.excluded ? 'Вернуть' : 'Убрать'}</button></div></div>`;
+  }
+
   function renderAdmin(d) {
     const el = $('adminBody');
     el.innerHTML = '';
@@ -656,10 +665,14 @@
       // Снятый турнир должен возвращаться: иначе один промах и очки не
       // считаются, а вернуть нечем.
       const add = (s.can_add || []).map(sc =>
-        `<button class="chip" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${JSON.stringify(sc)}})'>` +
+        `<button class="chip" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${jattr(sc)}})'>` +
         `+ ${esc(sc.name || sc.source)}</button>`).join(' ');
+      // Команды пула: тем же тумблером и добавляем, и убираем — «добавить» без
+      // «убрать» уже приводило к тому, что случайно снятую лигу не вернуть.
+      const teams = (s.teams || []).map(t => teamChip(s.id, t)).join(' ');
+      const excludedCount = (s.players || []).filter(p => p.excluded).length;
       const scopes = (s.scopes || []).map(sc =>
-        `<button class="chip on" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${JSON.stringify(sc)}})'>` +
+        `<button class="chip on" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${jattr(sc)}})'>` +
         `${esc(sc.name || (sc.source + " " + (sc.stage_id || sc.season_id || "")))} ✕</button>`).join(' ');
       box.innerHTML =
         `<div class="pname">${esc(s.name)}</div>` +
@@ -673,14 +686,16 @@
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:1})'>по 1</button>` +
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:${s.roster_size}})'>без лимита</button>` +
         `</div>` +
-        `<div class="pstat">Команды в пуле: ${(s.pool_teams || []).length
-            ? (s.pool_teams || []).map(t => esc(t.name || (t.source + ':' + t.team_id))).join(', ')
-            : 'по умолчанию (наши)'}</div>` +
+        `<div class="pstat">Чьи игроки в пуле${s.manual_pool ? '' : ' (по умолчанию — наши)'}:</div>` +
+        `<div class="bar" style="padding-left:0">${teams || '<span class="pstat">команд не найдено</span>'}</div>` +
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
         `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны — очки не считаются!</span>'}</div>` +
         (add ? `<div class="pstat">Можно добавить:</div><div class="bar" style="padding-left:0">${add}</div>` : '') +
+        `<details class="adm-players"><summary>Игроки пула: ${(s.players || []).length}` +
+        `${excludedCount ? ` · убрано ${excludedCount}` : ''}</summary>` +
+        (s.players || []).map(p => playerRow(s.id, p)).join('') + `</details>` +
         `<div class="bar" style="padding-left:0">` +
-          `<button class="chip" onclick='confirmFinish(${s.id}, ${JSON.stringify(s.name)})'>🏁 Завершить лигу</button>` +
+          `<button class="chip" onclick='confirmFinish(${s.id}, ${jattr(s.name)})'>🏁 Завершить лигу</button>` +
         `</div>`;
       el.appendChild(box);
     }
