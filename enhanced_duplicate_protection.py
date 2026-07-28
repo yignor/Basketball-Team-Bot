@@ -1377,7 +1377,12 @@ class EnhancedDuplicateProtection:
             import sheets_cache
             rows = sheets_cache.get_config_rows()
             if rows:
-                return [CONFIG_HEADER] + rows
+                # Ширина строки зеркала (10 колонок, по J) шире, чем шапка
+                # секции турниров — дополняем, чтобы первая строка не была
+                # короче остальных.
+                width = max(len(r) for r in rows)
+                header = CONFIG_HEADER + [""] * max(0, width - len(CONFIG_HEADER))
+                return [header] + rows
         except Exception:
             pass
         if self.config_worksheet:

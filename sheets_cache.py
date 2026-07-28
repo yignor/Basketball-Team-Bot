@@ -210,6 +210,9 @@ CREATE INDEX IF NOT EXISTS idx_service_records_type ON service_records(data_type
 -- "Конфиг" — люди правят руками, поэтому только pull (та же схема, что
 -- players/attendance): сырые колонки, парсинг остаётся в
 -- enhanced_duplicate_protection.py как есть.
+-- Колонок ровно столько, сколько занимает самая широкая секция листа: у
+-- голосований это 10 (по J), там «ID топика» и «Комментарий». Обрезали до H —
+-- топик опроса терялся, и опрос уходил не в свой топик.
 CREATE TABLE IF NOT EXISTS config_rows (
     row_index   INTEGER PRIMARY KEY,
     col_a       TEXT NOT NULL DEFAULT '',
@@ -220,6 +223,8 @@ CREATE TABLE IF NOT EXISTS config_rows (
     col_f       TEXT NOT NULL DEFAULT '',
     col_g       TEXT NOT NULL DEFAULT '',
     col_h       TEXT NOT NULL DEFAULT '',
+    col_i       TEXT NOT NULL DEFAULT '',
+    col_j       TEXT NOT NULL DEFAULT '',
     synced_at   TEXT NOT NULL
 );
 
@@ -398,6 +403,10 @@ SERVICE_SHEET_COLUMNS = [
     "game_time", "arena", "team_a_id", "team_b_id",
 ]
 CONFIG_SHEET_NAME = "Конфиг"
+# Сколько колонок листа «Конфиг» зеркалим. 10 = по J: столько занимает секция
+# голосований («ID топика», «Комментарий»). Меняешь тут — добавь колонки в
+# схему config_rows и миграцию в init_db.
+CONFIG_COLUMNS = 10
 
 
 def _now_iso() -> str:
@@ -461,6 +470,9 @@ def init_db() -> None:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».
         _ensure_column(conn, "player_report_prefs", "metrics", "TEXT NOT NULL", "''")
+        # «ID топика» и «Комментарий» секции голосований — колонки I и J листа.
+        _ensure_column(conn, "config_rows", "col_i", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "config_rows", "col_j", "TEXT NOT NULL", "''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_gps_scope "
                      "ON game_player_stats(source, season_id, stage_id)")
         conn.commit()
@@ -678,15 +690,16 @@ def sync_config(spreadsheet) -> None:
             now = _now_iso()
             rows = []
             for idx, row in enumerate(all_rows, start=2):
-                row = row + [""] * (8 - len(row))
-                rows.append((idx, *row[:8], now))
+                row = list(row) + [""] * (CONFIG_COLUMNS - len(row))
+                rows.append((idx, *row[:CONFIG_COLUMNS], now))
             conn.execute("BEGIN")
             conn.execute("DELETE FROM config_rows")
             conn.executemany(
                 """
                 INSERT INTO config_rows
-                (row_index, col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h,
+                 col_i, col_j, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -705,7 +718,8 @@ def get_config_rows() -> List[List[str]]:
     init_db()
     with _connection() as conn:
         rows = conn.execute(
-            "SELECT col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h FROM config_rows ORDER BY row_index"
+            "SELECT col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h, col_i, col_j "
+            "FROM config_rows ORDER BY row_index"
         ).fetchall()
     return [list(r) for r in rows]
 
