@@ -399,10 +399,14 @@ def _srcset(ref: str) -> set:
 
 
 def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Склеивает почти-одинаковые ФИО ИЗ РАЗНЫХ ЛИГ: та же фамилия, имя
-    отличается ≤1 буквы (напр. «Шлепикас Роман» ↔ «Шлепикас Ромас»). Разные
-    лиги — чтобы не слить двух разных людей внутри одной лиги. Фамилию требуем
-    точную; более сложные расхождения — вручную/через связку id в «Игроки»."""
+    """Склеивает почти-одинаковые ФИО ИЗ РАЗНЫХ ЛИГ: расходиться может ЛИБО
+    имя, ЛИБО фамилия, и не больше чем на букву — «Шлепикас Роман» ↔
+    «Шлепикас Ромас», «Лысюк Денис» ↔ «Лисюк Денис» (реальные случаи: лиги
+    записали одного человека по-разному).
+
+    Требуем ровно одно расхождение и разные лиги: внутри одной лиги двух людей
+    сливать нельзя, а «Долгих Денис» и «Долгих Владислав» — братья, и их
+    различают имена целиком. Более сложные расхождения — руками в «Игроки»."""
     result: List[Dict[str, Any]] = []
     for e in merged:
         if _norm_name(e["name"]).startswith(("№", "id ")):   # имени нет, сравнивать нечего
@@ -419,7 +423,12 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             gparts = _norm_name(g["name"]).split()
             g_sur = gparts[0] if gparts else ""
             g_first = gparts[1] if len(gparts) > 1 else ""
-            if e_sur and g_sur == e_sur and not (_srcset(g["ref"]) & e_src) and _lev1(e_first, g_first):
+            if not e_sur or not g_sur or (_srcset(g["ref"]) & e_src):
+                continue
+            same_sur, same_first = g_sur == e_sur, g_first == e_first
+            near_sur, near_first = _lev1(e_sur, g_sur), _lev1(e_first, g_first)
+            # одна часть совпадает точно, вторая — с точностью до буквы
+            if (same_sur and near_first) or (same_first and near_sur):
                 hit = g
                 break
         if hit:
