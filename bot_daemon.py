@@ -324,6 +324,9 @@ def _is_admin(user) -> bool:
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
 
 
+FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
+
+
 def _fantasy_reply_keyboard(payload: str) -> ReplyKeyboardMarkup:
     """Постоянная кнопка запасного входа в фэнтези. Открывает Mini App как
     web_app — только из reply-кнопки Telegram даёт sendData, поэтому сохранение
