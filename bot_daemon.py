@@ -349,7 +349,7 @@ def _fantasy_reply_keyboard(payload: str) -> ReplyKeyboardMarkup:
     web_app — только из reply-кнопки Telegram даёт sendData, поэтому сохранение
     состава уходит боту через Telegram и не зависит от живого API. Данные едут
     в самом URL (#d=payload), приватно, в личном чате игрока."""
-    url = _webapp_url() + "#d=" + payload
+    url = _webapp_url() + ("#d=" + payload if payload else "")
     return ReplyKeyboardMarkup(
         [[KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))]],
         resize_keyboard=True,
@@ -373,13 +373,42 @@ async def _maybe_send_fantasy_keyboard(update: Update, user) -> None:
         return
     if not payload:
         return
-    try:
-        await update.message.reply_text(
-            "🏀 Фэнтези: жми кнопку ниже — собрать состав и посмотреть таблицу. "
-            "Кнопка останется внизу чата.",
-            reply_markup=_fantasy_reply_keyboard(payload))
-    except Exception as e:
-        log.warning(f"Не удалось отправить кнопку фэнтези: {e}")
+    text = ("🏀 Фэнтези: жми кнопку ниже — собрать состав и посмотреть таблицу. "
+            "Кнопка останется внизу чата.")
+    await _send_fantasy_button(update.message, str(user.id), text, payload)
+
+
+# Сколько данных пробуем запечь в кнопку. Telegram отвергает слишком длинную
+# клавиатуру, а какой именно потолок — не документировано, поэтому спускаемся
+# по ступеням: полнее -> короче -> вообще без данных (лишь бы кнопка была).
+PAYLOAD_BUDGETS = (8000, 4000, None)      # None — кнопка вообще без данных
+
+
+async def _send_fantasy_button(message, user_id: str, text: str,
+                               payload: Optional[str] = None) -> None:
+    """Шлёт кнопку запасного входа, ужимая данные, пока Telegram не примет.
+
+    Потолок длины клавиатуры у Telegram не документирован, а payload растёт с
+    сезоном — поэтому спускаемся по ступеням, а не гадаем. Последняя ступень —
+    кнопка без данных: живой вход у большинства работает, и лучше так, чем
+    вообще без кнопки (именно это и происходило с 26.07)."""
+    for budget in PAYLOAD_BUDGETS:
+        if budget is None:
+            payload = ""
+        elif payload is None:
+            try:
+                payload = await fantasy_api.build_webapp_payload(user_id, max_len=budget)
+            except Exception as e:
+                log.warning(f"payload кнопки (бюджет {budget}) не собрался: {e}")
+                payload = None
+                continue
+        try:
+            await message.reply_text(text, reply_markup=_fantasy_reply_keyboard(payload or ""))
+            return
+        except Exception as e:
+            log.warning(f"кнопка фэнтези (бюджет {budget}) не ушла: {e}")
+            payload = None
+    log.warning("кнопка фэнтези не отправлена даже без данных")
 
 
 async def _send_main_menu(update: Update, with_keyboard: bool = False,
@@ -397,7 +426,15 @@ async def _send_main_menu(update: Update, with_keyboard: bool = False,
     for attempt in range(3):
         try:
             if with_keyboard:
-                await update.message.reply_text(ADMIN_KEYBOARD_LABEL + " активна ⬇️", reply_markup=_admin_reply_keyboard(fantasy_payload))
+                try:
+                    await update.message.reply_text(
+                        ADMIN_KEYBOARD_LABEL + " активна ⬇️",
+                        reply_markup=_admin_reply_keyboard(fantasy_payload))
+                except Exception as e:
+                    log.warning(f"Клавиатура с данными фэнтези не ушла ({e}) — шлю без них")
+                    await update.message.reply_text(
+                        ADMIN_KEYBOARD_LABEL + " активна ⬇️",
+                        reply_markup=_admin_reply_keyboard(None))
             if menu_only:
                 await update.message.reply_text(PLAYER_MENU_TEXT,
                                                 reply_markup=_player_menu_markup(is_admin=True))

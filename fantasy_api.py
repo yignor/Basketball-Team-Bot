@@ -861,10 +861,43 @@ async def webapp_shared() -> Optional[Dict[str, Any]]:
     }
 
 
-def encode_webapp_payload(shared: Dict[str, Any], user_id: str) -> str:
+# Сколько символов payload помещается в кнопку. Telegram отвергает слишком
+# длинную клавиатуру («Reply markup is too long»), и с ростом сезона мы в этот
+# предел упёрлись: полный payload дорос до 26 КБ и кнопка перестала уходить
+# ВООБЩЕ (в журнале с 26.07). Поэтому режем данные до бюджета, а не надеемся.
+PAYLOAD_LIMIT = int(os.getenv("WEBAPP_PAYLOAD_LIMIT", "8000"))
+
+
+def _payload_variants(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Ступени урезания — от самой полной к самой скромной.
+
+    Порядок по полезности для запасного входа: там собирают состав, поэтому
+    статистика игроков важнее таблицы, а история очков в таблице — вообще
+    самое тяжёлое (10 участников × 20 игр ≈ 18 КБ из 26)."""
+    lite_standings = [{k: v for k, v in s.items() if k != "history"}
+                      for s in data.get("standings") or []]
+    lite_pool = [{"r": p.get("r"), "m": p.get("m")} for p in data.get("pool") or []]
+    return [
+        data,
+        {**data, "standings": lite_standings},
+        {**data, "standings": []},
+        {**data, "standings": [], "pool": lite_pool},
+    ]
+
+
+def _encode(data: Dict[str, Any]) -> str:
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def encode_webapp_payload(shared: Dict[str, Any], user_id: str,
+                          max_len: Optional[int] = None) -> str:
     """Персональный payload = общая часть + состав игрока, base64url для #d=.
     Состав берём из БД по числовому id — тому же, под которым пишет живой вход,
-    поэтому оба входа показывают один состав, а очки не задваиваются."""
+    поэтому оба входа показывают один состав, а очки не задваиваются.
+
+    Не влезает в бюджет — отдаём урезанную версию (см. _payload_variants), а не
+    полную: лучше кнопка без статистики, чем никакой кнопки."""
     # Состав держится, пока игрок его не поменял, — значит и в запасном входе
     # показываем унаследованный. Иначе офлайн-игрок видел бы пустой экран и
     # думал, что состав слетел (в живом API он при этом есть).
@@ -878,14 +911,22 @@ def encode_webapp_payload(shared: Dict[str, Any], user_id: str) -> str:
         "week_start": shared["week_start"],
         "standings": shared["standings"],
     }
-    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    budget = PAYLOAD_LIMIT if max_len is None else max_len
+    if budget <= 0:
+        return _encode(data)
+    encoded = ""
+    for variant in _payload_variants(data):
+        encoded = _encode(variant)
+        if len(encoded) <= budget:
+            return encoded
+    log.warning(f"payload кнопки не влез в {budget}: даже урезанный {len(encoded)}")
+    return encoded
 
 
-async def build_webapp_payload(user_id: str) -> Optional[str]:
+async def build_webapp_payload(user_id: str, max_len: Optional[int] = None) -> Optional[str]:
     """Payload запасного входа для одного игрока. None — нет активного сезона."""
     shared = await webapp_shared()
-    return encode_webapp_payload(shared, user_id) if shared else None
+    return encode_webapp_payload(shared, user_id, max_len=max_len) if shared else None
 
 
 async def handle_pool(request: web.Request) -> web.Response:
