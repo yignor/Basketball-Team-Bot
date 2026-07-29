@@ -621,9 +621,17 @@
     catch (e) { el.innerHTML = '<div class="banner">Не удалось открыть админку.</div>'; }
   }
 
+  // Какие списки игроков раскрыты и где стояла страница. Ответ сервера
+  // перерисовывает всю админку, и без этого после «Убрать» список схлопывался,
+  // а экран прыгал наверх — а убирают обычно нескольких подряд.
+  const openPlayers = new Set();
+
   async function adminDo(body) {
-    try { renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(body)})); }
-    catch (e) { tg && tg.showAlert ? tg.showAlert('Не получилось сохранить.') : 0; }
+    const y = window.scrollY;
+    try {
+      renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(body)}));
+      window.scrollTo(0, y);
+    } catch (e) { tg && tg.showAlert ? tg.showAlert('Не получилось сохранить.') : 0; }
   }
   window.adminDo = adminDo;
 
@@ -719,13 +727,19 @@
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
         `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны — очки не считаются!</span>'}</div>` +
         (add ? `<div class="pstat">Можно добавить:</div><div class="bar" style="padding-left:0">${add}</div>` : '') +
-        `<details class="adm-players"><summary>Игроки пула: ${(s.players || []).length}` +
+        `<details class="adm-players" data-season="${s.id}"` +
+        `${openPlayers.has(s.id) ? ' open' : ''}>` +
+        `<summary>Игроки пула: ${(s.players || []).length}` +
         `${excludedCount ? ` · убрано ${excludedCount}` : ''}</summary>` +
         (s.players || []).map(p => playerRow(s.id, p)).join('') + `</details>` +
         `<div class="bar" style="padding-left:0">` +
           `<button class="chip" onclick='confirmFinish(${s.id}, ${jattr(s.name)})'>🏁 Завершить лигу</button>` +
         `</div>`;
       el.appendChild(box);
+      const det = box.querySelector('details.adm-players');
+      if (det) det.addEventListener('toggle', () => {
+        if (det.open) openPlayers.add(s.id); else openPlayers.delete(s.id);
+      });
     }
   }
 
