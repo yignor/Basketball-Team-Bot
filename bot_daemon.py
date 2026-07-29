@@ -28,6 +28,7 @@ from telegram import (
     MenuButtonCommands,
     MenuButtonWebApp,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Update,
     WebAppInfo,
 )
@@ -318,30 +319,9 @@ def _is_admin(user) -> bool:
     return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
 
 
+# Кнопки под чатом у админа больше нет — всё в самом сообщении меню. Подпись
+# оставлена, чтобы старая клавиатура, которая у кого-то ещё висит, работала.
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
-
-
-def _admin_reply_keyboard(fantasy_payload: Optional[str] = None) -> ReplyKeyboardMarkup:
-    """Постоянная кнопка внизу экрана — открывает то же меню, что и /admin,
-    без необходимости печатать команду каждый раз. Видна только админу,
-    т.к. отправляется только в его личном чате с ботом.
-
-    Если передан payload фэнтези — добавляем вторым рядом ту же кнопку
-    запасного входа, что видят игроки: у reply-клавиатуры на чат одна, поэтому
-    совмещаем в ней обе, чтобы админ мог посмотреть приложение."""
-    rows = [[KeyboardButton(ADMIN_KEYBOARD_LABEL)]]
-    if fantasy_payload and _webapp_url():
-        rows.append([KeyboardButton(
-            FANTASY_KEYBOARD_LABEL,
-            web_app=WebAppInfo(url=_webapp_url() + "#d=" + fantasy_payload))])
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        is_persistent=True,
-    )
-
-
-FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
 
 
 def _fantasy_reply_keyboard(payload: str) -> ReplyKeyboardMarkup:
@@ -411,30 +391,21 @@ async def _send_fantasy_button(message, user_id: str, text: str,
     log.warning("кнопка фэнтези не отправлена даже без данных")
 
 
-async def _send_main_menu(update: Update, with_keyboard: bool = False,
-                          menu_only: bool = False) -> None:
-    # Для админа кладём в клавиатуру и кнопку фэнтези — чтобы он видел приложение
-    # так же, как игроки. Нет активного сезона / фронт не настроен -> payload None
-    # -> клавиатура остаётся только с админ-кнопкой.
-    fantasy_payload = None
-    if with_keyboard and FANTASY_WEBAPP_URL and _webapp_url():
-        try:
-            user = update.effective_user
-            fantasy_payload = await fantasy_api.build_webapp_payload(str(user.id)) if user else None
-        except Exception as e:
-            log.warning(f"Не удалось собрать кнопку фэнтези для админа: {e}")
+async def _drop_reply_keyboard(message) -> None:
+    """Убирает постоянную клавиатуру из-под поля ввода.
+
+    Снять её можно только сообщением с ReplyKeyboardRemove, а двух разметок в
+    одном сообщении не бывает — поэтому шлём служебное и сразу удаляем."""
+    try:
+        note = await message.reply_text("⌛", reply_markup=ReplyKeyboardRemove())
+        await note.delete()
+    except Exception as e:
+        log.warning(f"Не удалось убрать клавиатуру под чатом: {e}")
+
+
+async def _send_main_menu(update: Update, menu_only: bool = False) -> None:
     for attempt in range(3):
         try:
-            if with_keyboard:
-                try:
-                    await update.message.reply_text(
-                        ADMIN_KEYBOARD_LABEL + " активна ⬇️",
-                        reply_markup=_admin_reply_keyboard(fantasy_payload))
-                except Exception as e:
-                    log.warning(f"Клавиатура с данными фэнтези не ушла ({e}) — шлю без них")
-                    await update.message.reply_text(
-                        ADMIN_KEYBOARD_LABEL + " активна ⬇️",
-                        reply_markup=_admin_reply_keyboard(None))
             if menu_only:
                 await update.message.reply_text(PLAYER_MENU_TEXT,
                                                 reply_markup=_player_menu_markup(is_admin=True))
@@ -499,11 +470,18 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _maybe_send_fantasy_keyboard(update, user)
         await update.message.reply_text(PLAYER_MENU_TEXT, reply_markup=_player_menu_markup())
         return
-    _refresh_db_cache()
-    _periodic_push_local_changes()
-    # Админу — то же меню (он и сам играет) плюс вход в панель. Сама панель
-    # открывается кнопкой или командой /admin.
-    await _send_main_menu(update, with_keyboard=True, menu_only=True)
+    # Синхронизация с таблицей — приятный побочный эффект /start, но если
+    # Google недоступен, меню всё равно должно прийти: иначе бот молчит.
+    try:
+        _refresh_db_cache()
+        _periodic_push_local_changes()
+    except Exception as e:
+        log.warning(f"/start: синхронизация не прошла: {e}")
+    # Админу — то же меню (он и сам играет) плюс вход в панель. Клавиатуру
+    # под чатом не вешаем: всё то же есть кнопками в самом сообщении, а
+    # запасной вход в фэнтези админу не нужен — у него работает живой API.
+    await _drop_reply_keyboard(update.message)
+    await _send_main_menu(update, menu_only=True)
 
 
 def _format_progress(source: str, player_id: str) -> str:
