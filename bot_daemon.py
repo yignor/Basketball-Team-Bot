@@ -382,7 +382,8 @@ async def _maybe_send_fantasy_keyboard(update: Update, user) -> None:
         log.warning(f"Не удалось отправить кнопку фэнтези: {e}")
 
 
-async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
+async def _send_main_menu(update: Update, with_keyboard: bool = False,
+                          menu_only: bool = False) -> None:
     # Для админа кладём в клавиатуру и кнопку фэнтези — чтобы он видел приложение
     # так же, как игроки. Нет активного сезона / фронт не настроен -> payload None
     # -> клавиатура остаётся только с админ-кнопкой.
@@ -397,7 +398,11 @@ async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
         try:
             if with_keyboard:
                 await update.message.reply_text(ADMIN_KEYBOARD_LABEL + " активна ⬇️", reply_markup=_admin_reply_keyboard(fantasy_payload))
-            await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
+            if menu_only:
+                await update.message.reply_text(PLAYER_MENU_TEXT,
+                                                reply_markup=_player_menu_markup(is_admin=True))
+            else:
+                await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
             return
         except Exception as e:
             log.warning(f"Не удалось отправить главное меню (попытка {attempt + 1}/3): {e}")
@@ -405,16 +410,19 @@ async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
     log.error("Не удалось отправить главное меню после 3 попыток")
 
 
-def _player_menu_markup() -> InlineKeyboardMarkup:
-    """Меню игрока. Команд стало много, а помнить их никто не будет — всё,
-    что доступно не-админу, живёт кнопками. Админские вещи (панель, личная
-    статистика) сюда не попадают: они скрыты до отдельного решения."""
+def _player_menu_markup(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Меню бота. Команд стало много, а помнить их никто не будет — всё
+    доступное живёт кнопками. Админу тем же меню добавляется вход в панель:
+    он такой же игрок, и фэнтези ему нужно так же, как остальным. Скрытое
+    (личная статистика) — только внутри админ-панели."""
     rows: List[List[InlineKeyboardButton]] = []
     url = _webapp_url()
     if url:
         rows.append([InlineKeyboardButton("🏀 Фэнтези: состав и таблица",
                                           web_app=WebAppInfo(url=url))])
     rows.append([InlineKeyboardButton("💬 Написать админам", callback_data="menu:feedback")])
+    if is_admin:
+        rows.append([InlineKeyboardButton("📊 Админ-панель", callback_data="admin:menu:main")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -456,7 +464,9 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     _refresh_db_cache()
     _periodic_push_local_changes()
-    await _send_main_menu(update, with_keyboard=True)
+    # Админу — то же меню (он и сам играет) плюс вход в панель. Сама панель
+    # открывается кнопкой или командой /admin.
+    await _send_main_menu(update, with_keyboard=True, menu_only=True)
 
 
 def _format_progress(source: str, player_id: str) -> str:
