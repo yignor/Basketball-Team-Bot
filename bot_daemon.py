@@ -954,8 +954,48 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
         [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
+        [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Русское склонение числительных: 1 игра, 2 игры, 5 игр."""
+    a, b = abs(n) % 100, abs(n) % 10
+    if 10 < a < 20:
+        return many
+    if 1 < b < 5:
+        return few
+    return one if b == 1 else many
+
+
+def _stats_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Что у нас есть из протоколов лиг и чего не хватает.
+
+    Плюс-минус и время на площадке появились позже самого бэкфилла, поэтому у
+    старых игр их нет: они нужны и карточкам игроков, и «объёмной» аналитике."""
+    import stats_backfill
+    summary = stats_backfill.local_summary()
+    lines = ["🗄 Копия протоколов лиг", ""]
+    for src, info in sorted(summary.items()):
+        lines.append(f"• {src}: игр {info.get('games', 0)}, строк {info.get('rows', 0)}"
+                     + (f", {info.get('first', '')[:7]}–{info.get('last', '')[:7]}"
+                        if info.get("first") else ""))
+    with sheets_cache.get_connection() as conn:
+        stale = conn.execute(
+            """SELECT COUNT(*) FROM (SELECT game_id FROM game_player_stats
+               WHERE source = 'slpro' GROUP BY game_id
+               HAVING MAX(secs) = 0 AND MAX(ABS(plus_minus)) = 0)""").fetchone()[0]
+    lines += ["", f"Без плюс-минуса и минут: {stale} "
+                  f"{_plural(stale, 'игра', 'игры', 'игр')} SLPRO."]
+    rows = []
+    if stale:
+        lines.append("Пометить их — и ночной бэкфилл перекачает протоколы "
+                     "порциями по 200 за ночь. Уже скачанное не трогается.")
+        rows.append([InlineKeyboardButton(
+            f"♻️ Пометить к перекачке ({stale})", callback_data="admin:stats:refetch")])
+    rows.append(_back_button())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _config_screen_text() -> str:
@@ -1531,6 +1571,9 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
             elif screen == "fantasy":
                 await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+            elif screen == "stats":
+                text, markup = _stats_screen()
+                await query.edit_message_text(text, reply_markup=markup)
             elif screen == "config":
                 await query.edit_message_text(
                     _config_screen_text(),
@@ -1581,6 +1624,16 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
             await _handle_report_action(query, kind, period)
+
+        elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "refetch":
+            import stats_backfill
+            marked = await asyncio.to_thread(stats_backfill.forget_games_missing_fields, "slpro")
+            await query.edit_message_text(
+                f"♻️ Помечено к перекачке: {marked} "
+                f"{_plural(marked, 'игра', 'игры', 'игр')}.\n\n"
+                "Ночной бэкфилл (01:30 МСК) заберёт их порциями по 200 — "
+                "примерно по игровой неделе за ночь.",
+                reply_markup=InlineKeyboardMarkup([_back_button()]))
 
         elif parts[1] == "sync":
             await query.edit_message_text("⏳ Синхронизация...")
