@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from telegram import (
     BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -403,6 +405,37 @@ async def _send_main_menu(update: Update, with_keyboard: bool = False) -> None:
     log.error("Не удалось отправить главное меню после 3 попыток")
 
 
+def _player_menu_markup() -> InlineKeyboardMarkup:
+    """Меню игрока. Команд стало много, а помнить их никто не будет — всё,
+    что доступно не-админу, живёт кнопками. Админские вещи (панель, личная
+    статистика) сюда не попадают: они скрыты до отдельного решения."""
+    rows: List[List[InlineKeyboardButton]] = []
+    url = _webapp_url()
+    if url:
+        rows.append([InlineKeyboardButton("🏀 Фэнтези: состав и таблица",
+                                          web_app=WebAppInfo(url=url))])
+    rows.append([InlineKeyboardButton("💬 Написать админам", callback_data="menu:feedback")])
+    return InlineKeyboardMarkup(rows)
+
+
+PLAYER_MENU_TEXT = ("🏀 Привет! Вот что я умею:\n\n"
+                    "• Фэнтези — собрать состав, посмотреть таблицу и топ игроков\n"
+                    "• Написать админам — идея, баг, пожелание\n\n"
+                    "Опросы на игры и тренировки я присылаю сам в общий чат.")
+
+
+async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки меню игрока (menu:*). Доступны всем — здесь нет ничего скрытого."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    user = update.effective_user
+    if (query.data or "") == "menu:feedback" and user:
+        _awaiting_feedback.add(user.id)
+        await query.message.reply_text(FEEDBACK_ASK)
+
+
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat = update.effective_chat
@@ -419,6 +452,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _is_admin(user):
         # Игроку команды — постоянная кнопка запасного входа в фэнтези.
         await _maybe_send_fantasy_keyboard(update, user)
+        await update.message.reply_text(PLAYER_MENU_TEXT, reply_markup=_player_menu_markup())
         return
     _refresh_db_cache()
     _periodic_push_local_changes()
@@ -518,6 +552,8 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat = update.effective_chat
     if not msg or not user or not chat or chat.type != "private":
         return
+    if not _is_admin(user):
+        return          # привязка профиля — часть скрытой личной статистики
     import player_identity
     parsed = None
     for word in (msg.text or "").split():
@@ -622,15 +658,23 @@ async def handle_season(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/profile — какие профили привязаны и что по ним видно."""
+    """/profile — какие профили привязаны и что по ним видно.
+
+    Пока функция скрытая: личная статистика открыта только админу, пока не
+    решён вопрос с оплатой и согласием игроков (бэклог п.4)."""
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not chat or chat.type != "private":
+    if not user or not chat or chat.type != "private" or not _is_admin(user):
         return
+    await _send_profile(update.message, user)
+
+
+async def _send_profile(message, user) -> None:
+    """Личный прогресс: и по команде /profile, и по кнопке в админке."""
     import player_identity
     ids = player_identity.get_identities(user.id)
     if not ids:
-        await update.message.reply_text(
+        await message.reply_text(
             "У тебя пока не привязан ни один профиль.\n\n"
             "Пришли мне ссылку на свою страницу в лиге — например:\n"
             "• https://slpro.basketstat.ru/player/XXXX\n"
@@ -648,8 +692,8 @@ async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                                        metrics=personal_report.metrics_of(prefs))
         parts.append(personal_report.format_report(title, data, prefs["compare_mode"]))
         parts.append("")
-    await update.message.reply_text("\n".join(parts).strip(),
-                                    reply_markup=_report_prefs_markup(prefs))
+    await message.reply_text("\n".join(parts).strip(),
+                             reply_markup=_report_prefs_markup(prefs))
 
 
 def _report_prefs_markup(prefs: Dict[str, Any]) -> InlineKeyboardMarkup:
@@ -955,6 +999,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
         [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
         [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
+        [InlineKeyboardButton("📈 Моя статистика (скрытое)", callback_data="admin:menu:profile")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
 
@@ -1571,6 +1616,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
             elif screen == "fantasy":
                 await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
+            elif screen == "profile":
+                await _send_profile(query.message, update.effective_user)
             elif screen == "stats":
                 text, markup = _stats_screen()
                 await query.edit_message_text(text, reply_markup=markup)
@@ -1768,14 +1815,24 @@ async def on_startup(app: Application) -> None:
     _refresh_poll_cache()
     _refresh_db_cache()
     _periodic_push_local_changes()
+    # Список команд у игрока и у админа разный: личная статистика и админка —
+    # скрытые функции, и в меню обычного игрока их быть не должно.
     try:
         await app.bot.set_my_commands([
-            BotCommand("admin", "Админ-панель"),
-            BotCommand("start", "Показать кнопку админ-панели"),
-            BotCommand("profile", "Мой профиль и прогресс"),
-            BotCommand("season", "Создать сезон фэнтези (админ)"),
+            BotCommand("start", "Меню бота"),
             BotCommand("feedback", "Написать админам: идея или проблема"),
-        ])
+        ], scope=BotCommandScopeDefault())
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await app.bot.set_my_commands([
+                    BotCommand("start", "Меню бота"),
+                    BotCommand("admin", "Админ-панель"),
+                    BotCommand("profile", "Мой прогресс (скрытое)"),
+                    BotCommand("season", "Создать сезон фэнтези"),
+                    BotCommand("feedback", "Написать админам: идея или проблема"),
+                ], scope=BotCommandScopeChat(chat_id=int(admin_id)))
+            except Exception as e:
+                log.warning(f"Команды для админа {admin_id}: {e}")
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
 
@@ -1855,6 +1912,7 @@ def main() -> None:
     # но отвечает, только если в сообщении действительно есть ссылка.
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_profile_link))
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     log.info("Запуск polling...")
