@@ -430,6 +430,7 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if lg not in hit.setdefault("leagues", []):
                     hit["leagues"].append(lg)
             hit["team"] = " · ".join(hit.get("leagues") or [])
+            hit["off_roster"] = bool(hit.get("off_roster")) and bool(e.get("off_roster"))
         else:
             result.append(dict(e))
     return result
@@ -459,6 +460,9 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 by_name[key]["leagues"].append(lg)
             if not by_name[key]["number"]:
                 by_name[key]["number"] = p["number"]
+            # «Нет в заявке» — только если человека нет в заявке НИ ОДНОЙ лиги:
+            # выпасть из состава в одной и играть в другой — обычное дело.
+            by_name[key]["off_roster"] &= bool(p.get("off_roster"))
     merged = []
     for key in order:
         e = by_name[key]
