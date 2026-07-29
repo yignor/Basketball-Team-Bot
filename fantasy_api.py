@@ -623,9 +623,25 @@ async def handle_top(request: web.Request) -> web.Response:
 
     # Вторая таблица — топ угадавших: кто из участников набрал больше очков за
     # тот же период. Считается из тех же снимков по играм.
+    # Топ угадавших + чей состав играл: ФИО подставляем из пула (у себя не
+    # храним), а если игрока в пуле уже нет — показываем его номер из ссылки.
     guessers = fantasy.top_participants(season["id"], d_from, d_to) if season else []
+    by_ref = {p["ref"]: p for p in await build_pool(season=season)}
+    for g in guessers:
+        for pick in g.get("picks") or []:
+            pick["players"] = [_ref_title(r, by_ref) for r in pick.pop("refs", [])]
     return web.json_response({"period": period, "title": title,
                               "top": rows[:30], "guessers": guessers})
+
+
+def _ref_title(ref: str, by_ref: Dict[str, Any]) -> str:
+    """Имя игрока по ссылке. Ссылка может быть старой формы (до склейки лиг) —
+    ищем карточку, которая её содержит."""
+    entry = by_ref.get(ref) or by_ref.get(fantasy.canonical_ref(ref, by_ref) or "")
+    if entry:
+        return entry["name"]
+    src, pid = fantasy_stats.parse_ref(ref.split("+")[0])
+    return f"{src}:{pid}"
 
 
 async def available_scopes() -> List[Dict[str, Any]]:

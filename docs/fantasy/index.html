@@ -39,6 +39,13 @@
     .adm-players > summary { cursor: pointer; font-size: 13px; padding: 6px 0; color: var(--hint); }
     .adm-players .card { padding: 6px 8px; }
     .plinks a { color: var(--button); text-decoration: none; }
+    /* Строка участника раскрывается в состав, которым он играл. Маркер прячем:
+       с ним summary ломает flex-раскладку строки. */
+    .guess > summary { list-style: none; cursor: pointer; }
+    .guess > summary::-webkit-details-marker { display: none; }
+    .guess-body { margin: -2px 12px 8px; padding: 8px 12px; border-radius: 10px;
+      background: var(--secondary-bg); }
+    .guess-body .pstat + .pstat { margin-top: 8px; }
     #newSeason { flex-wrap: wrap; }
     #seasonName { flex: 1; min-width: 160px; background: var(--secondary-bg); color: var(--text);
       border: none; border-radius: 10px; padding: 9px 12px; font-size: 15px;
@@ -170,10 +177,12 @@
       <button class="chip" data-period="all" onclick="showTop('all')">Всё время</button>
     </div>
     <div class="bar"><div class="counter" id="topLabel"></div></div>
-    <div class="sect">🏀 Игроки — кто принёс больше очков</div>
+    <div class="tabs">
+      <button class="tab active" id="ttab-players" onclick="showTopTab('players')">🏀 Игроки</button>
+      <button class="tab" id="ttab-guess" onclick="showTopTab('guess')">🎯 Участники</button>
+    </div>
     <div class="list" id="topList"></div>
-    <div class="sect">🎯 Участники — кто лучше угадал</div>
-    <div class="list" id="guessList"></div>
+    <div class="list hidden" id="guessList"></div>
   </div>
   <div id="player" class="hidden">
     <div class="phead">
@@ -820,6 +829,26 @@
 
   function medal(i) { return ['🥇','🥈','🥉'][i] || (i + 1) + '.'; }
 
+  // Две таблицы на одном экране не читались: чтобы добраться до участников,
+  // приходилось листать через весь список игроков.
+  let topTab = 'players';
+
+  function showTopTab(which) {
+    topTab = which;
+    haptic('light');
+    $('ttab-players').classList.toggle('active', which === 'players');
+    $('ttab-guess').classList.toggle('active', which === 'guess');
+    $('topList').classList.toggle('hidden', which !== 'players');
+    $('guessList').classList.toggle('hidden', which !== 'guess');
+  }
+  window.showTopTab = showTopTab;
+
+  function pickLine(pick) {
+    const when = (pick.date || '').slice(8, 10) + '.' + (pick.date || '').slice(5, 7);
+    const who = (pick.players || []).map(esc).join(', ') || '—';
+    return `<div class="pstat">Игра ${when} · ${pick.points} FP<br>${who}</div>`;
+  }
+
   function renderTop(d) {
     $('topLabel').textContent = d.title ? 'Фэнтези-очки ' + d.title : '';
 
@@ -847,13 +876,19 @@
       return;
     }
     d.guessers.forEach((g, i) => {
-      const div = document.createElement('div');
-      div.className = 'rank';
-      div.innerHTML = `<div class="place">${medal(i)}</div>` +
-        `<div class="info"><div class="pname">${esc(g.name || 'Участник')}</div>` +
+      const picks = g.picks || [];
+      const det = document.createElement('details');
+      det.className = 'guess';
+      det.innerHTML =
+        `<summary class="rank"><div class="place">${medal(i)}</div>` +
+        `<div class="info"><div class="pname">${esc(g.name || 'Участник')}` +
+        (picks.length ? '<span class="chev">▾</span>' : '') + `</div>` +
         (g.games ? `<div class="pstat">${games(g.games)} в зачёте</div>` : '') + `</div>` +
-        `<div class="pts">${g.points}</div>`;
-      gl.appendChild(div);
+        `<div class="pts">${g.points}</div></summary>` +
+        (picks.length
+          ? `<div class="guess-body">${picks.map(pickLine).join('')}</div>`
+          : '<div class="guess-body"><div class="pstat">Состав не сохранился.</div></div>');
+      gl.appendChild(det);
     });
   }
 

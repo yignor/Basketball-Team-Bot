@@ -834,12 +834,51 @@ def top_participants(season_id: int, d_from: Optional[str] = None,
     params.append(limit)
     with sheets_cache.get_connection() as conn:
         rows = [dict(r) for r in conn.execute(query, params).fetchall()]
+        picks = _picks_by_user(conn, season_id, d_from, d_to,
+                               [r["user_id"] for r in rows])
     names = display_names([r["user_id"] for r in rows])
     for r in rows:
         r["user_id"] = str(r["user_id"])
         r["name"] = names.get(r["user_id"], "Участник")
         r["points"] = r["points"] or 0.0
+        r["picks"] = picks.get(r["user_id"], [])
     return rows
+
+
+PICKS_PER_USER = 3
+
+
+def _picks_by_user(conn, season_id: int, d_from: Optional[str], d_to: Optional[str],
+                   user_ids: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
+    """Кого участник ставил в последних играх периода: [{date, points, refs}].
+
+    Берём из снимков — там записан состав, которым игра реально считалась, а не
+    тот, что стоит сейчас. За неделю и месяц состав меняется, поэтому отдаём
+    несколько последних игр, а не «текущий» состав."""
+    if not user_ids:
+        return {}
+    query = ("""SELECT user_id, game_date, points, refs_json FROM fantasy_game_scores
+                WHERE season_id = ?""")
+    params: List[Any] = [season_id]
+    if d_from:
+        query += " AND game_date >= ?"; params.append(d_from)
+    if d_to:
+        query += " AND game_date <= ?"; params.append(d_to)
+    query += " ORDER BY game_date DESC, rowid DESC"
+    wanted = {str(u) for u in user_ids}
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for r in conn.execute(query, params):
+        uid = str(r["user_id"])
+        if uid not in wanted or len(out.get(uid, [])) >= PICKS_PER_USER:
+            continue
+        try:
+            refs = json.loads(r["refs_json"]) or []
+        except (json.JSONDecodeError, TypeError):
+            refs = []
+        out.setdefault(uid, []).append({"date": r["game_date"],
+                                        "points": round(float(r["points"] or 0), 2),
+                                        "refs": refs})
+    return out
 
 
 def _game_label(game_date: str) -> str:
