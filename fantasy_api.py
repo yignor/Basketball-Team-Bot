@@ -608,12 +608,12 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         lasts = [last[k] for k in keys if last.get(k)]
         last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
         pr = _lookup_price(p["name"], prices)
-        # Уровень ведём от цены: тренер меняет цену руками, а «Уровень» в
-        # таблице может отстать — значок обязан соответствовать ценнику.
-        if pr.get("price") and not pr.get("tier"):
-            pr = {**pr, "tier": fantasy_modes.tier_for(pr["price"])}
+        # Уровень ВСЕГДА считаем от цены, а не читаем из таблицы: цена —
+        # единственный источник правды, её правит тренер, и значок обязан
+        # идти за ней сам. Столбец «Уровень» в листе — формула для глаз.
+        tier = fantasy_modes.tier_for(pr.get("price"))
         enriched.append({**p, "stats": combined, "last": last_one,
-                         "price": pr.get("price", 0), "tier": pr.get("tier", ""),
+                         "price": pr.get("price", 0), "tier": tier,
                          "excluded": fantasy.norm_player_name(p["name"]) in excluded})
     return enriched
 
