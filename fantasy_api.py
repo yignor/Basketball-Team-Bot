@@ -552,6 +552,10 @@ def _profile_links(ref: str) -> List[Dict[str, str]]:
     return out
 
 
+def _price_key(name: str) -> str:
+    return " ".join((name or "").lower().replace("ё", "е").split())
+
+
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Дополняет пул суммарной статистикой игрока за всё время (для сортировки
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
@@ -561,6 +565,8 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     agg = fantasy_stats.player_aggregates(weights, scope=scopes)
     last = fantasy_stats.player_last_fp(weights, scope=scopes)
     excluded = set(fantasy.pool_excluded_names(season or {}))
+    # Стоимость и уровень («карточка») ведёт тренер в листе «Игроки».
+    prices = sheets_cache.get_player_prices()
     enriched = []
     for p in pool:
         keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
@@ -568,7 +574,9 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         combined = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], weights)
         lasts = [last[k] for k in keys if last.get(k)]
         last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
+        pr = prices.get(_price_key(p["name"]), {})
         enriched.append({**p, "stats": combined, "last": last_one,
+                         "price": pr.get("price", 0), "tier": pr.get("tier", ""),
                          "excluded": fantasy.norm_player_name(p["name"]) in excluded})
     return enriched
 
@@ -832,7 +840,8 @@ def _compress_pool(enriched: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
               "a": st.get("ast", 0), "s": st.get("stl", 0), "b": st.get("blk", 0),
               "t": st.get("tur", 0), "f": st.get("fp", 0),
               "lf": lg.get("fp"), "ld": lg.get("date")} if st else {})
-        out.append({"r": p["ref"], "m": p["name"], "s": s})
+        out.append({"r": p["ref"], "m": p["name"], "s": s,
+                    "c": p.get("price", 0), "t": p.get("tier", "")})
     return out
 
 

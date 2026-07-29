@@ -39,6 +39,11 @@
     .adm-players > summary { cursor: pointer; font-size: 13px; padding: 6px 0; color: var(--hint); }
     .adm-players .card { padding: 6px 8px; }
     .plinks a { color: var(--button); text-decoration: none; }
+    /* Значок карточки игрока рядом с именем + цена в строке статистики. */
+    .tier { margin-right: 4px; }
+    .price { color: var(--text); }
+    .tier-plat  { filter: drop-shadow(0 0 2px #7fd3ff); }
+    .tier-gold  { filter: drop-shadow(0 0 2px #ffd76a); }
     /* Строка участника раскрывается в состав, которым он играл. Маркер прячем:
        с ним summary ломает flex-раскладку строки. */
     .guess > summary { list-style: none; cursor: pointer; }
@@ -323,6 +328,7 @@
     pool = (D.pool || []).map(p => {
       const s = p.s || {};
       return { ref: p.r, name: p.m || p.r, number: '', team: '',
+        price: p.c || 0, tier: p.t || '',
         st: {games:s.g||0, pts:s.p||0, reb:s.rb||0, ast:s.a||0,
              stl:s.s||0, blk:s.b||0, tur:s.t||0, fp:s.f||0,
              fp_avg: s.g ? Math.round((s.f||0)/s.g*10)/10 : 0},
@@ -351,6 +357,7 @@
     standings = s.standings || [];
     pool = (p.pool || []).map(x => ({
       ref: x.ref, name: x.name || x.ref, number: x.number || '', team: x.team || '',
+      price: x.price || 0, tier: x.tier || '',
       st: Object.assign({}, ZERO, x.stats || {}),
       last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
       excluded: !!x.excluded,
@@ -378,6 +385,21 @@
       ? `${p.st.games} игр · ${p.st.fp} FP`
       : `Посл. игра: ${lf} FP`;
     return live ? `${head} · нажми для деталей ›` : head;
+  }
+
+  // Карточка игрока: платина/золото/серебро/бронза — по стоимости из таблицы.
+  // Цену ведёт тренер, поэтому значок обязан браться из данных, а не считаться
+  // на фронте: иначе после ручной правки он разойдётся с ценой.
+  const TIER_ICON = {'Платина': '💎', 'Золото': '🥇', 'Серебро': '🥈', 'Бронза': '🥉'};
+  const TIER_KEY = {'Платина': 'plat', 'Золото': 'gold', 'Серебро': 'silver', 'Бронза': 'bronze'};
+
+  function tierBadge(p) {
+    const icon = TIER_ICON[p.tier];
+    return icon ? `<span class="tier tier-${TIER_KEY[p.tier] || ''}" title="${esc(p.tier)}">${icon}</span>` : '';
+  }
+
+  function priceLabel(p) {
+    return p.price ? `<b class="price">${p.price}</b> · ` : '';
   }
 
   function passesFilter(p) {
@@ -408,9 +430,9 @@
         `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>`;
       c.innerHTML =
         `<div class="num">${esc(p.number || '—')}</div>` +
-        `<div class="info"><div class="pname">${esc(p.name)}` +
+        `<div class="info"><div class="pname">${tierBadge(p)}${esc(p.name)}` +
         (live ? '<span class="chev">›</span>' : '') + `</div>` +
-        `<div class="pstat">${esc(statLine(p))}</div></div>` +
+        `<div class="pstat">${priceLabel(p)}${esc(statLine(p))}</div></div>` +
         `<div class="ctrl">${ctrl}</div>`;
       const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
       const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };

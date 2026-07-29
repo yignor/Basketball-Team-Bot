@@ -32,6 +32,10 @@ PLAYERS_SHEET_NAME = "Игроки"
 # переуступается — доступ держим на числовом id, а этот столбец ещё и наглядно
 # показывает, кто уже подключился.
 PLAYERS_TG_ID_HEADER = "Числовой TG ID"
+# Столбцы фэнтези в листе «Игроки»: стоимость игрока и его уровень (карточка).
+# Ведёт тренер — бот только читает, как и всё остальное на этом листе.
+PLAYERS_PRICE_HEADER = "Стоимость"
+PLAYERS_TIER_HEADER = "Уровень"
 ATTEND_SHEET_NAME = "Посещаемость"
 SERVICE_SHEET_NAME = "Сервисный"
 BOT_USERS_SHEET_NAME = "Пользователи бота"
@@ -61,6 +65,8 @@ CREATE TABLE IF NOT EXISTS players (
     team          TEXT NOT NULL DEFAULT '',
     added_date    TEXT NOT NULL DEFAULT '',
     notes         TEXT NOT NULL DEFAULT '',
+    price         INTEGER NOT NULL DEFAULT 0,   -- «Стоимость» из листа (фэнтези)
+    tier          TEXT NOT NULL DEFAULT '',     -- «Уровень»: Платина/Золото/…
     synced_at     TEXT NOT NULL
 );
 
@@ -483,6 +489,8 @@ def init_db() -> None:
         # «no column named metrics».
         _ensure_column(conn, "player_report_prefs", "metrics", "TEXT NOT NULL", "''")
         # «ID топика» и «Комментарий» секции голосований — колонки I и J листа.
+        _ensure_column(conn, "players", "price", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "players", "tier", "TEXT NOT NULL", "''")
         _ensure_column(conn, "config_rows", "col_i", "TEXT NOT NULL", "''")
         _ensure_column(conn, "config_rows", "col_j", "TEXT NOT NULL", "''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_gps_scope "
@@ -544,6 +552,8 @@ def sync_players(spreadsheet) -> None:
                     str(r.get("Команда", "")),
                     str(r.get("Дата добавления", "")),
                     str(r.get("Примечания", "")),
+                    _to_int(r.get(PLAYERS_PRICE_HEADER)),
+                    str(r.get(PLAYERS_TIER_HEADER, "")).strip(),
                     now,
                 ))
             conn.execute("BEGIN")
@@ -551,8 +561,8 @@ def sync_players(spreadsheet) -> None:
             conn.executemany(
                 """
                 INSERT INTO players
-                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -721,6 +731,31 @@ def sync_config(spreadsheet) -> None:
             conn.rollback()
             _mark_sync_result(conn, "config_rows", 0, str(e))
             raise
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(float(str(value).replace(",", ".").strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_player_prices() -> Dict[str, Dict[str, Any]]:
+    """{нормализованное ФИО: {price, tier}} из листа «Игроки».
+
+    Цену ведёт тренер в таблице: считать её в боте каждый раз нельзя — он бы
+    переписывал ручные правки, а именно ради них столбец и заведён."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT surname, name, price, tier FROM players WHERE price > 0 OR tier != ''"
+        ).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        key = " ".join(f"{r['surname']} {r['name']}".lower().replace("ё", "е").split())
+        if key.strip():
+            out[key] = {"price": int(r["price"] or 0), "tier": r["tier"] or ""}
+    return out
 
 
 def get_config_rows() -> List[List[str]]:
