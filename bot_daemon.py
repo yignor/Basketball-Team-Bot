@@ -1581,9 +1581,17 @@ async def _warm_fantasy_pool() -> None:
     if now - _pool_warm_at < _POOL_WARM_INTERVAL:
         return
     _pool_warm_at = now
+    import fantasy
     try:
         pool = await fantasy_api.build_pool(force=True)
         log.info(f"Пул фэнтези прогрет: {len(pool)} игроков")
+        # Ссылка игрока меняется, когда бот склеил его из двух лиг. Прогрев —
+        # единственное место, где точно известен свежий пул, поэтому здесь же
+        # приводим сохранённые составы к новому виду: иначе у человека внезапно
+        # «состав не из пула», хотя он ничего не трогал.
+        moved = fantasy.migrate_refs({p["ref"] for p in pool})
+        if moved:
+            log.info(f"Составы фэнтези переведены на новые ссылки: {moved}")
     except Exception as e:
         log.warning(f"Не удалось прогреть пул фэнтези: {e}")
 

@@ -101,6 +101,37 @@ def result_hint() -> str:
     return RESULT_HINT
 
 
+def migrate_refs(pool_refs: Any) -> int:
+    """Переписывает сохранённые составы на текущий вид ссылок пула.
+
+    Нужно, когда бот склеил человека из двух лиг: карточка получает составную
+    ссылку, а в чужих составах остаётся старая — и приложение показывает состав
+    пустым. Меняет только форму ссылки, набор людей прежний. Снимки очков
+    (fantasy_game_scores) НЕ трогаем: они историческая правда."""
+    sheets_cache.init_db()
+    changed = 0
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            "SELECT user_id, season_id, week_start, player_refs_json FROM fantasy_rosters"
+        ).fetchall()
+        for r in rows:
+            try:
+                refs = json.loads(r["player_refs_json"]) or []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            new = [canonical_ref(x, pool_refs) or x for x in refs]
+            if new == refs:
+                continue
+            conn.execute(
+                """UPDATE fantasy_rosters SET player_refs_json = ?, updated_at = ?
+                   WHERE user_id = ? AND season_id = ? AND week_start = ?""",
+                (json.dumps(new, ensure_ascii=False), sheets_cache.now_iso(),
+                 r["user_id"], r["season_id"], r["week_start"]))
+            changed += 1
+        conn.commit()
+    return changed
+
+
 def get_roster_effective(user_id: str, season_id: int, week_start: str) -> Optional[Dict[str, Any]]:
     """Состав, который сейчас в игре у участника: за текущую неделю, а если её
     ещё не собирали — унаследованный с прошлой. Состав держится, пока игрок его
@@ -405,6 +436,20 @@ def scopes_title(scopes: List[Dict[str, Any]]) -> str:
 
 # ─────────────────────────── Составы ─────────────────────────────────────────
 
+def canonical_ref(ref: str, pool_refs: Any) -> Optional[str]:
+    """Ссылка игрока в текущем виде пула — или None, если такого игрока нет.
+
+    Ссылка составная («slpro:707:1+ib:36502:9»): она меняется, когда бот
+    научился склеивать человека из двух лиг. Сохранённый ранее состав ссылается
+    на прежний вид, и сравнивать строки в лоб нельзя — иначе у игрока внезапно
+    «состав не из пула». Ищем карточку пула, которая содержит все части ссылки."""
+    parts = set(str(ref).split("+"))
+    for cand in pool_refs or ():
+        if parts <= set(str(cand).split("+")):
+            return cand
+    return None
+
+
 def validate_roster(season: Dict[str, Any], refs: Any,
                     pool_refs: Optional[Any] = None) -> Optional[str]:
     """Проверяет состав по правилам сезона. Возвращает код ошибки или None.
@@ -412,7 +457,7 @@ def validate_roster(season: Dict[str, Any], refs: Any,
     size = roster_size(season)
     if not isinstance(refs, list) or len(refs) != size:
         return "invalid_roster"
-    if pool_refs is not None and any(r not in pool_refs for r in refs):
+    if pool_refs is not None and any(canonical_ref(r, pool_refs) is None for r in refs):
         return "unknown_player"
     limit = max_per_player(season)
     if limit < size:

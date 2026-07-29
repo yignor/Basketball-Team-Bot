@@ -952,7 +952,11 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     # Убранных админом игроков брать нельзя.
     excluded_names = set(fantasy.pool_excluded_names(season))
     by_ref = {p["ref"]: p for p in all_pool}
-    if any(fantasy.norm_player_name(by_ref.get(r, {}).get("name", "")) in excluded_names for r in refs):
+    # Состав мог прийти со старой формой ссылки (кешированное приложение) —
+    # сверяем по канонической.
+    if any(fantasy.norm_player_name(
+            by_ref.get(fantasy.canonical_ref(r, by_ref) or r, {}).get("name", "")) in excluded_names
+           for r in refs):
         return web.json_response({"error": "excluded_player"}, status=400)
 
     res = fantasy.save_roster(uid, season["id"], week_start, refs)
