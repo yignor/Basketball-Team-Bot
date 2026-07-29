@@ -566,6 +566,29 @@ def _price_key(name: str) -> str:
     return " ".join((name or "").lower().replace("ё", "е").split())
 
 
+def _lookup_price(name: str, prices: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Цена игрока из листа «Игроки» с поправкой на написание.
+
+    Лиги пишут одного человека по-разному («Лисюк» в SLPRO, «Лысюк» в
+    Инфобаскете), карточка в пуле получает одно из написаний, а в таблице
+    стоит другое — по точному совпадению цена бы потерялась."""
+    key = _price_key(name)
+    hit = prices.get(key)
+    if hit:
+        return hit
+    parts = key.split()
+    if len(parts) < 2:
+        return {}
+    sur, first = parts[0], parts[1]
+    for other, val in prices.items():
+        o = other.split()
+        if len(o) < 2:
+            continue
+        if (o[0] == sur and _lev1(first, o[1])) or (o[1] == first and _lev1(sur, o[0])):
+            return val
+    return {}
+
+
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Дополняет пул суммарной статистикой игрока за всё время (для сортировки
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
@@ -584,7 +607,11 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         combined = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], weights)
         lasts = [last[k] for k in keys if last.get(k)]
         last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
-        pr = prices.get(_price_key(p["name"]), {})
+        pr = _lookup_price(p["name"], prices)
+        # Уровень ведём от цены: тренер меняет цену руками, а «Уровень» в
+        # таблице может отстать — значок обязан соответствовать ценнику.
+        if pr.get("price") and not pr.get("tier"):
+            pr = {**pr, "tier": fantasy_modes.tier_for(pr["price"])}
         enriched.append({**p, "stats": combined, "last": last_one,
                          "price": pr.get("price", 0), "tier": pr.get("tier", ""),
                          "excluded": fantasy.norm_player_name(p["name"]) in excluded})

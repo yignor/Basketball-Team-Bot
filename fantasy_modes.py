@@ -39,6 +39,24 @@ CATEGORY_TITLES = {
     "stl": "Перехваты", "blk": "Блок-шоты", "tur": "Потери",
 }
 
+# Карточка игрока по его цене. Тренер вправе поставить любую цену руками —
+# уровень обязан следовать за ней, иначе значок разойдётся с ценником.
+TIERS = ((50, "Платина"), (30, "Золото"), (15, "Серебро"), (0, "Бронза"))
+
+
+def tier_for(price: Any) -> str:
+    try:
+        value = int(price)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    for edge, title in TIERS:
+        if value >= edge:
+            return title
+    return "Бронза"
+
+
 DEFAULT_BUDGET = 100
 DEFAULT_MULTIPLIER = 1.5
 
