@@ -980,10 +980,14 @@
     haptic('light');
     seasonId = id;
     counts = {};            // состав у каждой лиги свой
+    // Топ и правила тоже про конкретную лигу: старое содержимое оставлять
+    // нельзя, иначе после переключения человек видит цифры чужого сезона.
+    $('topList').innerHTML = '';
+    $('guessList').innerHTML = '';
     msg('Загрузка…');
     try { if (!await fromApi()) return; } catch (e) { msg('Не удалось переключить лигу.'); return; }
     msg('');
-    renderPool(); renderStandings(); syncButton();
+    renderPool(); renderStandings(); renderRules(); syncButton();
   }
 
   // ─── старт ─────────────────────────────────────────────────────────────────
