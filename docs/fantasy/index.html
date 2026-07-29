@@ -139,6 +139,7 @@
     <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
     <button class="tab" id="tab-top" onclick="showTab('top')">🔥 Топ</button>
+    <button class="tab" id="tab-rules" onclick="showTab('rules')">📖</button>
     <button class="tab hidden" id="tab-admin" onclick="showTab('admin')">⚙️</button>
   </div>
   <div id="draft">
@@ -184,6 +185,9 @@
     <div class="list" id="topList"></div>
     <div class="list hidden" id="guessList"></div>
   </div>
+  <div id="rules" class="hidden">
+    <div class="list" id="rulesBody"></div>
+  </div>
   <div id="player" class="hidden">
     <div class="phead">
       <button class="back" onclick="closePlayer()">‹ Назад</button>
@@ -228,6 +232,7 @@
   let API = API_LIST[0] || '';
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false, inherited = false;
+  let seasonInfo = null;          // сезон целиком — правила берут веса отсюда
   let pool = [], counts = {}, standings = [], weekStart = '';
   let search = '', playedOnly = false, isAdmin = false;
   let seasonId = null, seasons = [];
@@ -309,6 +314,7 @@
   // Приводим оба формата к одному виду. В запасном режиме ключи сокращены,
   // чтобы URL Mini App не разрастался.
   function fromHash(D) {
+    seasonInfo = D.season;
     rosterSize = D.season.roster_size || 3;
     maxPer = D.season.max_per_player || rosterSize;
     locked = !!D.locked;
@@ -336,6 +342,7 @@
     seasons = p.seasons || [];
     if (!seasonId) seasonId = p.season.id;   // первый ответ фиксирует лигу
     renderLeaguePicker();
+    seasonInfo = p.season;
     rosterSize = p.season.roster_size || 3;
     maxPer = p.season.max_per_player || rosterSize;
     isAdmin = !!p.admin;
@@ -607,15 +614,68 @@
   }
 
   function showTab(name) {
-    for (const t of ['draft', 'table', 'top', 'admin']) {
+    for (const t of ['draft', 'table', 'top', 'rules', 'admin']) {
       $(t).classList.toggle('hidden', name !== t);
       $('tab-' + t).classList.toggle('active', name === t);
     }
     syncButton();
     if (name === 'top' && !$('topList').children.length) showTop(topPeriod);
     if (name === 'admin') loadAdmin();
+    if (name === 'rules') renderRules();
   }
   window.showTab = showTab;
+
+  // ─── правила ───────────────────────────────────────────────────────────────
+  //
+  // Собираются из настроек сезона, а не пишутся текстом: веса очков и размер
+  // состава админ меняет на ходу, и правила обязаны меняться вместе с ними —
+  // иначе экран начнёт врать в первый же день после правки.
+
+  const WEIGHT_TITLES = {
+    pts: 'Очко', reb: 'Подбор', ast: 'Передача', stl: 'Перехват',
+    blk: 'Блок-шот', tur: 'Потеря', pf: 'Фол', kpi: 'КПИ',
+    plus_minus: 'Плюс-минус', mins: 'Минута на площадке',
+  };
+
+  function ruleCard(title, body) {
+    return `<div class="rank" style="display:block">` +
+      `<div class="pname">${title}</div><div class="pstat">${body}</div></div>`;
+  }
+
+  function renderRules() {
+    const el = $('rulesBody');
+    const s = seasonInfo || {};
+    const size = s.roster_size || rosterSize;
+    const per = s.max_per_player || maxPer;
+    const w = s.weights || {};
+    const rows = Object.keys(w).map(k =>
+      `<div class="row"><span>${esc(WEIGHT_TITLES[k] || k)}</span>` +
+      `<b>${w[k] > 0 ? '+' : ''}${w[k]}</b></div>`).join('');
+
+    el.innerHTML =
+      ruleCard('🏀 Как играть',
+        `Собери состав из ${size} игроков команды. Одного человека можно взять ` +
+        (per >= size ? 'сколько угодно раз — тогда его очки умножаются.'
+                     : `до ${per} раз(а) — тогда его очки умножаются.`) +
+        ' Состав сохраняется кнопкой внизу экрана.') +
+      ruleCard('⏱ Когда меняется',
+        'Состав замораживается со стартовым свистком и оттаивает, когда бот ' +
+        'пришлёт результат игры в чат. Между играми меняй сколько хочешь.') +
+      ruleCard('↩️ Если не поменял',
+        'Состав остаётся прежним и играет следующий матч. Забыл — всё равно ' +
+        'получишь очки, менять каждую неделю не обязательно.') +
+      ruleCard('🧮 Очки',
+        'За каждую игру очки считаются по статистике твоих игроков и ' +
+        'фиксируются навсегда. Задним числом они не пересчитываются: ' +
+        'поменял состав после игры — прошлые очки остаются как были.') +
+      `<div class="sect">Сколько дают действия</div>` + rows +
+      ruleCard('📊 Где смотреть',
+        'Вкладка «Таблица» — общий зачёт участников. «🔥 Топ» — кто из игроков ' +
+        'принёс больше очков и кто из участников лучше угадал, с их составами.') +
+      ruleCard('❓ Вопросы',
+        'Кнопка «💬 Написать админам» под чатом — предложения и баги туда же.');
+  }
+  window.renderRules = renderRules;
 
   // ─── админка ───────────────────────────────────────────────────────────────
   //

@@ -853,7 +853,8 @@ async def webapp_shared() -> Optional[Dict[str, Any]]:
         "season_id": season["id"],
         "season": {"name": season["name"], "format": season["format"],
                    "roster_size": fantasy.roster_size(season),
-                   "max_per_player": fantasy.max_per_player(season)},
+                   "max_per_player": fantasy.max_per_player(season),
+                   "weights": fantasy.season_weights(season)},
         "pool": pool,
         "week_start": week_start,
         "sched_locked": sched_locked,
@@ -943,7 +944,10 @@ async def handle_pool(request: web.Request) -> web.Response:
     return web.json_response({
         "season": season and {"id": season["id"], "name": season["name"], "format": season["format"],
                               "roster_size": fantasy.roster_size(season),
-                              "max_per_player": fantasy.max_per_player(season)},
+                              "max_per_player": fantasy.max_per_player(season),
+                              # Веса — чтобы экран правил показывал настоящие
+                              # начисления сезона, а не переписанный текст.
+                              "weights": fantasy.season_weights(season)},
         "seasons": seasons,
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
