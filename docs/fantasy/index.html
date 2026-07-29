@@ -778,6 +778,27 @@
     plus_minus: 'Плюс-минус', mins: 'Минута на площадке',
   };
 
+  function rankRules(r) {
+    if (!r || !r.ranks) return '';
+    const rows = r.ranks.map(x =>
+      `<div class="row"><span>${TIER_ICON[x.rank] || ''} ${esc(x.rank)} · ${x.low}–${x.high}</span>` +
+      `<b>${x.up ? '↑ ' + x.up : '—'} / ${x.down ? '↓ ' + x.down : '—'}</b></div>`).join('');
+    return ruleCard('📈 Как меняется цена',
+      'Цена не стоит на месте: после каждой игры бот смотрит твою форму — ' +
+      `сколько фэнтези-очков за игру ты набираешь в среднем.<br><br>` +
+      `<b>Подняться в ранг выше:</b> держать «потолок» своего ранга ` +
+      `${r.up_games} игр подряд.<br>` +
+      `<b>Упасть на ранг ниже:</b> провалиться под «пол» своего ранга ` +
+      `${r.down_games} игр подряд.<br>` +
+      'Пороги разные: чтобы войти в серебро, нужно 9 очков за игру, а чтобы ' +
+      'выпасть из него — провалиться ниже 7. Так игрок на границе не прыгает ' +
+      'туда-обратно после каждого матча.<br><br>' +
+      `Пока ранг тот же, цена ползёт к уровню формы, но не больше чем на ` +
+      `${r.step} за игру и не выходя за полосу ранга. Игр меньше ` +
+      `${r.up_games} — цена стоит: двигать не на чем.`) +
+      `<div class="sect">Пороги: ↑ подъём / ↓ падение (очков за игру)</div>` + rows;
+  }
+
   function ruleCard(title, body) {
     return `<div class="rank" style="display:block">` +
       `<div class="pname">${title}</div><div class="pstat">${body}</div></div>`;
@@ -839,6 +860,7 @@
         'За каждую игру очки считаются по статистике твоих игроков и ' +
         'фиксируются навсегда. Задним числом они не пересчитываются: ' +
         'поменял состав после игры — прошлые очки остаются как были.') +
+      rankRules(s.ranks) +
       ruleCard('💎 Карточки и цена',
         'У каждого игрока есть цена — она собрана из его статистики: очки за ' +
         'игру, где текущий сезон весит больше прошлого. Цвет карточки зависит ' +
@@ -992,6 +1014,18 @@
               `<button class="chip${md.cat_multiplier === v ? ' on' : ''}" ` +
               `onclick='adminDo({action:"multiplier",season_id:${s.id},value:${v}})'>` +
               `коэффициент ×${v}</button>`).join(' ') + `</div>` : '') +
+        `<div class="pstat">Движение цен: подъём / падение / шаг</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          [3, 5].map(v => `<button class="chip${(s.prices || {}).up_games === v ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"rank_up_games",season_id:${s.id},value:${v}})'>` +
+            `↑ ${v} игр</button>`).join(' ') + ' ' +
+          [3, 5].map(v => `<button class="chip${(s.prices || {}).down_games === v ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"rank_down_games",season_id:${s.id},value:${v}})'>` +
+            `↓ ${v} игр</button>`).join(' ') + ' ' +
+          [1, 3, 5].map(v => `<button class="chip${(s.prices || {}).step === v ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"price_step",season_id:${s.id},value:${v}})'>` +
+            `шаг ${v}</button>`).join(' ') +
+        `</div>` +
         `<div class="pstat">Чьи игроки в пуле${s.manual_pool ? '' : ' (по умолчанию — наши)'}:</div>` +
         `<div class="bar" style="padding-left:0">${teams || '<span class="pstat">команд не найдено</span>'}</div>` +
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +

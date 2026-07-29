@@ -30,6 +30,7 @@ from aiohttp import web
 import sheets_cache
 import fantasy
 import fantasy_modes
+import fantasy_prices
 import fantasy_stats
 
 log = logging.getLogger(__name__)
@@ -756,6 +757,7 @@ async def handle_admin_state(request: web.Request) -> web.Response:
             "pool_teams": teams,
             "manual_pool": bool(teams),
             "modes": fantasy_modes.settings(s),
+            "prices": fantasy_prices.describe(s),
             "all_modes": [{"id": m, "title": fantasy_modes.MODE_TITLES[m]}
                           for m in fantasy_modes.ALL_MODES],
             # Команды-кандидаты с отметкой «в пуле» — чтобы команду можно было
@@ -833,6 +835,11 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         fantasy.set_pool_teams(
             [t for t in await _current_pool_teams(season) if str(t.get("team_id")) != tid], sid)
         _pool_cache.pop(str(sid), None)
+    elif action in ("rank_up_games", "rank_down_games", "price_step"):
+        try:
+            fantasy._update_settings(fantasy._get_season(sid), **{action: int(body.get("value"))})
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad_value"}, status=400)
     elif action == "mode_toggle":
         # Режимы включаются набором: можно оставить один, можно дать выбор.
         # Пустой набор запрещаем — иначе фэнтези становится нечем играть.
@@ -928,7 +935,8 @@ async def webapp_shared() -> Optional[Dict[str, Any]]:
                    "roster_size": fantasy.roster_size(season),
                    "max_per_player": fantasy.max_per_player(season),
                    "weights": fantasy.season_weights(season),
-                   "modes": fantasy_modes.describe(season)},
+                   "modes": fantasy_modes.describe(season),
+                   "ranks": fantasy_prices.describe(season)},
         "pool": pool,
         "week_start": week_start,
         "sched_locked": sched_locked,
@@ -1022,7 +1030,8 @@ async def handle_pool(request: web.Request) -> web.Response:
                               # Веса — чтобы экран правил показывал настоящие
                               # начисления сезона, а не переписанный текст.
                               "weights": fantasy.season_weights(season),
-                              "modes": fantasy_modes.describe(season)},
+                              "modes": fantasy_modes.describe(season),
+                              "ranks": fantasy_prices.describe(season)},
         "seasons": seasons,
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
