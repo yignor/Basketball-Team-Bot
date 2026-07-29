@@ -231,6 +231,35 @@ async def _ib_team_name(team_id: Any, comp_id: Any) -> str:
     return _ib_names[key]
 
 
+_person_names: Dict[str, str] = {}
+
+
+async def _person_name(source: str, player_id: Any) -> str:
+    """ФИО игрока по id ИЗ ЛИГИ — транзитно, в наших таблицах не храним.
+    Нужно тем, кто есть в протоколах, но выпал из заявки: без имени в пуле
+    висит «№10», и не понять ни кто это, ни не тот ли это человек, что уже
+    есть в списке под другим написанием.
+
+    Кеш на процесс: имя меняется раз в жизнь, а пул пересобирается по часам."""
+    key = f"{source}:{player_id}"
+    if key in _person_names:
+        return _person_names[key]
+    name = ""
+    try:
+        if source == "slpro":
+            from slpro_client import SlproClient
+            info = await SlproClient().get_player_info(player_id)
+            if info:
+                name = f"{info.get('surname', '')} {info.get('name', '')}".strip()
+        else:
+            import stats_backfill
+            name = await stats_backfill.fetch_infobasket_person(player_id)
+    except Exception as e:
+        log.warning(f"имя игрока {key}: {e}")
+    _person_names[key] = name
+    return name
+
+
 def _protocol_players(source: str, team_id: Any) -> List[Dict[str, Any]]:
     """Кто РЕАЛЬНО играл за команду — из наших протоколов (локальная база).
     Заявка бывает неполной: игрок мог сыграть и уже выбыть из списка. ФИО не
@@ -317,7 +346,8 @@ async def build_pool(force: bool = False,
                 continue
             by_pid[pid] = {"pid": pid, "number": pp["number"],
                            # ФИО не храним — для выбывших из заявки имени нет
-                           "name": f"№{pp['number']}" if pp["number"] else f"ID {pid}",
+                           "name": (await _person_name(src_db, pid)
+                                    or (f"№{pp['number']}" if pp["number"] else f"ID {pid}")),
                            "off_roster": True}
 
         for p in by_pid.values():
@@ -375,7 +405,7 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     точную; более сложные расхождения — вручную/через связку id в «Игроки»."""
     result: List[Dict[str, Any]] = []
     for e in merged:
-        if e.get("off_roster"):        # «имя» = номер, сравнивать нечего
+        if _norm_name(e["name"]).startswith(("№", "id ")):   # имени нет, сравнивать нечего
             result.append(dict(e))
             continue
         eparts = _norm_name(e["name"]).split()
@@ -384,7 +414,7 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         e_src = _srcset(e["ref"])
         hit = None
         for g in result:
-            if g.get("off_roster"):
+            if _norm_name(g["name"]).startswith(("№", "id ")):
                 continue
             gparts = _norm_name(g["name"]).split()
             g_sur = gparts[0] if gparts else ""
@@ -410,9 +440,11 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     order: List[str] = []
     for p in pool:
         key = _norm_name(p["name"])
-        # У выбывших из заявки «имя» — это «№13»: склеивать по нему нельзя,
-        # иначе два разных игрока с одним номером из разных лиг слипнутся.
-        if not key or p.get("off_roster"):
+        # Склеиваем по ФИО — в том числе выбывших из заявки: их имя мы теперь
+        # спрашиваем у лиги, и это единственный способ увидеть, что «выпавший»
+        # игрок — тот же человек, что уже есть в списке. Имя не достали (осталось
+        # «№13») — склейка по нему слепила бы разных людей с одним номером.
+        if not key or key.startswith(("№", "id ")):
             key = p["ref"]
         if key not in by_name:
             by_name[key] = {"refs": [p["ref"]], "number": p["number"],

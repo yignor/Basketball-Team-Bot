@@ -184,6 +184,25 @@ async def fetch_infobasket_roster(team_id: Any, comp_id: Any) -> List[Dict[str, 
     return (await fetch_infobasket_team(team_id, comp_id))["players"]
 
 
+async def fetch_infobasket_person(person_id: Any) -> str:
+    """ФИО игрока Инфобаскета по его id — транзитно, в наших таблицах не храним.
+    Нужно тем, кто есть в протоколах, но выпал из заявки: иначе у него вместо
+    имени остаётся только номер."""
+    url = f"{IB_API}/Widget/PlayerPage/{person_id}?format=json&lang=ru"
+    try:
+        async with _ib_session() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    return ""
+                data = await r.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return " ".join(x for x in (data.get("PersonLastNameRu"),
+                                data.get("PersonFirstNameRu")) if x).strip()
+
+
 async def fetch_infobasket_team(team_id: Any, comp_id: Any) -> Dict[str, Any]:
     """{name, players} — название команды берём из ответа лиги, а не выдумываем.
     Имена транзитно (в наших таблицах не храним).
