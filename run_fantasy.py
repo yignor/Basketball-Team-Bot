@@ -46,8 +46,11 @@ def _fantasy_reply_markup(base_url: str, payload: str) -> ReplyKeyboardMarkup:
         from urllib.parse import quote
         url += "&api=" + quote(api, safe="")
     url += f"#d={payload}"
+    # Раскладка та же, что у бота в /start: понедельничная рассылка не должна
+    # подменять человеку клавиатуру на «только фэнтези».
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("🏀 Фэнтези", web_app=WebAppInfo(url=url))]],
+        [[KeyboardButton("🏀 Фэнтези", web_app=WebAppInfo(url=url))],
+         [KeyboardButton("💬 Написать админам")]],
         resize_keyboard=True, is_persistent=True)
 
 

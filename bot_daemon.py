@@ -28,7 +28,6 @@ from telegram import (
     MenuButtonCommands,
     MenuButtonWebApp,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
     WebAppInfo,
 )
@@ -319,140 +318,98 @@ def _is_admin(user) -> bool:
     return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
 
 
-# Кнопки под чатом у админа больше нет — всё в самом сообщении меню. Подпись
-# оставлена, чтобы старая клавиатура, которая у кого-то ещё висит, работала.
+# Подписи кнопок нижней клавиатуры. Она постоянная (is_persistent) и висит под
+# полем ввода независимо от того, куда пролистан чат, — команд стало много, и
+# держать их под рукой удобнее, чем искать сообщение с меню.
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
-
-
 FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
+FEEDBACK_KEYBOARD_LABEL = "💬 Написать админам"
 
 
-def _fantasy_reply_keyboard(payload: str) -> ReplyKeyboardMarkup:
-    """Постоянная кнопка запасного входа в фэнтези. Открывает Mini App как
-    web_app — только из reply-кнопки Telegram даёт sendData, поэтому сохранение
-    состава уходит боту через Telegram и не зависит от живого API. Данные едут
-    в самом URL (#d=payload), приватно, в личном чате игрока."""
-    url = _webapp_url() + ("#d=" + payload if payload else "")
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))]],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
+def _bottom_keyboard(payload: str = "", is_admin: bool = False,
+                     with_fantasy: bool = True) -> ReplyKeyboardMarkup:
+    """Нижняя клавиатура: фэнтези, обратная связь и — админу — панель.
+
+    Фэнтези открывается как web_app: только reply-кнопка даёт sendData, поэтому
+    состав сохраняется через Telegram и не зависит от живого API. Данные едут в
+    самом URL (#d=payload), приватно, в личном чате игрока."""
+    rows: List[List[KeyboardButton]] = []
+    if with_fantasy and _webapp_url():
+        url = _webapp_url() + ("#d=" + payload if payload else "")
+        rows.append([KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))])
+    rows.append([KeyboardButton(FEEDBACK_KEYBOARD_LABEL)])
+    if is_admin:
+        rows.append([KeyboardButton(ADMIN_KEYBOARD_LABEL)])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
-async def _maybe_send_fantasy_keyboard(update: Update, user) -> None:
-    """Не-админу — игроку команды — вешаем постоянную кнопку запасного входа.
-    Не игроку не показываем ничего. Нет активного сезона / фронт не настроен —
-    молча выходим."""
-    if not (FANTASY_WEBAPP_URL and _webapp_url()):
-        return
-    import fantasy_api
-    try:
-        if not fantasy_api._is_team_member(str(user.id), user.username or ""):
-            return
-        payload = await fantasy_api.build_webapp_payload(str(user.id))
-    except Exception as e:
-        log.warning(f"Не удалось собрать кнопку фэнтези: {e}")
-        return
-    if not payload:
-        return
-    text = ("🏀 Фэнтези: жми кнопку ниже — собрать состав и посмотреть таблицу. "
-            "Кнопка останется внизу чата.")
-    await _send_fantasy_button(update.message, str(user.id), text, payload)
-
-
-# Сколько данных пробуем запечь в кнопку. Telegram отвергает слишком длинную
-# клавиатуру, а какой именно потолок — не документировано, поэтому спускаемся
-# по ступеням: полнее -> короче -> вообще без данных (лишь бы кнопка была).
+# Сколько данных пробуем запечь в кнопку фэнтези. Telegram отвергает слишком
+# длинную клавиатуру, а какой именно потолок — не документировано, поэтому
+# спускаемся по ступеням: полнее -> короче -> вообще без данных (лишь бы
+# клавиатура появилась).
 PAYLOAD_BUDGETS = (8000, 4000, None)      # None — кнопка вообще без данных
 
 
-async def _send_fantasy_button(message, user_id: str, text: str,
-                               payload: Optional[str] = None) -> None:
-    """Шлёт кнопку запасного входа, ужимая данные, пока Telegram не примет.
+async def send_bottom_keyboard(message, user, text: str) -> None:
+    """Показывает нижнюю клавиатуру, ужимая данные фэнтези, пока Telegram не
+    примет. Последняя ступень — без данных: живой вход у большинства работает,
+    и это лучше, чем клавиатура, которая не отправилась вовсе (так и было
+    с 26.07, пока payload не дорос до 26 КБ)."""
+    is_admin = _is_admin(user)
+    uid = str(user.id)
+    # Кнопка фэнтези — только игрокам команды: остальным она бесполезна.
+    with_fantasy = False
+    if FANTASY_WEBAPP_URL and _webapp_url():
+        try:
+            with_fantasy = fantasy_api._is_team_member(uid, user.username or "")
+        except Exception as e:
+            log.warning(f"проверка состава для клавиатуры: {e}")
 
-    Потолок длины клавиатуры у Telegram не документирован, а payload растёт с
-    сезоном — поэтому спускаемся по ступеням, а не гадаем. Последняя ступень —
-    кнопка без данных: живой вход у большинства работает, и лучше так, чем
-    вообще без кнопки (именно это и происходило с 26.07)."""
+    payload: Optional[str] = None
     for budget in PAYLOAD_BUDGETS:
-        if budget is None:
+        if not with_fantasy or budget is None:
             payload = ""
         elif payload is None:
             try:
-                payload = await fantasy_api.build_webapp_payload(user_id, max_len=budget)
+                payload = await fantasy_api.build_webapp_payload(uid, max_len=budget)
             except Exception as e:
                 log.warning(f"payload кнопки (бюджет {budget}) не собрался: {e}")
-                payload = None
                 continue
         try:
-            await message.reply_text(text, reply_markup=_fantasy_reply_keyboard(payload or ""))
+            await message.reply_text(text, reply_markup=_bottom_keyboard(
+                payload or "", is_admin=is_admin, with_fantasy=with_fantasy))
             return
         except Exception as e:
-            log.warning(f"кнопка фэнтези (бюджет {budget}) не ушла: {e}")
+            log.warning(f"нижняя клавиатура (бюджет {budget}) не ушла: {e}")
             payload = None
-    log.warning("кнопка фэнтези не отправлена даже без данных")
+    log.warning("нижняя клавиатура не отправлена")
 
 
-async def _drop_reply_keyboard(message) -> None:
-    """Убирает постоянную клавиатуру из-под поля ввода.
-
-    Снять её можно только сообщением с ReplyKeyboardRemove, а двух разметок в
-    одном сообщении не бывает — поэтому шлём служебное и сразу удаляем."""
-    try:
-        note = await message.reply_text("⌛", reply_markup=ReplyKeyboardRemove())
-        await note.delete()
-    except Exception as e:
-        log.warning(f"Не удалось убрать клавиатуру под чатом: {e}")
-
-
-async def _send_main_menu(update: Update, menu_only: bool = False) -> None:
+async def _send_main_menu(update: Update) -> None:
     for attempt in range(3):
         try:
-            if menu_only:
-                await update.message.reply_text(PLAYER_MENU_TEXT,
-                                                reply_markup=_player_menu_markup(is_admin=True))
-            else:
-                await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
+            await update.message.reply_text("📊 Админ-панель", reply_markup=_main_menu_markup())
             return
         except Exception as e:
-            log.warning(f"Не удалось отправить главное меню (попытка {attempt + 1}/3): {e}")
+            log.warning(f"Не удалось отправить админ-панель (попытка {attempt + 1}/3): {e}")
             await asyncio.sleep(2)
-    log.error("Не удалось отправить главное меню после 3 попыток")
+    log.error("Не удалось отправить админ-панель после 3 попыток")
 
 
-def _player_menu_markup(is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Меню бота. Команд стало много, а помнить их никто не будет — всё
-    доступное живёт кнопками. Админу тем же меню добавляется вход в панель:
-    он такой же игрок, и фэнтези ему нужно так же, как остальным. Скрытое
-    (личная статистика) — только внутри админ-панели."""
-    rows: List[List[InlineKeyboardButton]] = []
-    url = _webapp_url()
-    if url:
-        rows.append([InlineKeyboardButton("🏀 Фэнтези: состав и таблица",
-                                          web_app=WebAppInfo(url=url))])
-    rows.append([InlineKeyboardButton("💬 Написать админам", callback_data="menu:feedback")])
-    if is_admin:
-        rows.append([InlineKeyboardButton("📊 Админ-панель", callback_data="admin:menu:main")])
-    return InlineKeyboardMarkup(rows)
-
-
-PLAYER_MENU_TEXT = ("🏀 Привет! Вот что я умею:\n\n"
+PLAYER_MENU_TEXT = ("🏀 Привет! Кнопки внизу экрана — всегда под рукой:\n\n"
                     "• Фэнтези — собрать состав, посмотреть таблицу и топ игроков\n"
                     "• Написать админам — идея, баг, пожелание\n\n"
                     "Опросы на игры и тренировки я присылаю сам в общий чат.")
 
 
-async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопки меню игрока (menu:*). Доступны всем — здесь нет ничего скрытого."""
-    query = update.callback_query
-    if not query:
+async def handle_feedback_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Нажатие кнопки «💬 Написать админам» на нижней клавиатуре."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
         return
-    await query.answer()
-    user = update.effective_user
-    if (query.data or "") == "menu:feedback" and user:
-        _awaiting_feedback.add(user.id)
-        await query.message.reply_text(FEEDBACK_ASK)
+    _awaiting_feedback.add(user.id)
+    await msg.reply_text(FEEDBACK_ASK)
+    raise ApplicationHandlerStop
 
 
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -468,23 +425,15 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         log.warning(f"Не удалось записать пользователя бота: {e}")
 
-    if not _is_admin(user):
-        # Игроку команды — постоянная кнопка запасного входа в фэнтези.
-        await _maybe_send_fantasy_keyboard(update, user)
-        await update.message.reply_text(PLAYER_MENU_TEXT, reply_markup=_player_menu_markup())
-        return
-    # Синхронизация с таблицей — приятный побочный эффект /start, но если
-    # Google недоступен, меню всё равно должно прийти: иначе бот молчит.
-    try:
-        _refresh_db_cache()
-        _periodic_push_local_changes()
-    except Exception as e:
-        log.warning(f"/start: синхронизация не прошла: {e}")
-    # Админу — то же меню (он и сам играет) плюс вход в панель. Клавиатуру
-    # под чатом не вешаем: всё то же есть кнопками в самом сообщении, а
-    # запасной вход в фэнтези админу не нужен — у него работает живой API.
-    await _drop_reply_keyboard(update.message)
-    await _send_main_menu(update, menu_only=True)
+    if _is_admin(user):
+        # Синхронизация с таблицей — приятный побочный эффект /start, но если
+        # Google недоступен, клавиатура всё равно должна прийти: иначе молчок.
+        try:
+            _refresh_db_cache()
+            _periodic_push_local_changes()
+        except Exception as e:
+            log.warning(f"/start: синхронизация не прошла: {e}")
+    await send_bottom_keyboard(update.message, user, PLAYER_MENU_TEXT)
 
 
 def _format_progress(source: str, player_id: str) -> str:
@@ -1930,6 +1879,7 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", handle_admin))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
+    app.add_handler(MessageHandler(filters.Text([FEEDBACK_KEYBOARD_LABEL]), handle_feedback_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
     app.add_handler(CommandHandler("season", handle_season))
     app.add_handler(CommandHandler("feedback", handle_feedback))
@@ -1940,7 +1890,6 @@ def main() -> None:
     # но отвечает, только если в сообщении действительно есть ссылка.
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_profile_link))
-    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     log.info("Запуск polling...")
