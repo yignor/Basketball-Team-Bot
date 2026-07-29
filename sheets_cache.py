@@ -339,6 +339,8 @@ CREATE TABLE IF NOT EXISTS fantasy_rosters (
     season_id        INTEGER NOT NULL,
     week_start       TEXT NOT NULL,             -- ISO дата понедельника недели
     player_refs_json TEXT NOT NULL DEFAULT '[]',
+    mode             TEXT NOT NULL DEFAULT '',   -- режим сбора (fantasy_modes)
+    meta_json        TEXT NOT NULL DEFAULT '',   -- разметка режима (категории)
     locked           INTEGER NOT NULL DEFAULT 0,
     updated_at       TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (user_id, season_id, week_start)
@@ -489,6 +491,8 @@ def init_db() -> None:
         # «no column named metrics».
         _ensure_column(conn, "player_report_prefs", "metrics", "TEXT NOT NULL", "''")
         # «ID топика» и «Комментарий» секции голосований — колонки I и J листа.
+        _ensure_column(conn, "fantasy_rosters", "mode", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "fantasy_rosters", "meta_json", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "price", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "tier", "TEXT NOT NULL", "''")
         _ensure_column(conn, "config_rows", "col_i", "TEXT NOT NULL", "''")

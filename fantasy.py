@@ -143,7 +143,8 @@ def get_roster_effective(user_id: str, season_id: int, week_start: str) -> Optio
     if not inherited:
         return row
     return {"user_id": str(user_id), "season_id": season_id, "week_start": week_start,
-            "refs": inherited, "locked": 0, "inherited": True}
+            "refs": inherited["refs"], "mode": inherited.get("mode", ""),
+            "meta": inherited.get("meta") or {}, "locked": 0, "inherited": True}
 
 
 # ─────────────────────────── Сезоны ──────────────────────────────────────────
@@ -451,14 +452,21 @@ def canonical_ref(ref: str, pool_refs: Any) -> Optional[str]:
 
 
 def validate_roster(season: Dict[str, Any], refs: Any,
-                    pool_refs: Optional[Any] = None) -> Optional[str]:
+                    pool_refs: Optional[Any] = None, mode: str = "",
+                    meta: Optional[Dict[str, Any]] = None,
+                    prices: Optional[Dict[str, int]] = None) -> Optional[str]:
     """Проверяет состав по правилам сезона. Возвращает код ошибки или None.
     Одна точка правды: зовут и HTTP-API, и приём состава из Mini App."""
-    size = roster_size(season)
+    import fantasy_modes
+    mode = fantasy_modes.normalize(season, mode)
+    size = fantasy_modes.roster_size(season, mode)
     if not isinstance(refs, list) or len(refs) != size:
         return "invalid_roster"
     if pool_refs is not None and any(canonical_ref(r, pool_refs) is None for r in refs):
         return "unknown_player"
+    err = fantasy_modes.validate(season, mode, refs, meta, prices)
+    if err:
+        return err
     limit = max_per_player(season)
     if limit < size:
         counts: Dict[str, int] = {}
@@ -469,9 +477,13 @@ def validate_roster(season: Dict[str, Any], refs: Any,
     return None
 
 def save_roster(user_id: str, season_id: int, week_start: str,
-                refs: List[str], lock: bool = False) -> Dict[str, Any]:
+                refs: List[str], lock: bool = False, mode: str = "",
+                meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Сохраняет/обновляет состав участника на неделю. Возвращает статус.
-    Если состав уже заблокирован — не даём менять."""
+    Если состав уже заблокирован — не даём менять.
+
+    `mode`/`meta` — режим сбора и его разметка (для категорийного там список
+    категорий по позициям refs). Пусто — старое поведение, «свободный»."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         existing = conn.execute(
@@ -481,12 +493,15 @@ def save_roster(user_id: str, season_id: int, week_start: str,
         if existing and existing["locked"]:
             return {"ok": False, "error": "locked"}
         conn.execute(
-            """INSERT INTO fantasy_rosters (user_id, season_id, week_start, player_refs_json, locked, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO fantasy_rosters (user_id, season_id, week_start, player_refs_json,
+                                            mode, meta_json, locked, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, season_id, week_start) DO UPDATE SET
-                   player_refs_json=excluded.player_refs_json, locked=excluded.locked,
+                   player_refs_json=excluded.player_refs_json, mode=excluded.mode,
+                   meta_json=excluded.meta_json, locked=excluded.locked,
                    updated_at=excluded.updated_at""",
             (str(user_id), season_id, week_start, json.dumps(refs, ensure_ascii=False),
+             mode or "", json.dumps(meta or {}, ensure_ascii=False),
              1 if lock else 0, sheets_cache.now_iso()),
         )
         conn.commit()
@@ -504,7 +519,16 @@ def get_roster(user_id: str, season_id: int, week_start: str) -> Optional[Dict[s
         return None
     d = dict(row)
     d["refs"] = json.loads(d.get("player_refs_json") or "[]")
+    d["meta"] = _load_meta(d.get("meta_json"))
     return d
+
+
+def _load_meta(raw: Any) -> Dict[str, Any]:
+    try:
+        m = json.loads(raw or "{}")
+        return m if isinstance(m, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 def get_week_rosters(season_id: int, week_start: str) -> List[Dict[str, Any]]:
@@ -518,6 +542,7 @@ def get_week_rosters(season_id: int, week_start: str) -> List[Dict[str, Any]]:
     for row in rows:
         d = dict(row)
         d["refs"] = json.loads(d.get("player_refs_json") or "[]")
+        d["meta"] = _load_meta(d.get("meta_json"))
         out.append(d)
     return out
 
@@ -626,29 +651,33 @@ def apply_game_result(source: str, game_id: Any, game_date_iso: str) -> Dict[str
     return {"week": wk, "played": len(played), "seasons": out}
 
 
-def effective_rosters(season_id: int, at_date_iso: str) -> Dict[str, List[str]]:
+def effective_rosters(season_id: int, at_date_iso: str) -> Dict[str, Dict[str, Any]]:
     """Составы участников, действовавшие на указанную дату: для каждого — его
     последний состав, собранный НЕ ПОЗЖЕ этой даты. Состав держится, пока игрок
-    его не поменял, поэтому неделя без пересборки не обнуляет участника."""
+    его не поменял, поэтому неделя без пересборки не обнуляет участника.
+
+    Возвращает {uid: {refs, mode, meta}} — режим нужен, чтобы посчитать очки
+    по правилам, которыми состав собирали, а не текущими."""
     sheets_cache.init_db()
     try:
         week = week_start_of(date.fromisoformat(at_date_iso)).isoformat()
     except (ValueError, TypeError):
         # Бэкфилл идёт по датам из базы — одна битая строка не должна валить всё.
         week = week_start_of(date.today()).isoformat()
-    out: Dict[str, List[str]] = {}
+    out: Dict[str, Dict[str, Any]] = {}
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            """SELECT user_id, player_refs_json, week_start FROM fantasy_rosters
-               WHERE season_id = ? AND week_start <= ?
+            """SELECT user_id, player_refs_json, mode, meta_json, week_start
+               FROM fantasy_rosters WHERE season_id = ? AND week_start <= ?
                ORDER BY week_start""", (season_id, week)).fetchall()
     for r in rows:
         try:
             refs = json.loads(r["player_refs_json"]) or []
         except (json.JSONDecodeError, TypeError):
             refs = []
-        if refs:
-            out[str(r["user_id"])] = refs      # порядок ASC -> остаётся свежайший
+        if refs:                               # порядок ASC -> остаётся свежайший
+            out[str(r["user_id"])] = {"refs": refs, "mode": r["mode"] or "",
+                                      "meta": _load_meta(r["meta_json"])}
     return out
 
 
@@ -673,11 +702,18 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
             wk = week_start_of(date.fromisoformat(game_date_iso)).isoformat()
         except (ValueError, TypeError):
             wk = week_start_of(date.today()).isoformat()
-        rosters = {str(r["user_id"]): r["refs"] for r in get_week_rosters(season["id"], wk)}
+        rosters = {str(r["user_id"]): {"refs": r["refs"], "mode": r.get("mode", ""),
+                                       "meta": r.get("meta") or {}}
+                   for r in get_week_rosters(season["id"], wk)}
     out: List[Dict[str, Any]] = []
+    import fantasy_modes
     with sheets_cache.get_connection() as conn:
-        for uid, refs in rosters.items():
-            pts = fantasy_stats.game_points(refs, source, game_id, weights)
+        for uid, entry in rosters.items():
+            refs = entry["refs"]
+            # Считаем по правилам режима, которым состав собирали: коэффициент и
+            # категории могли смениться после игры, а снимок обязан остаться тем.
+            pts = fantasy_modes.game_points(season, entry.get("mode") or fantasy_modes.FREE,
+                                            refs, entry.get("meta"), source, game_id, weights)
             conn.execute(
                 """INSERT INTO fantasy_game_scores
                    (user_id, season_id, source, game_id, game_date, points, refs_json, computed_at)
