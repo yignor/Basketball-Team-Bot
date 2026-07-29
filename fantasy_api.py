@@ -14,6 +14,7 @@ HTTP-API фэнтези для Mini App (aiohttp). Живёт в процесс�
 не хранятся.
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -176,6 +177,14 @@ def _push_tg_id_to_sheet(player_row: int, tg_user_id: str) -> None:
 # ─────────────────────────── Пул драфта ──────────────────────────────────────
 
 _pool_cache: Dict[str, Dict[str, Any]] = {}      # season_id -> {at, data}
+
+
+def invalidate_pool(season_id: Any = None) -> None:
+    """Сбросить кеш пула: цены поменялись — карточки обязаны показать новые."""
+    if season_id is None:
+        _pool_cache.clear()
+    else:
+        _pool_cache.pop(str(season_id), None)
 _POOL_TTL = 3600.0
 
 
@@ -835,6 +844,16 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         fantasy.set_pool_teams(
             [t for t in await _current_pool_teams(season) if str(t.get("team_id")) != tid], sid)
         _pool_cache.pop(str(sid), None)
+    elif action == "prices_recalc":
+        # Ручной прогон того же пересчёта, что идёт после игры: удобно, когда
+        # тренер только что поправил цены и хочет увидеть, что выйдет.
+        res = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: fantasy_prices.recalc(fantasy._get_season(sid),
+                                                dry_run=bool(body.get("value"))))
+        out = await handle_admin_state(request)
+        payload = json.loads(out.body.decode())
+        payload["recalc"] = res
+        return web.json_response(payload)
     elif action in ("rank_up_games", "rank_down_games", "price_step"):
         try:
             fantasy._update_settings(fantasy._get_season(sid), **{action: int(body.get("value"))})

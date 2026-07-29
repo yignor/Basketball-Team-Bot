@@ -745,21 +745,52 @@ def _to_int(value: Any) -> int:
 
 
 def get_player_prices() -> Dict[str, Dict[str, Any]]:
-    """{нормализованное ФИО: {price, tier}} из листа «Игроки».
+    """{нормализованное ФИО: {price, tier, row}} из листа «Игроки».
 
-    Цену ведёт тренер в таблице: считать её в боте каждый раз нельзя — он бы
-    переписывал ручные правки, а именно ради них столбец и заведён."""
+    Цена в листе — ВСЕГДА стартовая точка пересчёта: бот считает новую цену от
+    того, что стоит в таблице сейчас. Значит правка тренера не «перебивается»
+    ботом, а становится новым началом отсчёта (fantasy_prices.recalc)."""
     init_db()
     with _connection() as conn:
         rows = conn.execute(
-            "SELECT surname, name, price, tier FROM players WHERE price > 0 OR tier != ''"
+            "SELECT row_index, surname, name, price, tier FROM players "
+            "WHERE price > 0 OR tier != ''"
         ).fetchall()
     out: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         key = " ".join(f"{r['surname']} {r['name']}".lower().replace("ё", "е").split())
         if key.strip():
-            out[key] = {"price": int(r["price"] or 0), "tier": r["tier"] or ""}
+            out[key] = {"price": int(r["price"] or 0), "tier": r["tier"] or "",
+                        "row": int(r["row_index"])}
     return out
+
+
+def write_player_prices(spreadsheet, updates: Dict[int, int]) -> int:
+    """Вписывает новые цены в столбец «Стоимость» листа «Игроки».
+
+    Единственное место, где бот пишет в этот лист цену. Столбец «Уровень» не
+    трогаем: там формула, она пойдёт за ценой сама. Возвращает число строк."""
+    if not updates:
+        return 0
+    ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
+    header = ws.row_values(1)
+    if PLAYERS_PRICE_HEADER not in header:
+        logger.warning("В листе «Игроки» нет столбца «Стоимость» — цены не пишем")
+        return 0
+    col = header.index(PLAYERS_PRICE_HEADER) + 1
+    letter = chr(ord("A") + col - 1) if col <= 26 else None
+    if not letter:
+        logger.warning("Столбец «Стоимость» слишком далеко (%s) — пропуск", col)
+        return 0
+    data = [{"range": f"{letter}{row}", "values": [[int(price)]]}
+            for row, price in sorted(updates.items())]
+    ws.batch_update(data)
+    init_db()
+    with _connection() as conn:
+        conn.executemany("UPDATE players SET price = ? WHERE row_index = ?",
+                         [(int(p), int(r)) for r, p in updates.items()])
+        conn.commit()
+    return len(data)
 
 
 def get_config_rows() -> List[List[str]]:

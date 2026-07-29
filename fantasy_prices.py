@@ -7,7 +7,7 @@
 одного удачного матча:
 
 - у каждого ранга своя полоса цен (бронза 5–14, серебро 15–29, золото 30–49,
-  платина 50–100);
+  платина 50–69, элита 70–100);
 - **потолок** — сколько надо набирать за игру, чтобы подняться в следующий ранг;
 - **пол** — ниже какого уровня надо провалиться, чтобы выпасть в предыдущий;
 - пороги СМЕЩЕНЫ друг относительно друга (гистерезис): войти в серебро — 9
@@ -15,8 +15,9 @@
   прыгал бы туда-обратно после каждой игры.
 
 Пороги посчитаны из той же кривой, которой считались стартовые цены: 9 / 16 /
-23 фэнтези-очка за игру — это ровно цены 15 / 30 / 50. То есть «потолок ранга»
-и «нижняя цена следующего» — одно и то же число, просто в разных единицах.
+23 / 30 фэнтези-очков за игру — это ровно цены 15 / 30 / 50 / 70. То есть
+«потолок ранга» и «нижняя цена следующего» — одно и то же число, просто в
+разных единицах.
 
 Окна (сколько последних игр смотреть) задаются в админке отдельно для подъёма
 и падения: подняться сложнее — окно длиннее.
@@ -24,16 +25,21 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-BRONZE, SILVER, GOLD, PLATINUM = "Бронза", "Серебро", "Золото", "Платина"
-RANK_ORDER = (BRONZE, SILVER, GOLD, PLATINUM)
+BRONZE, SILVER, GOLD = "Бронза", "Серебро", "Золото"
+PLATINUM, ELITE = "Платина", "Элита"
+RANK_ORDER = (BRONZE, SILVER, GOLD, PLATINUM, ELITE)
 
 # (нижняя цена, верхняя цена, порог подъёма, порог падения) — пороги в
-# фэнтези-очках за игру. У бронзы падать некуда, у платины расти некуда.
+# фэнтези-очках за игру. У бронзы падать некуда, у элиты расти некуда.
+# Лестница ровная: каждый следующий ранг — плюс 7 очков за игру (9/16/23/30),
+# а порог падения на 3–4 ниже своего порога входа. Этот зазор и есть разница
+# между полом и потолком: на границе игрок не прыгает туда-обратно.
 RANKS: Dict[str, Dict[str, Any]] = {
     BRONZE:   {"low": 5,  "high": 14,  "up": 9.0,  "down": None},
     SILVER:   {"low": 15, "high": 29,  "up": 16.0, "down": 7.0},
     GOLD:     {"low": 30, "high": 49,  "up": 23.0, "down": 13.0},
-    PLATINUM: {"low": 50, "high": 100, "up": None, "down": 19.0},
+    PLATINUM: {"low": 50, "high": 69,  "up": 30.0, "down": 19.0},
+    ELITE:    {"low": 70, "high": 100, "up": None, "down": 26.0},
 }
 
 DEFAULT_UP_GAMES = 5        # подняться — доказать на дистанции
@@ -140,6 +146,12 @@ def next_price(price: Any, refs: List[str],
             return {"price": new, "rank": lower, "moved": new - cur,
                     "reason": f"форма {down_fp} за {down_n} игр — ниже пола {band['down']}"}
 
+    # Игр в базе нет вообще (новичок, травма, ещё не выкачали box-score) —
+    # цена стоит. Иначе «форма 0» утащила бы человека на дно ранга за пару
+    # пересчётов просто потому, что о нём ничего не известно.
+    if not up_n and not down_n:
+        return {"price": cur, "rank": rank, "moved": 0, "reason": "нет игр"}
+
     # Ранг тот же: цена подтягивается к форме внутри полосы.
     target = _price_for_fp(up_fp if up_n else down_fp)
     target = max(band["low"], min(band["high"], target))
@@ -153,9 +165,9 @@ def next_price(price: Any, refs: List[str],
 def _price_for_fp(fp: float) -> int:
     """Фэнтези-очки за игру -> цена по тем же порогам, что и ранги.
 
-    Между узлами (9→15, 16→30, 23→50) считаем линейно: точнее кривой здесь
-    не нужно, цена всё равно двигается шагом."""
-    points = [(0.0, 5), (9.0, 15), (16.0, 30), (23.0, 50), (35.0, 100)]
+    Между узлами (9→15, 16→30, 23→50, 30→70) считаем линейно: точнее кривой
+    здесь не нужно, цена всё равно двигается шагом."""
+    points = [(0.0, 5), (9.0, 15), (16.0, 30), (23.0, 50), (30.0, 70), (40.0, 100)]
     if fp <= points[0][0]:
         return points[0][1]
     for (x1, y1), (x2, y2) in zip(points, points[1:]):
@@ -174,3 +186,70 @@ def describe(season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "ranks": [{"rank": r, "low": RANKS[r]["low"], "high": RANKS[r]["high"],
                    "up": RANKS[r]["up"], "down": RANKS[r]["down"]} for r in reversed(RANK_ORDER)],
     }
+
+
+# ── Пересчёт цен по итогам игры ───────────────────────────────────────────
+#
+# Правило владения столбцом: СТАРТОВАЯ ТОЧКА — то, что стоит в листе сейчас.
+# Бот не помнит «свою» цену и не спорит с тренером: поправил руками — со
+# следующей игры отсчёт пойдёт от новой цифры. Пишем только изменившиеся
+# строки и только столбец «Стоимость».
+
+def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
+           dry_run: bool = False) -> Dict[str, Any]:
+    """Пересчёт цен всего пула. {updated, changes: [{name, old, new, reason}]}."""
+    import asyncio
+    import fantasy
+    import fantasy_api
+    import sheets_cache
+
+    season = season or fantasy.get_active_season()
+
+    if spreadsheet is None and not dry_run:
+        import report_common
+        spreadsheet = report_common.init_sheets()
+    if spreadsheet is not None:
+        # Читаем лист заново: правки тренера должны попасть в расчёт ДО того,
+        # как мы посчитаем от них новую цену.
+        sheets_cache.sync_players(spreadsheet)
+
+    prices = sheets_cache.get_player_prices()
+    try:
+        pool = asyncio.run(fantasy_api.build_pool(force=True, season=season))
+    except RuntimeError:                       # уже внутри event loop
+        loop = asyncio.new_event_loop()
+        try:
+            pool = loop.run_until_complete(fantasy_api.build_pool(force=True, season=season))
+        finally:
+            loop.close()
+
+    # Строка листа -> все ссылки этого человека: одна фамилия может прийти
+    # карточками из двух лиг, а цена у неё одна.
+    by_row: Dict[int, Dict[str, Any]] = {}
+    for card in pool:
+        pr = fantasy_api._lookup_price(card.get("name", ""), prices)
+        row, price = pr.get("row"), int(pr.get("price") or 0)
+        if not row or price <= 0:
+            continue
+        item = by_row.setdefault(int(row), {"price": price, "refs": [],
+                                            "name": card.get("name", "")})
+        item["refs"].append(card["ref"])
+
+    changes: List[Dict[str, Any]] = []
+    updates: Dict[int, int] = {}
+    for row, item in by_row.items():
+        res = next_price(item["price"], item["refs"], season)
+        if res["price"] and res["price"] != item["price"]:
+            updates[row] = res["price"]
+            changes.append({"name": item["name"], "old": item["price"],
+                            "new": res["price"], "rank": res["rank"],
+                            "reason": res["reason"]})
+
+    written = 0
+    if updates and not dry_run:
+        written = sheets_cache.write_player_prices(spreadsheet, updates)
+        fantasy_api.invalidate_pool()
+    changes.sort(key=lambda c: abs(c["new"] - c["old"]), reverse=True)
+    return {"updated": written, "checked": len(by_row), "dry_run": dry_run,
+            "changes": changes}
+

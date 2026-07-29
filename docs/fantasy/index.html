@@ -42,6 +42,7 @@
     /* Значок карточки игрока рядом с именем + цена в строке статистики. */
     .tier { margin-right: 4px; }
     .price { color: var(--text); }
+    .tier-elite { filter: drop-shadow(0 0 3px #ff9d3d); }
     .tier-plat  { filter: drop-shadow(0 0 2px #7fd3ff); }
     .tier-gold  { filter: drop-shadow(0 0 2px #ffd76a); }
     /* Строка участника раскрывается в состав, которым он играл. Маркер прячем:
@@ -397,8 +398,10 @@
   // Карточка игрока: платина/золото/серебро/бронза — по стоимости из таблицы.
   // Цену ведёт тренер, поэтому значок обязан браться из данных, а не считаться
   // на фронте: иначе после ручной правки он разойдётся с ценой.
-  const TIER_ICON = {'Платина': '💎', 'Золото': '🥇', 'Серебро': '🥈', 'Бронза': '🥉'};
-  const TIER_KEY = {'Платина': 'plat', 'Золото': 'gold', 'Серебро': 'silver', 'Бронза': 'bronze'};
+  const TIER_ICON = {'Элита': '👑', 'Платина': '💎', 'Золото': '🥇',
+                     'Серебро': '🥈', 'Бронза': '🥉'};
+  const TIER_KEY = {'Элита': 'elite', 'Платина': 'plat', 'Золото': 'gold',
+                    'Серебро': 'silver', 'Бронза': 'bronze'};
 
   function tierBadge(p) {
     const icon = TIER_ICON[p.tier];
@@ -570,11 +573,20 @@
     $('counter').textContent = `Выбрано: ${total()} / ${slots()}${hint}`;
     // Состав живёт, пока его не поменяли: человек должен видеть, что этот
     // набор перенесён с прошлой игры и уже играет — заново собирать не нужно.
+    //
+    // Цены двигаются после каждой игры, поэтому перенесённый состав может стать
+    // дороже бюджета. Задним числом мы его не ломаем: он уже сыгран этим
+    // набором и продолжает играть. Бюджет проверяется в момент СОХРАНЕНИЯ —
+    // значит подорожание бьёт только по следующей пересборке.
     const note = $('carryNote');
-    note.textContent = inherited
-      ? '↩️ Состав перенесён с прошлой игры — он играет и дальше, пока ты его не поменяешь.'
-      : '';
-    note.classList.toggle('hidden', !inherited);
+    const pricey = inherited && mode === 'budget' && spent() > budget();
+    note.textContent = pricey
+      ? `💹 Твои игроки подорожали (${spent()} из ${budget()}). Состав играет ` +
+        'как есть — но чтобы собрать новый, надо будет уложиться в бюджет.'
+      : (inherited
+          ? '↩️ Состав перенесён с прошлой игры — он играет и дальше, пока ты его не поменяешь.'
+          : '');
+    note.classList.toggle('hidden', !note.textContent);
   }
 
   // Плашку показываем только на вкладке состава и только когда набран полный
@@ -795,7 +807,11 @@
       'туда-обратно после каждого матча.<br><br>' +
       `Пока ранг тот же, цена ползёт к уровню формы, но не больше чем на ` +
       `${r.step} за игру и не выходя за полосу ранга. Игр меньше ` +
-      `${r.up_games} — цена стоит: двигать не на чем.`) +
+      `${r.up_games} — цена стоит: двигать не на чем.<br><br>` +
+      '<b>Что будет с моим составом?</b> Цены пересчитываются после каждой ' +
+      'игры. Если твои игроки подорожали и состав вылез за бюджет — он всё ' +
+      'равно играет дальше как есть, очки не отнимаются. Бюджет проверяется ' +
+      'только когда ты собираешь состав заново.') +
       `<div class="sect">Пороги: ↑ подъём / ↓ падение (очков за игру)</div>` + rows;
   }
 
@@ -865,7 +881,8 @@
         'У каждого игрока есть цена — она собрана из его статистики: очки за ' +
         'игру, где текущий сезон весит больше прошлого. Цвет карточки зависит ' +
         'только от цены:<br>' +
-        '💎 Платина — 50 и дороже<br>' +
+        '👑 Элита — 70 и дороже<br>' +
+        '💎 Платина — 50–69<br>' +
         '🥇 Золото — 30–49<br>' +
         '🥈 Серебро — 15–29<br>' +
         '🥉 Бронза — до 14<br>' +
@@ -906,6 +923,34 @@
     } catch (e) { tg && tg.showAlert ? tg.showAlert('Не получилось сохранить.') : 0; }
   }
   window.adminDo = adminDo;
+
+  // Пересчёт цен руками. Тот же расчёт, что после игры: стартовая точка —
+  // цены из листа «Игроки», поэтому правки тренера не перебиваются, а
+  // становятся новой точкой отсчёта. dry=true — только показать.
+  async function recalcPrices(sid, dry) {
+    const btnText = dry ? 'Считаю…' : 'Пересчитываю…';
+    const el = $('adminBody');
+    el.insertAdjacentHTML('afterbegin', `<div class="pstat" id="recalcWait">${btnText}</div>`);
+    try {
+      const r = await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(
+        {action: 'prices_recalc', season_id: sid, value: dry ? 1 : 0})});
+      renderAdmin(r);
+      const res = r.recalc || {};
+      const lines = (res.changes || []).slice(0, 20).map(c =>
+        `${c.name}: ${c.old} → ${c.new} (${c.rank})`).join('\n');
+      const head = (res.changes || []).length
+        ? (dry ? `Изменится ${res.changes.length} из ${res.checked}:`
+               : `Записано ${res.updated} из ${res.checked}:`)
+        : `Проверено ${res.checked || 0} — двигать некого.`;
+      const msg = head + (lines ? '\n\n' + lines : '');
+      tg && tg.showAlert ? tg.showAlert(msg.slice(0, 380)) : alert(msg);
+    } catch (e) {
+      tg && tg.showAlert ? tg.showAlert('Пересчёт не прошёл.') : 0;
+    } finally {
+      const w = $('recalcWait'); if (w) w.remove();
+    }
+  }
+  window.recalcPrices = recalcPrices;
 
   // JSON внутри onclick='...' : апостроф в названии («Кубок 'A'») закрывал бы
   // атрибут и ломал кнопку. Браузер разворачивает сущности до того, как строку
@@ -1025,6 +1070,10 @@
           [1, 3, 5].map(v => `<button class="chip${(s.prices || {}).step === v ? ' on' : ''}" ` +
             `onclick='adminDo({action:"price_step",season_id:${s.id},value:${v}})'>` +
             `шаг ${v}</button>`).join(' ') +
+        `</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip" onclick='recalcPrices(${s.id}, true)'>👀 Показать пересчёт</button> ` +
+          `<button class="chip" onclick='recalcPrices(${s.id}, false)'>💰 Пересчитать цены</button>` +
         `</div>` +
         `<div class="pstat">Чьи игроки в пуле${s.manual_pool ? '' : ' (по умолчанию — наши)'}:</div>` +
         `<div class="bar" style="padding-left:0">${teams || '<span class="pstat">команд не найдено</span>'}</div>` +

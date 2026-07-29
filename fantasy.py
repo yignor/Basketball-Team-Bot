@@ -648,7 +648,19 @@ def apply_game_result(source: str, game_id: Any, game_date_iso: str) -> Dict[str
                     affected.append(str(r["user_id"]))
                     break
         out.append({"season_id": season["id"], "affected": affected})
-    return {"week": wk, "played": len(played), "seasons": out}
+
+    # Цены двигаются ровно здесь — после сыгранной игры, по свежей форме.
+    # Стартовая точка — то, что стоит в листе (в том числе правки тренера),
+    # поэтому пересчёт не спорит с ручной ценой, а продолжает от неё.
+    prices: Dict[str, Any] = {}
+    try:
+        if out:
+            import fantasy_prices
+            prices = fantasy_prices.recalc()
+    except Exception as e:                      # цены — не повод уронить результат
+        logging.getLogger(__name__).warning(f"Пересчёт цен после игры не прошёл: {e}")
+        prices = {"error": str(e)}
+    return {"week": wk, "played": len(played), "seasons": out, "prices": prices}
 
 
 def effective_rosters(season_id: int, at_date_iso: str) -> Dict[str, Dict[str, Any]]:
