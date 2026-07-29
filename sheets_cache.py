@@ -159,6 +159,18 @@ CREATE TABLE IF NOT EXISTS bot_users (
     first_seen_at TEXT NOT NULL
 );
 
+-- Обратная связь от игроков (бэклог п.12). Пишет бот по команде /feedback,
+-- читает админка. Живёт локально: это переписка с админом, не отчётность.
+CREATE TABLE IF NOT EXISTS feedback (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    username    TEXT NOT NULL DEFAULT '',
+    name        TEXT NOT NULL DEFAULT '',
+    message     TEXT NOT NULL,
+    logged_at   TEXT NOT NULL,
+    answered    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS errors (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     source        TEXT NOT NULL,
@@ -944,6 +956,37 @@ def report_error(source: str, message: str, spreadsheet=None) -> None:
             ws.append_row([source, message, datetime.now().strftime("%d.%m.%Y %H:%M")])
         except Exception:
             pass
+
+
+def add_feedback(user_id: Any, username: str, name: str, message: str) -> int:
+    """Сохраняет обращение игрока. Возвращает его номер — его же показываем
+    человеку, чтобы он мог сослаться («по обращению №7…»)."""
+    init_db()
+    with _connection() as conn:
+        cur = conn.execute(
+            """INSERT INTO feedback (user_id, username, name, message, logged_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (str(user_id), username or "", name or "", message[:4000], _now_iso()))
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def get_feedback_page(offset: int = 0, limit: int = 5) -> Dict[str, Any]:
+    init_db()
+    with _connection() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        rows = conn.execute(
+            """SELECT id, user_id, username, name, message, logged_at, answered
+               FROM feedback ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (limit, offset)).fetchall()
+    return {"rows": rows, "total": total, "offset": offset, "limit": limit}
+
+
+def mark_feedback_answered(feedback_id: Any) -> None:
+    init_db()
+    with _connection() as conn:
+        conn.execute("UPDATE feedback SET answered = 1 WHERE id = ?", (int(feedback_id),))
+        conn.commit()
 
 
 def get_errors_page(offset: int = 0, limit: int = 8) -> Dict[str, Any]:

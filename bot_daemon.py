@@ -31,6 +31,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -449,6 +450,62 @@ def _format_progress(source: str, player_id: str) -> str:
         lines.append(f"   форма {arrow} за {form['n']} игр {form['recent']} против "
                      f"{form['earlier']} за предыдущие {form['prev_n']}")
     return "\n".join(lines)
+
+
+# Кто сейчас пишет обращение (нажал /feedback без текста). Только в памяти:
+# после рестарта человек просто нажмёт ещё раз, терять тут нечего.
+_awaiting_feedback: set = set()
+
+FEEDBACK_ASK = ("💬 Напиши одним сообщением, что предложить или что сломалось — "
+                "передам админам.\n\nПередумал — /start.")
+
+
+async def _deliver_feedback(context: ContextTypes.DEFAULT_TYPE, user, text: str) -> int:
+    """Сохраняет обращение и шлёт его админам в личку. Возвращает номер.
+
+    Сначала пишем в базу, потом отправляем: если у админа закрыта личка или
+    Telegram отвалился, обращение всё равно не потеряется — оно видно в
+    админке «Лог действий → Обратная связь»."""
+    fid = sheets_cache.add_feedback(user.id, user.username or "", user.first_name or "", text)
+    who = f"@{user.username}" if user.username else (user.first_name or f"id {user.id}")
+    note = f"💬 Обратная связь №{fid} от {who}:\n\n{text[:3500]}"
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await context.bot.send_message(chat_id=int(admin_id), text=note)
+        except Exception as e:
+            log.warning(f"обратная связь №{fid}: не доставлено админу {admin_id}: {e}")
+    return fid
+
+
+async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/feedback [текст] — обращение к админам (бэклог п.12)."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    text = (msg.text or "").partition(" ")[2].strip()
+    if not text:
+        _awaiting_feedback.add(user.id)
+        await msg.reply_text(FEEDBACK_ASK)
+        return
+    fid = await _deliver_feedback(context, user, text)
+    await msg.reply_text(f"Спасибо, передал (обращение №{fid}).")
+
+
+async def handle_feedback_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Следующее сообщение после /feedback. Висит ПЕРЕД разбором ссылок на
+    профиль, поэтому текст обращения не уедет в привязку id."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    if user.id not in _awaiting_feedback:
+        return
+    _awaiting_feedback.discard(user.id)
+    text = (msg.text or "").strip()
+    if not text:
+        return
+    fid = await _deliver_feedback(context, user, text)
+    await msg.reply_text(f"Спасибо, передал (обращение №{fid}).")
+    raise ApplicationHandlerStop
 
 
 async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1156,6 +1213,7 @@ def _log_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🤖 Лог бота", callback_data="admin:log:bot")],
         [InlineKeyboardButton("👤 Лог пользователей", callback_data="admin:log:users:0")],
         [InlineKeyboardButton("⚠️ Ошибки", callback_data="admin:log:errors:0")],
+        [InlineKeyboardButton("💬 Обратная связь", callback_data="admin:log:feedback:0")],
         _back_button(),
     ])
 
@@ -1225,6 +1283,22 @@ def _render_user_log_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
     if not data["rows"]:
         lines.append("Событий пока нет")
     rows = [_pagination_row("admin:log:users", offset, 10, data["total"])]
+    rows.append(_back_button("admin:menu:log"))
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_feedback_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    data = sheets_cache.get_feedback_page(offset=offset, limit=5)
+    shown_to = min(data["offset"] + len(data["rows"]), data["total"])
+    lines = [f"💬 Обратная связь ({data['offset'] + 1}-{shown_to} из {data['total']})", ""]
+    for r in data["rows"]:
+        who = f"@{r['username']}" if r["username"] else (r["name"] or f"id {r['user_id']}")
+        lines.append(f"№{r['id']} · {who} · {r['logged_at'][:16].replace('T', ' ')}")
+        lines.append(r["message"][:500])
+        lines.append("")
+    if not data["rows"]:
+        lines.append("Обращений пока нет. Игроки шлют их командой /feedback.")
+    rows = [_pagination_row("admin:log:feedback", offset, 5, data["total"])]
     rows.append(_back_button("admin:menu:log"))
     return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
 
@@ -1500,6 +1574,9 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             elif mode == "errors":
                 text, markup = _render_errors_page(offset)
                 await query.edit_message_text(text, reply_markup=markup)
+            elif mode == "feedback":
+                text, markup = _render_feedback_page(offset)
+                await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
@@ -1644,6 +1721,7 @@ async def on_startup(app: Application) -> None:
             BotCommand("start", "Показать кнопку админ-панели"),
             BotCommand("profile", "Мой профиль и прогресс"),
             BotCommand("season", "Создать сезон фэнтези (админ)"),
+            BotCommand("feedback", "Написать админам: идея или проблема"),
         ])
     except Exception as e:
         log.warning(f"Не удалось зарегистрировать список команд: {e}")
@@ -1716,6 +1794,9 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
     app.add_handler(CommandHandler("season", handle_season))
+    app.add_handler(CommandHandler("feedback", handle_feedback))
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_feedback_text))
     app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file)"))
     # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
     # но отвечает, только если в сообщении действительно есть ссылка.
