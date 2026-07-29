@@ -29,6 +29,7 @@ from aiohttp import web
 
 import sheets_cache
 import fantasy
+import fantasy_modes
 import fantasy_stats
 
 log = logging.getLogger(__name__)
@@ -727,6 +728,9 @@ async def handle_admin_state(request: web.Request) -> web.Response:
             "manual_scopes": bool(fantasy.season_scopes(s)),
             "pool_teams": teams,
             "manual_pool": bool(teams),
+            "modes": fantasy_modes.settings(s),
+            "all_modes": [{"id": m, "title": fantasy_modes.MODE_TITLES[m]}
+                          for m in fantasy_modes.ALL_MODES],
             # Команды-кандидаты с отметкой «в пуле» — чтобы команду можно было
             # и убрать, и вернуть, а не только увидеть список выбранных.
             "teams": [{**t, "in_pool": (str(t.get("source")), str(t.get("team_id"))) in in_pool}
@@ -802,6 +806,30 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         fantasy.set_pool_teams(
             [t for t in await _current_pool_teams(season) if str(t.get("team_id")) != tid], sid)
         _pool_cache.pop(str(sid), None)
+    elif action == "mode_toggle":
+        # Режимы включаются набором: можно оставить один, можно дать выбор.
+        # Пустой набор запрещаем — иначе фэнтези становится нечем играть.
+        season = fantasy._get_season(sid)
+        cur = fantasy_modes.enabled(season)
+        want = str(body.get("value") or "")
+        if want not in fantasy_modes.ALL_MODES:
+            return web.json_response({"error": "bad_value"}, status=400)
+        new_modes = [m for m in cur if m != want] if want in cur else cur + [want]
+        if not new_modes:
+            return web.json_response({"error": "need_one_mode"}, status=400)
+        order = {m: i for i, m in enumerate(fantasy_modes.ALL_MODES)}
+        fantasy._update_settings(season, modes=sorted(set(new_modes), key=order.get))
+    elif action == "budget":
+        try:
+            fantasy._update_settings(fantasy._get_season(sid), budget=max(1, int(body.get("value"))))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad_value"}, status=400)
+    elif action == "multiplier":
+        try:
+            fantasy._update_settings(fantasy._get_season(sid),
+                                     cat_multiplier=max(1.0, float(body.get("value"))))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad_value"}, status=400)
     elif action == "player_toggle":
         # Игрока убираем по ИМЕНИ: у него бывает по id в каждой лиге, а решение
         # админа — про человека, а не про строчку ростера. Уже набранные на нём
@@ -872,7 +900,8 @@ async def webapp_shared() -> Optional[Dict[str, Any]]:
         "season": {"name": season["name"], "format": season["format"],
                    "roster_size": fantasy.roster_size(season),
                    "max_per_player": fantasy.max_per_player(season),
-                   "weights": fantasy.season_weights(season)},
+                   "weights": fantasy.season_weights(season),
+                   "modes": fantasy_modes.describe(season)},
         "pool": pool,
         "week_start": week_start,
         "sched_locked": sched_locked,
@@ -965,7 +994,8 @@ async def handle_pool(request: web.Request) -> web.Response:
                               "max_per_player": fantasy.max_per_player(season),
                               # Веса — чтобы экран правил показывал настоящие
                               # начисления сезона, а не переписанный текст.
-                              "weights": fantasy.season_weights(season)},
+                              "weights": fantasy.season_weights(season),
+                              "modes": fantasy_modes.describe(season)},
         "seasons": seasons,
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
@@ -989,6 +1019,8 @@ async def handle_get_roster(request: web.Request) -> web.Response:
     det = fantasy.lock_details() if locked else {}
     return web.json_response({
         "roster": r["refs"] if r else [],
+        "mode": (r.get("mode") if r else "") or fantasy_modes.default_mode(season),
+        "cats": ((r.get("meta") or {}).get("cats") if r else []) or [],
         # перенесён с прошлого раза, а не собран заново — покажем это игроку
         "inherited": bool(r.get("inherited")) if r else False,
         # блокировка — по идущей игре (расписание), даже если своей записи ещё нет
@@ -1012,8 +1044,11 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     try:
         body = await request.json()
         refs = body.get("refs") or []
+        mode = fantasy_modes.normalize(season, body.get("mode"))
+        cats = body.get("cats") or []
     except (json.JSONDecodeError, TypeError):
         return web.json_response({"error": "bad_request"}, status=400)
+    meta = {"cats": list(cats)} if mode == fantasy_modes.CATEGORY else {}
 
     week_start, locked = fantasy.active_selection(season)
     if locked:
@@ -1023,11 +1058,16 @@ async def handle_save_roster(request: web.Request) -> web.Response:
         return web.json_response({"error": "locked", "since": det.get("started_hhmm", "")},
                                  status=409)
 
-    all_pool = await build_pool()
+    all_pool = await build_pool(season=season)
     pool_refs = {p["ref"] for p in all_pool}
-    err = fantasy.validate_roster(season, refs, pool_refs)
+    prices = {p["ref"]: p.get("price", 0)
+              for p in _pool_with_stats(all_pool, season)}
+    err = fantasy.validate_roster(season, refs, pool_refs, mode=mode, meta=meta, prices=prices)
     if err:
-        return web.json_response({"error": err, "expected": fantasy.roster_size(season)}, status=400)
+        return web.json_response(
+            {"error": err, "expected": fantasy_modes.roster_size(season, mode),
+             "budget": fantasy_modes.settings(season)["budget"],
+             "cost": fantasy_modes.cost(refs, prices)}, status=400)
     # Убранных админом игроков брать нельзя.
     excluded_names = set(fantasy.pool_excluded_names(season))
     by_ref = {p["ref"]: p for p in all_pool}
@@ -1038,7 +1078,7 @@ async def handle_save_roster(request: web.Request) -> web.Response:
            for r in refs):
         return web.json_response({"error": "excluded_player"}, status=400)
 
-    res = fantasy.save_roster(uid, season["id"], week_start, refs)
+    res = fantasy.save_roster(uid, season["id"], week_start, refs, mode=mode, meta=meta)
     if not res.get("ok"):
         return web.json_response({"error": res.get("error", "save_failed")}, status=409)
     return web.json_response({"ok": True, "week_start": week_start})

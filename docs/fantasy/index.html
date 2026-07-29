@@ -148,6 +148,8 @@
     <button class="tab hidden" id="tab-admin" onclick="showTab('admin')">⚙️</button>
   </div>
   <div id="draft">
+    <div class="bar hidden" id="modeBar"></div>
+    <div class="bar hidden" id="catBar"></div>
     <div class="bar">
       <input id="search" type="search" placeholder="🔎 Поиск по фамилии" autocomplete="off">
     </div>
@@ -238,6 +240,9 @@
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false, inherited = false;
   let seasonInfo = null;          // сезон целиком — правила берут веса отсюда
+  // Режим сбора состава. Их может быть включено несколько (админка), тогда
+  // человек выбирает перед игрой; при одном включённом переключатель скрыт.
+  let modes = [], mode = 'free', catPick = {}, activeCat = null;
   let pool = [], counts = {}, standings = [], weekStart = '';
   let search = '', playedOnly = false, isAdmin = false;
   let seasonId = null, seasons = [];
@@ -336,6 +341,7 @@
     });
     for (const r of (D.roster || [])) counts[r] = (counts[r] || 0) + 1;
     inherited = !!D.inherited;
+    setModes(D.season.modes, D.mode, D.cats);
     $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
   }
 
@@ -364,6 +370,7 @@
     }));
     for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
     inherited = !!r.inherited;
+    setModes(p.season.modes, r.mode, r.cats);
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
     return true;
   }
@@ -442,7 +449,99 @@
     updateCounter();
   }
 
+  // ─── режимы сбора состава ──────────────────────────────────────────────────
+
+  function modeCfg(id) { return (modes || []).find(m => m.id === (id || mode)) || {}; }
+  const budget = () => modeCfg('budget').budget || 100;
+  const spent = () => selectedRefs().reduce((a, r) => a + (byRef(r).price || 0), 0);
+  const byRef = ref => pool.find(p => p.ref === ref) || {};
+
+  function setModes(list, current, cats) {
+    modes = list || [];
+    const ids = modes.map(m => m.id);
+    mode = ids.includes(current) ? current : (ids[0] || 'free');
+    catPick = {};
+    const slots = (modeCfg('category').categories || []).map(c => c.id);
+    (cats || []).forEach((c, i) => {
+      const refs = selectedRefs();
+      if (slots.includes(c) && refs[i]) catPick[c] = refs[i];
+    });
+    activeCat = slots.find(c => !catPick[c]) || slots[0] || null;
+    renderModeBar();
+  }
+
+  function renderModeBar() {
+    const bar = $('modeBar');
+    bar.classList.toggle('hidden', (modes || []).length < 2);
+    bar.innerHTML = (modes || []).map(m =>
+      `<button class="chip${m.id === mode ? ' on' : ''}" onclick="pickMode('${m.id}')">` +
+      `${esc(m.title)}</button>`).join('');
+    renderCatBar();
+  }
+
+  function pickMode(id) {
+    if (id === mode) return;
+    haptic('light');
+    mode = id;
+    counts = {}; catPick = {};      // правила разные — состав собирается заново
+    const slots = (modeCfg('category').categories || []).map(c => c.id);
+    activeCat = slots[0] || null;
+    renderModeBar(); renderPool(); syncButton();
+  }
+  window.pickMode = pickMode;
+
+  // В категорийном режиме место в составе — это категория: выбираешь слот,
+  // потом игрока. Так виднее, за что он будет приносить очки.
+  function renderCatBar() {
+    const bar = $('catBar');
+    const cats = modeCfg('category').categories || [];
+    const on = mode === 'category' && cats.length;
+    bar.classList.toggle('hidden', !on);
+    if (!on) return;
+    bar.innerHTML = cats.map(c => {
+      const who = catPick[c.id] ? byRef(catPick[c.id]).name || '' : '';
+      const label = who ? `${esc(c.title)}: ${esc(who.split(' ')[0])}` : esc(c.title);
+      return `<button class="chip${c.id === activeCat ? ' on' : ''}" ` +
+             `onclick="pickCat('${c.id}')">${label}</button>`;
+    }).join('');
+  }
+
+  function pickCat(id) {
+    haptic('light');
+    if (activeCat === id && catPick[id]) {        // повторное нажатие — очистить
+      delete counts[catPick[id]];
+      delete catPick[id];
+    }
+    activeCat = id;
+    renderModeBar(); renderPool(); syncButton();
+  }
+  window.pickCat = pickCat;
+
+  function assignCategory(ref) {
+    const cats = (modeCfg('category').categories || []).map(c => c.id);
+    if (!cats.length) return;
+    // Один игрок — одна категория: если он уже где-то стоит, снимаем оттуда.
+    for (const c of cats) if (catPick[c] === ref) { delete catPick[c]; delete counts[ref]; }
+    const slot = activeCat && !catPick[activeCat] ? activeCat : cats.find(c => !catPick[c]);
+    if (!slot) return;
+    catPick[slot] = ref;
+    counts[ref] = 1;
+    activeCat = cats.find(c => !catPick[c]) || slot;
+    haptic('medium');
+    renderModeBar(); renderPool(); syncButton();
+  }
+
   function bump(ref, delta) {
+    if (mode === 'category') {                    // тут плюс/минус не по числу
+      if (locked) return;
+      if (delta > 0) assignCategory(ref);
+      else {
+        for (const c of Object.keys(catPick)) if (catPick[c] === ref) delete catPick[c];
+        delete counts[ref];
+        renderModeBar(); renderPool(); syncButton();
+      }
+      return;
+    }
     const n = counts[ref] || 0;
     if (delta > 0) {
       if (locked || total() >= rosterSize || n >= maxPer) return;
@@ -455,9 +554,20 @@
     renderPool(); syncButton();
   }
 
+  function slots() {
+    const cats = modeCfg('category').categories || [];
+    return mode === 'category' && cats.length ? cats.length : rosterSize;
+  }
+
   function updateCounter() {
-    const hint = maxPer < rosterSize ? ` · до ${maxPer} на игрока` : '';
-    $('counter').textContent = `Выбрано: ${total()} / ${rosterSize}${hint}`;
+    let hint = maxPer < rosterSize ? ` · до ${maxPer} на игрока` : '';
+    if (mode === 'budget') {
+      const left = budget() - spent();
+      hint = ` · бюджет ${spent()}/${budget()}` + (left < 0 ? ' — перебор!' : '');
+    } else if (mode === 'category') {
+      hint = ' · по игроку на категорию';
+    }
+    $('counter').textContent = `Выбрано: ${total()} / ${slots()}${hint}`;
     // Состав живёт, пока его не поменяли: человек должен видеть, что этот
     // набор перенесён с прошлой игры и уже играет — заново собирать не нужно.
     const note = $('carryNote');
@@ -471,7 +581,8 @@
   // ростер — на «Таблице» и на экране игрока сохранять нечего.
   function syncButton() {
     const onDraft = !$('draft').classList.contains('hidden');
-    const ready = onDraft && !locked && total() === rosterSize;
+    const overBudget = mode === 'budget' && spent() > budget();
+    const ready = onDraft && !locked && total() === slots() && !overBudget;
     $('saveBar').classList.toggle('hidden', !ready);
   }
 
@@ -484,6 +595,10 @@
 
   const SAVE_ERRORS = {
     invalid_roster: 'Неверное число игроков.',
+    over_budget: 'Состав дороже бюджета — замени кого-то на подешевле.',
+    no_price: 'У кого-то из выбранных нет цены — напиши админу.',
+    bad_categories: 'Нужно закрыть каждую категорию.',
+    duplicate_player: 'Один игрок может занимать только одну категорию.',
     unknown_player: 'В составе есть игрок не из пула.',
     too_many_copies: 'Слишком много копий одного игрока.',
     locked: 'Идёт игра — состав заморожен. Менять можно будет сразу после результата.',
@@ -492,12 +607,16 @@
 
   async function saveRoster() {
     haptic('heavy');
-    const refs = selectedRefs();
-    if (!live) { tg.sendData(JSON.stringify({ refs })); return; }  // Telegram сам закроет
+    const refs = mode === 'category'
+      ? (modeCfg('category').categories || []).map(c => catPick[c.id])
+      : selectedRefs();
+    const cats = mode === 'category'
+      ? (modeCfg('category').categories || []).map(c => c.id) : [];
+    if (!live) { tg.sendData(JSON.stringify({ refs, mode, cats })); return; }  // Telegram закроет
     const btn = $('saveBtn');
     btn.disabled = true; btn.textContent = 'Сохраняю…';
     try {
-      await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs }) });
+      await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs, mode, cats }) });
       inherited = false;
       tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
                                    buttons:[{type:'close'}]}, () => tg.close())
@@ -679,13 +798,37 @@
           'Таблица начислений подгрузится, когда приложение свяжется с ботом. ' +
           'Открой его заново — или нажми /start в чате, чтобы обновить кнопку.');
 
-    el.innerHTML =
-      ruleCard('🏀 Как играть',
-        `Собери состав из ${size} игроков команды. Одного человека можно взять ` +
+    const ms = s.modes || [];
+    const modeCards = ms.map(m => {
+      if (m.id === 'budget') {
+        return ruleCard('💰 Режим «Бюджет»',
+          `На каждую игру даётся ${m.budget} очков. За них собираешь состав: ` +
+          'у каждого игрока своя цена — чем результативнее, тем дороже. Очки ' +
+          'начисляются за ВСЕ действия выбранных. Бюджет на следующую игру ' +
+          'выдаётся заново и не копится.');
+      }
+      if (m.id === 'category') {
+        const cats = (m.categories || []).map(c => esc(c.title)).join(', ');
+        return ruleCard('🎯 Режим «По категориям»',
+          `Выбираешь по игроку в каждую категорию: ${cats}. Игрок приносит очки ` +
+          `ТОЛЬКО за свою категорию — зато они умножаются на ${m.multiplier}. ` +
+          'Остальная его статистика не считается, один человек — одна категория. ' +
+          'Бюджет тут не нужен.');
+      }
+      return ruleCard('🏀 Режим «Свободный»',
+        `Состав из ${size} игроков, без бюджета. Одного человека можно взять ` +
         (per >= size ? 'несколько раз' : `до ${per} раз(а)`) +
         ' — тогда его очки за игру засчитаются столько раз, сколько слотов ты ' +
-        'ему отдал: два слота — очки идут дважды. Состав сохраняется кнопкой ' +
-        'внизу экрана.') +
+        'ему отдал: два слота — очки идут дважды.');
+    }).join('');
+
+    el.innerHTML =
+      (ms.length > 1
+        ? ruleCard('🎮 Режимы',
+            'Перед игрой выбери, как играть — переключатель наверху вкладки ' +
+            '«Состав». Режимы считаются в один общий зачёт.')
+        : '') +
+      modeCards +
       ruleCard('⏱ Когда меняется',
         'Состав замораживается со стартовым свистком и оттаивает, когда бот ' +
         'пришлёт результат игры в чат. Между играми меняй сколько хочешь.') +
@@ -803,6 +946,12 @@
       // Команды пула: тем же тумблером и добавляем, и убираем — «добавить» без
       // «убрать» уже приводило к тому, что случайно снятую лигу не вернуть.
       const teams = (s.teams || []).map(t => teamChip(s.id, t)).join(' ');
+      // Режимы участия: набором. Один включённый — переключателя у игроков нет.
+      const md = s.modes || {};
+      const modeChips = (s.all_modes || []).map(m =>
+        `<button class="chip${(md.modes || []).includes(m.id) ? ' on' : ''}" ` +
+        `onclick='adminDo({action:"mode_toggle",season_id:${s.id},value:${jattr(m.id)}})'>` +
+        `${(md.modes || []).includes(m.id) ? '✅' : '⚪'} ${esc(m.title)}</button>`).join(' ');
       const excludedCount = (s.players || []).filter(p => p.excluded).length;
       const scopes = (s.scopes || []).map(sc =>
         `<button class="chip on" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${jattr(sc)}})'>` +
@@ -819,6 +968,20 @@
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:1})'>по 1</button>` +
           `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:${s.roster_size}})'>без лимита</button>` +
         `</div>` +
+        `<div class="pstat">Режимы участия:</div>` +
+        `<div class="bar" style="padding-left:0">${modeChips}</div>` +
+        ((md.modes || []).includes('budget')
+          ? `<div class="bar" style="padding-left:0">` +
+            [50, 100, 150].map(v =>
+              `<button class="chip${md.budget === v ? ' on' : ''}" ` +
+              `onclick='adminDo({action:"budget",season_id:${s.id},value:${v}})'>` +
+              `бюджет ${v}</button>`).join(' ') + `</div>` : '') +
+        ((md.modes || []).includes('category')
+          ? `<div class="bar" style="padding-left:0">` +
+            [1.5, 2, 2.5].map(v =>
+              `<button class="chip${md.cat_multiplier === v ? ' on' : ''}" ` +
+              `onclick='adminDo({action:"multiplier",season_id:${s.id},value:${v}})'>` +
+              `коэффициент ×${v}</button>`).join(' ') + `</div>` : '') +
         `<div class="pstat">Чьи игроки в пуле${s.manual_pool ? '' : ' (по умолчанию — наши)'}:</div>` +
         `<div class="bar" style="padding-left:0">${teams || '<span class="pstat">команд не найдено</span>'}</div>` +
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
