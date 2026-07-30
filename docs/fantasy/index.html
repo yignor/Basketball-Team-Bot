@@ -1463,8 +1463,11 @@
     const on = keys.filter(k => (w[k.key] || 0) !== 0).length;
     const rows = keys.map(k => {
       const v = w[k.key] || 0;
+      // Именно text, а не number: на телефоне с русской раскладкой запятая в
+      // числовом поле делает value пустым, и коэффициент молча превратился бы
+      // в ноль. inputmode оставляет цифровую клавиатуру, запятую разбираем сами.
       return `<div class="wrow"><span>${esc(k.title)}</span>` +
-             `<input type="number" step="0.1" inputmode="decimal" ` +
+             `<input type="text" inputmode="decimal" ` +
              `class="${v === 0 ? 'zero' : ''}" data-wkey="${esc(k.key)}" value="${v}"></div>`;
     }).join('');
     return `<details class="adm-players" data-weights="${s.id}"` +
