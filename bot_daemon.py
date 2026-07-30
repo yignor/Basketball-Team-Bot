@@ -1437,6 +1437,10 @@ def _render_link_list() -> Tuple[str, InlineKeyboardMarkup]:
                       f"ещё не заходили или их не опознали."]
         rows.append([InlineKeyboardButton(f"📋 Кого нет в боте ({len(free)})",
                                           callback_data="admin:link:free:0")])
+    linked = sheets_cache.linked_players()
+    if linked:
+        rows.append([InlineKeyboardButton(f"✅ Привязанные ({len(linked)})",
+                                          callback_data="admin:link:linked:0")])
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -1478,6 +1482,57 @@ def _render_link_free(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
     rows = [_pagination_row("admin:link:free", offset, PAGE_SIZE, len(free))]
     rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:link:list")])
     return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _render_link_linked(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    links = sheets_cache.linked_players()
+    page = links[offset:offset + PAGE_SIZE]
+    shown_to = min(offset + len(page), len(links))
+    lines = [f"✅ Привязанные ({offset + 1}-{shown_to} из {len(links)})", "",
+             "Нажми, чтобы снять привязку — например если опознали не того.", ""]
+    rows = []
+    for l in page:
+        who = _name_of(l) or f"строка {l['player_row']}"
+        nick = f"@{l['username']}" if l["username"] else f"id {l['tg_user_id']}"
+        lines.append(f"• {who} — {nick}")
+        rows.append([InlineKeyboardButton(f"✂️ {who} · {nick}"[:64],
+                                          callback_data=f"admin:link:un:{l['tg_user_id']}")])
+    if not page:
+        lines.append("Пока никто не привязан.")
+    nav = _pagination_row("admin:link:linked", offset, PAGE_SIZE, len(links))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:link:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _render_unlink_confirm(uid: str) -> Tuple[str, InlineKeyboardMarkup]:
+    link = next((l for l in sheets_cache.linked_players()
+                 if str(l["tg_user_id"]) == str(uid)), None)
+    if not link:
+        return "Привязки уже нет.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К списку", callback_data="admin:link:list")]])
+    who = _name_of(link) or f"строка {link['player_row']}"
+    nick = f"@{link['username']}" if link["username"] else f"id {uid}"
+    text = (f"✂️ Отвязать {who} от {nick}?\n\n"
+            "У человека сразу пропадёт доступ к фэнтези и личной статистике. "
+            "Уже набранные очки останутся — они привязаны к его id, а не к строке. "
+            "Привязать заново можно тут же.")
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("✂️ Да, отвязать", callback_data=f"admin:link:un2:{uid}")],
+        [InlineKeyboardButton("Отмена", callback_data="admin:link:linked:0")]])
+
+
+def _do_unlink(uid: str) -> str:
+    row = sheets_cache.unlink_player(str(uid))
+    if not row:
+        return "Привязки уже не было."
+    try:
+        sheets_cache.write_player_tg_id(_get_spreadsheet(), int(row), "")
+    except Exception as e:
+        log.warning(f"Отвязка: не удалось стереть id в листе: {e}")
+    log.info(f"Админ снял привязку id {uid} со строки {row}")
+    return f"✂️ Привязка снята, строка {row} снова свободна."
 
 
 def _do_link(uid: str, row_index: int) -> str:
@@ -1824,6 +1879,14 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 text, markup = _render_link_free(int(parts[3]) if len(parts) > 3 else 0)
             elif what == "pick":
                 text, markup = _render_link_pick(parts[3], int(parts[4]) if len(parts) > 4 else 0)
+            elif what == "linked":
+                text, markup = _render_link_linked(int(parts[3]) if len(parts) > 3 else 0)
+            elif what == "un":
+                text, markup = _render_unlink_confirm(parts[3])
+            elif what == "un2":
+                answer = await asyncio.to_thread(_do_unlink, parts[3])
+                text, markup = _render_link_list()
+                text = answer + "\n\n" + text
             elif what == "do":
                 # Привязка ходит в Sheets — в фоновый поток, чтобы не морозить
                 # обработчик кнопок на время сетевого запроса.

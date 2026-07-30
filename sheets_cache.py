@@ -1033,6 +1033,37 @@ def free_player_rows() -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def linked_players() -> List[Dict[str, Any]]:
+    """Кто за какой строкой листа закреплён — для проверки и отвязки."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            """SELECT l.tg_user_id, l.username, l.player_row, l.linked_at,
+                      p.surname, p.name
+               FROM player_links l LEFT JOIN players p ON p.row_index = l.player_row
+               ORDER BY p.surname, p.name""").fetchall()
+    return [dict(r) for r in rows]
+
+
+def unlink_player(tg_user_id: str) -> Optional[int]:
+    """Снимает привязку. Возвращает освобождённую строку листа (или None).
+
+    Чистим и `players.tg_user_id`: пока числовой id стоит в строке, доступ
+    восстанавливается сам при следующем входе (это шаг 2 опознания) — и
+    «отвязка» была бы отвязкой лишь до первого касания."""
+    init_db()
+    with _connection() as conn:
+        row = conn.execute("SELECT player_row FROM player_links WHERE tg_user_id = ?",
+                           (str(tg_user_id),)).fetchone()
+        if not row:
+            return None
+        player_row = int(row["player_row"])
+        conn.execute("DELETE FROM player_links WHERE tg_user_id = ?", (str(tg_user_id),))
+        conn.execute("UPDATE players SET tg_user_id = '' WHERE row_index = ?", (player_row,))
+        conn.commit()
+    return player_row
+
+
 def report_error(source: str, message: str, spreadsheet=None) -> None:
     """Логирует ошибку в SQLite (для быстрого показа в /admin) и, если
     передан spreadsheet, дублирует в лист "Ошибки". Сама никогда не
