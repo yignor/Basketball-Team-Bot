@@ -106,7 +106,6 @@ def _kpi(items: List[Tuple[str, str, str]]) -> str:
 def _games_table(series: List[Dict[str, Any]], limit: int = 20) -> str:
     rows = []
     for g in reversed(series[-limit:]):
-        res = "П" if g["win"] else "❌"
         rows.append(
             f'<tr class="{"w" if g["win"] else "l"}"><td>{_dmy(g["game_date"])}</td>'
             f'<td>{_e(g["opp_name"] or "—")}</td>'

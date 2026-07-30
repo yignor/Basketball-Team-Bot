@@ -459,7 +459,9 @@ def insights(cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
     out.append(f"Баланс {cur['wins']}–{cur['losses']}, разница {cur['diff']:+.1f} за игру "
                f"({cur['for']} забиваем, {cur['against']} пропускаем).")
     h, a = cur["home"], cur["away"]
-    if h["games"] and a["games"]:
+    # Минимум по три игры с каждой стороны: на одной домашней «0 из 1» — это
+    # не вывод, а совпадение, и тренеру такое показывать нельзя.
+    if h["games"] >= 3 and a["games"] >= 3:
         hp, ap = h["wins"] / h["games"], a["wins"] / a["games"]
         if abs(hp - ap) >= 0.25:
             where = "дома" if hp > ap else "в гостях"
