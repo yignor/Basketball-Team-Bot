@@ -937,8 +937,14 @@ def _compress_pool(enriched: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
               "a": st.get("ast", 0), "s": st.get("stl", 0), "b": st.get("blk", 0),
               "t": st.get("tur", 0), "f": st.get("fp", 0),
               "lf": lg.get("fp"), "ld": lg.get("date")} if st else {})
-        out.append({"r": p["ref"], "m": p["name"], "s": s,
-                    "c": p.get("price", 0), "t": p.get("tier", "")})
+        # "n" — игровой номер: в бюджетном режиме он стоит рядом с фамилией
+        # (в кружке — цена), и без него запасной вход показывал бы игроков
+        # без номеров вовсе. Пустые не кладём — payload и так на пределе.
+        item = {"r": p["ref"], "m": p["name"], "s": s,
+                "c": p.get("price", 0), "t": p.get("tier", "")}
+        if p.get("number"):
+            item["n"] = p["number"]
+        out.append(item)
     return out
 
 

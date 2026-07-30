@@ -29,10 +29,19 @@
       background: var(--secondary-bg); color: var(--text); font-weight: 600;
       cursor: pointer; border: none; font-size: 15px; }
     .tab.active { background: var(--button); color: var(--button-text); }
-    .bar { display: flex; align-items: center; gap: 10px; padding: 4px 16px 8px; }
+    .bar { display: flex; align-items: center; gap: 10px; padding: 4px 16px 8px;
+      flex-wrap: wrap; row-gap: 6px; }
     /* В админке рядов кнопок много и подписи турниров длинные — без
        переноса они уезжали за край экрана и были недоступны. */
     #adminBody .bar { flex-wrap: wrap; }
+    /* Категорий пять, и в один ряд они не влезали — уезжали за край экрана.
+       Тот же перенос нужен ряду фильтров: рангов столько же. */
+    #catBar, #filterBar { flex-wrap: wrap; row-gap: 6px; }
+    #filterBar .chip.on { background: var(--button); color: var(--button-text); }
+    /* В бюджетном режиме в кружке слева стоит ЦЕНА (по ней и собирают состав),
+       а игровой номер уходит к фамилии — он там нужен для узнавания. */
+    .num.cost { font-variant-numeric: tabular-nums; }
+    .jersey { color: var(--hint); font-weight: 400; margin-left: 4px; }
     #adminBody .chip { white-space: normal; text-align: left; }
     /* Список игроков в админке — свёрнутый, иначе карточка лиги разъезжается. */
     .adm-players { margin: 6px 0; }
@@ -58,7 +67,9 @@
       font-family: inherit; -webkit-appearance: none; }
     .note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
       line-height: 1.35; background: var(--secondary-bg); color: var(--hint); }
-    .counter { color: var(--hint); font-size: 14px; flex: 1; }
+    /* Счётчик с бюджетом длинный: без запрета переноса он сжимался в столбик
+       из одиночных слов, лишь бы уместиться рядом с кнопкой и сортировкой. */
+    .counter { color: var(--hint); font-size: 14px; flex: 1; white-space: nowrap; }
     select { background: var(--secondary-bg); color: var(--text); border: none;
       border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
     #search { flex: 1; background: var(--secondary-bg); color: var(--text); border: none;
@@ -80,7 +91,12 @@
       color: var(--hint); flex-shrink: 0; }
     .card.sel .num { background: var(--button); color: var(--button-text); }
     .info { flex: 1; min-width: 0; }
-    .pname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Обрезаться должна ТОЛЬКО фамилия: номер и значок ранга — короткие и
+       нужны целиком, иначе «Шлепикас Роман (7)» превращался в «Шлепикас Р…». */
+    .pname { font-weight: 600; display: flex; align-items: baseline; gap: 4px;
+      min-width: 0; }
+    .pname .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pname .tier, .pname .jersey, .pname .chev { flex-shrink: 0; margin-right: 0; }
     .pstat { color: var(--hint); font-size: 12px; margin-top: 2px; }
     .ctrl { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
     .step { width: 30px; height: 30px; border-radius: 8px; border: none; font-size: 18px;
@@ -150,7 +166,9 @@
   </div>
   <div id="draft">
     <div class="bar hidden" id="modeBar"></div>
+    <div class="note hidden" id="modeNote"></div>
     <div class="bar hidden" id="catBar"></div>
+    <div class="bar hidden" id="filterBar"></div>
     <div class="bar">
       <input id="search" type="search" placeholder="🔎 Поиск по фамилии" autocomplete="off">
     </div>
@@ -162,6 +180,7 @@
         <option value="fp">Фэнтези-очки</option>
         <option value="fp_avg">Очки за игру</option>
         <option value="games">Игры</option>
+        <option value="price">Стоимость</option>
         <option value="pts">Очки</option>
         <option value="reb">Подборы</option>
         <option value="ast">Передачи</option>
@@ -333,7 +352,7 @@
     standings = D.standings || [];
     pool = (D.pool || []).map(p => {
       const s = p.s || {};
-      return { ref: p.r, name: p.m || p.r, number: '', team: '',
+      return { ref: p.r, name: p.m || p.r, number: p.n || '', team: '',
         price: p.c || 0, tier: p.t || '',
         st: {games:s.g||0, pts:s.p||0, reb:s.rb||0, ast:s.a||0,
              stl:s.s||0, blk:s.b||0, tur:s.t||0, fp:s.f||0,
@@ -380,9 +399,12 @@
 
   function sortPool() {
     const key = $('sort').value;
+    // Цена живёт на самом игроке, а не в его статистике: сортировать по ней
+    // надо отдельной веткой, иначе список молча не менял порядок.
+    const val = p => key === 'price' ? (p.price || 0) : (p.st[key] || 0);
     pool.sort((a, b) => key === 'name'
       ? a.name.localeCompare(b.name, 'ru')
-      : (b.st[key] || 0) - (a.st[key] || 0) || a.name.localeCompare(b.name, 'ru'));
+      : val(b) - val(a) || a.name.localeCompare(b.name, 'ru'));
   }
 
   // Под фамилией — очки за последнюю игру + подсказка тапнуть за подробностями.
@@ -420,11 +442,58 @@
     if (counts[p.ref]) return true;
     if (search && p.name.toLowerCase().indexOf(search) < 0) return false;
     if (playedOnly && !(p.st && p.st.games)) return false;
+    if (tierFilter.size && !tierFilter.has(p.tier)) return false;
+    if (affordable && (p.price || 0) > budget() - spent()) return false;
     return true;
   }
 
+  // Ранг — это и есть ценовая полоса (бронза 5–14, серебро 15–29 и так далее),
+  // поэтому фильтр один: чип показывает и ранг, и диапазон. Отдельный список
+  // «ценовых диапазонов» дублировал бы эти же границы.
+  let tierFilter = new Set(), affordable = false;
+
+  function rankBands() {
+    const info = (seasonInfo && seasonInfo.ranks && seasonInfo.ranks.ranks) || [];
+    if (info.length) return info.map(r => ({rank: r.rank, low: r.low, high: r.high}));
+    // Запасной вход (данные приехали в кнопке, а не из API) — полос не знаем,
+    // собираем список из того, что есть у игроков в пуле.
+    const seen = [];
+    for (const k of Object.keys(TIER_ICON)) if (pool.some(p => p.tier === k)) seen.push({rank: k});
+    return seen;
+  }
+
+  function renderFilterBar() {
+    const bar = $('filterBar');
+    const on = mode === 'budget';
+    bar.classList.toggle('hidden', !on);
+    if (!on) { tierFilter.clear(); affordable = false; return; }
+    const left = budget() - spent();
+    bar.innerHTML = rankBands().map(b => {
+      const band = b.low ? ` ${b.low}–${b.high}` : '';
+      return `<button class="chip${tierFilter.has(b.rank) ? ' on' : ''}" ` +
+        `onclick="toggleTier(${jattr(b.rank)})">${TIER_ICON[b.rank] || ''}${band}</button>`;
+    }).join('') +
+      `<button class="chip${affordable ? ' on' : ''}" onclick="toggleAffordable()">` +
+      `💰 по карману (${left >= 0 ? left : 'перебор'})</button>`;
+  }
+
+  function toggleTier(rank) {
+    haptic('light');
+    tierFilter.has(rank) ? tierFilter.delete(rank) : tierFilter.add(rank);
+    renderFilterBar(); renderPool();
+  }
+  window.toggleTier = toggleTier;
+
+  function toggleAffordable() {
+    haptic('light');
+    affordable = !affordable;
+    renderFilterBar(); renderPool();
+  }
+  window.toggleAffordable = toggleAffordable;
+
   function renderPool() {
     sortPool();
+    renderFilterBar();
     const el = $('pool'); el.innerHTML = '';
     const full = total() >= rosterSize;
     const visible = pool.filter(passesFilter);
@@ -438,11 +507,16 @@
         `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
         `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
         `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>`;
-      c.innerHTML =
-        `<div class="num">${esc(p.number || '—')}</div>` +
-        `<div class="info"><div class="pname">${tierBadge(p)}${esc(p.name)}` +
+      const costMode = mode === 'budget';
+      const badge = costMode
+        ? `<div class="num cost" title="стоимость">${p.price || '—'}</div>`
+        : `<div class="num">${esc(p.number || '—')}</div>`;
+      const jersey = costMode && p.number ? `<span class="jersey">(${esc(p.number)})</span>` : '';
+      c.innerHTML = badge +
+        `<div class="info"><div class="pname">${tierBadge(p)}` +
+        `<span class="nm">${esc(p.name)}</span>${jersey}` +
         (live ? '<span class="chev">›</span>' : '') + `</div>` +
-        `<div class="pstat">${priceLabel(p)}${esc(statLine(p))}</div></div>` +
+        `<div class="pstat">${costMode ? '' : priceLabel(p)}${esc(statLine(p))}</div></div>` +
         `<div class="ctrl">${ctrl}</div>`;
       const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
       const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
@@ -463,6 +537,10 @@
     modes = list || [];
     const ids = modes.map(m => m.id);
     mode = ids.includes(current) ? current : (ids[0] || 'free');
+    // Режим сохранённого состава: играть можно только в одном, поэтому надо
+    // помнить, откуда человек уходит, если начал собирать в другом.
+    savedMode = ids.includes(current) ? current : '';
+    savedCount = Object.keys(counts).length;
     catPick = {};
     const slots = (modeCfg('category').categories || []).map(c => c.id);
     (cats || []).forEach((c, i) => {
@@ -473,12 +551,29 @@
     renderModeBar();
   }
 
+  let savedMode = '', savedCount = 0;
+
+  const modeTitle = id => (modes.find(m => m.id === id) || {}).title || id;
+
+  // Предупреждаем ЗАРАНЕЕ, а не только в момент сохранения: человек должен
+  // понимать, что собирает второй состав ВЗАМЕН первого, а не вдобавок.
+  function renderModeNote() {
+    const el = $('modeNote');
+    const switching = savedCount && savedMode && savedMode !== mode;
+    el.textContent = switching
+      ? `⚠️ У тебя уже собран состав в режиме «${modeTitle(savedMode)}». Играть ` +
+        'можно только в одном: сохранишь этот — прежний сбросится.'
+      : '';
+    el.classList.toggle('hidden', !switching);
+  }
+
   function renderModeBar() {
     const bar = $('modeBar');
     bar.classList.toggle('hidden', (modes || []).length < 2);
     bar.innerHTML = (modes || []).map(m =>
       `<button class="chip${m.id === mode ? ' on' : ''}" onclick="pickMode('${m.id}')">` +
       `${esc(m.title)}</button>`).join('');
+    renderModeNote();
     renderCatBar();
   }
 
@@ -487,8 +582,10 @@
     haptic('light');
     mode = id;
     counts = {}; catPick = {};      // правила разные — состав собирается заново
+    inherited = false;              // и перенесённым он больше не считается
     const slots = (modeCfg('category').categories || []).map(c => c.id);
     activeCat = slots[0] || null;
+    tierFilter.clear(); affordable = false;
     renderModeBar(); renderPool(); syncButton();
   }
   window.pickMode = pickMode;
@@ -617,8 +714,28 @@
     not_a_member: 'У тебя нет доступа к фэнтези — она только для игроков команды.',
   };
 
+  function confirmModeSwitch() {
+    const text = 'Играть можно только в одном режиме. Состав в режиме ' +
+      `«${modeTitle(savedMode)}» сбросится, в зачёт пойдёт новый.`;
+    return new Promise(resolve => {
+      if (tg && tg.showPopup) {
+        tg.showPopup({title: 'Сменить режим?', message: text.slice(0, 250),
+                      buttons: [{id: 'ok', type: 'destructive', text: 'Сохранить'},
+                                {id: 'no', type: 'cancel'}]},
+                     id => resolve(id === 'ok'));
+      } else if (tg && tg.showConfirm) {
+        tg.showConfirm(text, ok => resolve(!!ok));
+      } else {
+        resolve(window.confirm(text));
+      }
+    });
+  }
+
   async function saveRoster() {
     haptic('heavy');
+    if (savedCount && savedMode && savedMode !== mode) {
+      if (!await confirmModeSwitch()) return;
+    }
     const refs = mode === 'category'
       ? (modeCfg('category').categories || []).map(c => catPick[c.id])
       : selectedRefs();
@@ -630,6 +747,7 @@
     try {
       await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs, mode, cats }) });
       inherited = false;
+      savedMode = mode; savedCount = refs.length; renderModeNote();
       tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
                                    buttons:[{type:'close'}]}, () => tg.close())
                    : tg.close();
