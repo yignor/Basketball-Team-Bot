@@ -87,8 +87,45 @@ def public_api_url() -> str:
     return url if url and _resolves(url) else ""
 
 
+_funnel_ips: Tuple[float, List[str]] = (0.0, [])
+_FUNNEL_IP_TTL = 3600
+
+
+async def _funnel_public_ips() -> List[str]:
+    """Публичные адреса ingress'а Funnel — через сторонний DNS-over-HTTPS.
+
+    Системный резолвер сервера отвечать на этот вопрос не годится: MagicDNS
+    Tailscale подставляет tailnet-адрес (100.x), и запрос уходит в самого себя
+    по локальной сети. Ingress при этом остаётся холодным — то есть «прогрев»
+    грел бы петлю, а не тот путь, по которому идут игроки."""
+    global _funnel_ips
+    now = time.time()
+    if now - _funnel_ips[0] < _FUNNEL_IP_TTL and _funnel_ips[1]:
+        return _funnel_ips[1]
+    import aiohttp
+    from urllib.parse import urlparse
+    host = urlparse(FUNNEL_URL).hostname or ""
+    ips: List[str] = []
+    for doh in ("https://dns.google/resolve", "https://cloudflare-dns.com/dns-query"):
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(doh, params={"name": host, "type": "A"},
+                                    headers={"accept": "application/dns-json"},
+                                    timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    data = await r.json(content_type=None)
+            ips = [a["data"] for a in (data.get("Answer") or [])
+                   if a.get("type") == 1 and a.get("data")]
+            if ips:
+                break
+        except Exception:
+            continue
+    if ips:
+        _funnel_ips = (now, ips)
+    return ips
+
+
 async def keep_funnel_warm(timeout: float = 30.0) -> Optional[float]:
-    """Стучится в СВОЙ публичный адрес снаружи. Возвращает время ответа, сек
+    """Стучится в СВОЙ публичный вход снаружи. Возвращает время ответа, сек
     (None — не достучались).
 
     Funnel засыпает: первый запрос после простоя поднимает соединение и идёт
@@ -96,22 +133,33 @@ async def keep_funnel_warm(timeout: float = 30.0) -> Optional[float]:
     получал таймаут и уходил в запасной режим на пустом месте. Регулярный пинг
     не даёт каналу остыть.
 
-    Ходим именно по внешнему адресу, а не в 127.0.0.1: греть надо весь путь
-    (DNS, ingress Tailscale, TLS), а не локальный сокет. Заодно в журнале
-    появляется честная история доступности."""
+    Идём по ПУБЛИЧНОМУ ip ingress'а, подставляя имя в Host и SNI: только так
+    греется тот же путь, по которому приходят игроки. По имени запрос
+    заворачивался бы MagicDNS обратно в машину (проверено: 8 мс против 300 —
+    это и была подсказка, что грелась петля)."""
     if not FUNNEL_URL:
         return None
     import aiohttp
+    from urllib.parse import urlparse
+    host = urlparse(FUNNEL_URL).hostname or ""
+    ips = await _funnel_public_ips()
     started = time.time()
     try:
         async with aiohttp.ClientSession() as sess:
-            async with sess.get(f"{FUNNEL_URL}/health",
-                                timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            if ips:
+                r = await sess.get(f"https://{ips[0]}/health", headers={"Host": host},
+                                   server_hostname=host,
+                                   timeout=aiohttp.ClientTimeout(total=timeout))
+            else:
+                # Публичные адреса не выяснили — лучше согреть хоть как-то.
+                r = await sess.get(f"{FUNNEL_URL}/health",
+                                   timeout=aiohttp.ClientTimeout(total=timeout))
+            async with r:
                 await r.read()
-                took = time.time() - started
-                if took > 3:
-                    log.info("Funnel прогрет за %.1fс (был холодный)", took)
-                return took
+            took = time.time() - started
+            if took > 3:
+                log.info("Funnel прогрет за %.1fс (был холодный)", took)
+            return took
     except Exception as e:
         log.warning("Funnel не отвечает (%.0fс): %s", time.time() - started, e)
         return None
