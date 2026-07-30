@@ -45,6 +45,14 @@
     #adminBody .chip { white-space: normal; text-align: left; }
     /* Список игроков в админке — свёрнутый, иначе карточка лиги разъезжается. */
     .adm-players { margin: 6px 0; }
+    /* Редактор начислений: подпись слева, число справа. Инпуты узкие —
+       коэффициенты короткие, а на телефоне важнее видеть подписи целиком. */
+    .wrow { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+    .wrow span { flex: 1; font-size: 14px; }
+    .wrow input { width: 76px; text-align: center; padding: 6px; border-radius: 8px;
+      border: 1px solid var(--hint); background: var(--bg); color: var(--text); }
+    .wrow input.zero { opacity: .55; }
+    .wnote { color: var(--hint); font-size: 12px; padding: 4px 0 8px; }
     .adm-players > summary { cursor: pointer; font-size: 13px; padding: 6px 0; color: var(--hint); }
     .adm-players .card { padding: 6px 8px; }
     .plinks a { color: var(--button); text-decoration: none; }
@@ -1101,12 +1109,18 @@
   // состава админ меняет на ходу, и правила обязаны меняться вместе с ними —
   // иначе экран начнёт врать в первый же день после правки.
 
+  // Подписи начислений. Каталог живёт на сервере (fantasy_stats.SCORING_KEYS)
+  // и приезжает в админке; здесь — запасной словарь для экрана правил, куда
+  // каталог не передаётся.
   const WEIGHT_TITLES = {
-    pts: 'Очко', reb: 'Подбор', ast: 'Передача', stl: 'Перехват',
-    blk: 'Блок-шот', tur: 'Потеря', pf: 'Фол', kpi: 'КПИ',
+    pts: 'Очко', reb: 'Подбор', reb_off: 'Подбор в атаке',
+    reb_def: 'Подбор в защите', ast: 'Передача', stl: 'Перехват',
+    blk: 'Блок-шот', tur: 'Потеря', pf: 'Свой фол', foul_on: 'Фол на тебе',
     miss: 'Промах с игры', ftmiss: 'Промах штрафного',
-    foul_on: 'Фол на тебе',
-    dd: 'Дабл-дабл', td: 'Трипл-дабл',
+    fgm: 'Попадание с игры', fga: 'Бросок с игры',
+    tpm: 'Трёхочковое попадание', tpa: 'Трёхочковый бросок',
+    ftm: 'Штрафной точный', fta: 'Штрафной бросок',
+    dd: 'Дабл-дабл', td: 'Трипл-дабл', kpi: 'КПИ',
     plus_minus: 'Плюс-минус', mins: 'Минута на площадке',
   };
 
@@ -1148,7 +1162,9 @@
     const size = s.roster_size || rosterSize;
     const per = s.max_per_player || maxPer;
     const w = s.weights || {};
-    const keys = Object.keys(w);
+    // Нулевые показатели в правила не выносим: список стал полным каталогом,
+    // и половина строк была бы «×0» — шум вместо правил.
+    const keys = Object.keys(w).filter(k => (w[k] || 0) !== 0);
     const rows = keys.length
       ? `<div class="sect">Сколько дают действия</div>` + keys.map(k =>
           `<div class="row"><span>${esc(WEIGHT_TITLES[k] || k)}</span>` +
@@ -1413,6 +1429,7 @@
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
         `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны — очки не считаются!</span>'}</div>` +
         (add ? `<div class="pstat">Можно добавить:</div><div class="bar" style="padding-left:0">${add}</div>` : '') +
+        weightsBlock(s, d) +
         `<details class="adm-players" data-season="${s.id}"` +
         `${openPlayers.has(s.id) ? ' open' : ''}>` +
         `<summary>Игроки пула: ${(s.players || []).length}` +
@@ -1422,12 +1439,67 @@
           `<button class="chip" onclick='confirmFinish(${s.id}, ${jattr(s.name)})'>🏁 Завершить лигу</button>` +
         `</div>`;
       el.appendChild(box);
-      const det = box.querySelector('details.adm-players');
+      const det = box.querySelector('details[data-season]');
       if (det) det.addEventListener('toggle', () => {
         if (det.open) openPlayers.add(s.id); else openPlayers.delete(s.id);
       });
+      const wdet = box.querySelector('details[data-weights]');
+      if (wdet) wdet.addEventListener('toggle', () => {
+        if (wdet.open) openWeights.add(s.id); else openWeights.delete(s.id);
+      });
     }
   }
+
+  // Начисления правятся по строкам протокола: у каждого показателя свой
+  // коэффициент, невключённые стоят нулями и в подсчёт не идут. Сохраняем ВЕСЬ
+  // набор разом — правят обычно несколько строк сразу, и гонять сезон через
+  // десяток запросов ни к чему.
+  const openWeights = new Set();
+
+  function weightsBlock(s, d) {
+    const w = s.weights || {};
+    const keys = (d.weight_keys || []).length
+      ? d.weight_keys : Object.keys(w).map(k => ({key: k, title: k}));
+    const on = keys.filter(k => (w[k.key] || 0) !== 0).length;
+    const rows = keys.map(k => {
+      const v = w[k.key] || 0;
+      return `<div class="wrow"><span>${esc(k.title)}</span>` +
+             `<input type="number" step="0.1" inputmode="decimal" ` +
+             `class="${v === 0 ? 'zero' : ''}" data-wkey="${esc(k.key)}" value="${v}"></div>`;
+    }).join('');
+    return `<details class="adm-players" data-weights="${s.id}"` +
+      `${openWeights.has(s.id) ? ' open' : ''}>` +
+      `<summary>Начисления за действия: включено ${on} из ${keys.length}</summary>` +
+      `<div class="wnote">Ноль — показатель не считается. Минус — штраф. ` +
+      `«Подбор (всего)» уже включает атакующие и защитные: задавай что-то одно, ` +
+      `иначе они посчитаются дважды.</div>` +
+      rows +
+      `<div class="bar" style="padding-left:0">` +
+      `<button class="chip on" onclick="saveWeights(${s.id})">💾 Сохранить начисления</button>` +
+      `</div></details>`;
+  }
+
+  async function saveWeights(sid) {
+    const box = document.querySelector(`details[data-weights="${sid}"]`);
+    if (!box) return;
+    const value = {};
+    for (const inp of box.querySelectorAll('input[data-wkey]')) {
+      const num = parseFloat(String(inp.value).replace(',', '.'));
+      value[inp.dataset.wkey] = isNaN(num) ? 0 : num;
+    }
+    openWeights.add(sid);                 // после перерисовки блок остаётся открыт
+    try {
+      renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(
+        {action: 'weights', season_id: sid, value})}));
+      haptic('heavy');
+      const msg = 'Начисления сохранены. Очки за уже сыгранные игры не ' +
+        'пересчитываются — новые правила работают со следующей игры.';
+      tg && tg.showAlert ? tg.showAlert(msg) : alert(msg);
+    } catch (e) {
+      tg && tg.showAlert ? tg.showAlert('Не получилось сохранить начисления.') : 0;
+    }
+  }
+  window.saveWeights = saveWeights;
 
   function createSeason() {
     // В попапе Telegram нет поля ввода, но само приложение — обычная страница:

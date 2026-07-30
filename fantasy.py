@@ -248,7 +248,13 @@ def season_weights(season: Dict[str, Any]) -> Dict[str, float]:
         stored = {k: float(v) for k, v in w.items()} if w else {}
     except (json.JSONDecodeError, TypeError, ValueError):
         stored = {}
-    return {**fantasy_stats.DEFAULT_WEIGHTS, **stored}
+    # Полный каталог с нулями по умолчанию, поверх — дефолты, поверх — то, что
+    # выставил админ. Так новый показатель появляется у всех сезонов сразу и
+    # ничего не весит, пока его не включили.
+    base = {k: 0.0 for k, _t in fantasy_stats.SCORING_KEYS}
+    base.update(fantasy_stats.DEFAULT_WEIGHTS)
+    base.update(stored)
+    return base
 
 
 def season_settings(season: Dict[str, Any]) -> Dict[str, Any]:
@@ -285,12 +291,16 @@ def set_weights(weights: Dict[str, float], season_id: int) -> bool:
     """Веса начисления очков. Менять их задним числом безопасно: очки уже
     сыграных игр зафиксированы снимками (см. record_game_scores) и не
     пересчитываются."""
+    # Идём по ПОЛНОМУ каталогу показателей: админка правит любой, а не только
+    # те, что были в дефолтах. Чего нет в присланном — берём из дефолтов, а
+    # если и там нет, показатель просто не участвует (вес 0).
     clean = {}
-    for key in fantasy_stats.DEFAULT_WEIGHTS:
+    for key, _title in fantasy_stats.SCORING_KEYS:
+        fallback = fantasy_stats.DEFAULT_WEIGHTS.get(key, 0.0)
         try:
-            clean[key] = round(float(weights.get(key, fantasy_stats.DEFAULT_WEIGHTS[key])), 2)
+            clean[key] = round(float(weights.get(key, fallback)), 2)
         except (TypeError, ValueError):
-            clean[key] = fantasy_stats.DEFAULT_WEIGHTS[key]
+            clean[key] = fallback
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         conn.execute("UPDATE fantasy_seasons SET scoring_json=? WHERE id=?",

@@ -933,8 +933,13 @@ async def handle_admin_state(request: web.Request) -> web.Response:
     for s_ in seasons:
         keys = {fantasy._scope_key(x) for x in s_["scopes"]}
         s_["can_add"] = [a for a in avail if fantasy._scope_key(a) not in keys]
-    return web.json_response({"seasons": seasons, "available": avail,
-                              "weight_keys": list(fantasy_stats.DEFAULT_WEIGHTS)})
+    return web.json_response({
+        "seasons": seasons, "available": avail,
+        # Полный каталог показателей с подписями — админка правит любой из них,
+        # а не только те, что уже включены.
+        "weight_keys": [{"key": k, "title": t} for k, t in fantasy_stats.SCORING_KEYS],
+        "weight_overlap": fantasy_stats.OVERLAPPING,
+    })
 
 
 async def handle_admin_action(request: web.Request) -> web.Response:
@@ -998,6 +1003,13 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         fantasy.set_pool_teams(
             [t for t in await _current_pool_teams(season) if str(t.get("team_id")) != tid], sid)
         _pool_cache.pop(str(sid), None)
+    elif action == "weights":
+        # Пришёл весь набор разом: правится обычно несколько строк сразу, и
+        # сохранять их по одной значило бы гонять сезон через десяток запросов.
+        value = body.get("value")
+        if not isinstance(value, dict):
+            return web.json_response({"error": "bad_value"}, status=400)
+        fantasy.set_weights(value, sid)
     elif action == "prices_recalc":
         # Ручной прогон того же пересчёта, что идёт после игры: удобно, когда
         # тренер только что поправил цены и хочет увидеть, что выйдет.
