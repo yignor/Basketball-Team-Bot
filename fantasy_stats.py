@@ -34,7 +34,8 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     # не того, кто много бросает, а того, кто попадает.
     "miss": -0.5,      # промах с игры
     "ftmiss": -0.5,    # промах штрафного
-    "pf": -0.5,        # фол
+    "pf": -0.5,        # свой фол
+    "foul_on": 1.0,    # фол, заработанный игроком (на нём сфолили)
     "dd": 3.0,         # дабл-дабл
     "td": 5.0,         # трипл-дабл (вместо дабл-дабла, не сверх него)
 }
@@ -85,8 +86,8 @@ def _store_player_row(conn, source: str, game_id: str, game_date: str,
         INSERT INTO game_player_stats
         (source, game_id, player_id, team_id, number, game_date, season_id, stage_id,
          pts, reb, reb_off, reb_def, ast, stl, blk, tur, pf,
-         fgm, fga, tpm, tpa, ftm, fta, secs, plus_minus, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         foul_on, fgm, fga, tpm, tpa, ftm, fta, secs, plus_minus, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source, game_id, player_id) DO UPDATE SET
             team_id=excluded.team_id, number=excluded.number,
             game_date=excluded.game_date, season_id=excluded.season_id,
@@ -94,6 +95,7 @@ def _store_player_row(conn, source: str, game_id: str, game_date: str,
             pts=excluded.pts, reb=excluded.reb, reb_off=excluded.reb_off,
             reb_def=excluded.reb_def, ast=excluded.ast, stl=excluded.stl,
             blk=excluded.blk, tur=excluded.tur, pf=excluded.pf,
+            foul_on=excluded.foul_on,
             fgm=excluded.fgm, fga=excluded.fga, tpm=excluded.tpm, tpa=excluded.tpa,
             ftm=excluded.ftm, fta=excluded.fta,
             secs=excluded.secs, plus_minus=excluded.plus_minus,
@@ -103,6 +105,7 @@ def _store_player_row(conn, source: str, game_id: str, game_date: str,
          game_date, str(season_id), str(stage_id or ""),
          s.get("pts", 0), s.get("reb", 0), s.get("reb_off", 0), s.get("reb_def", 0),
          s.get("ast", 0), s.get("stl", 0), s.get("blk", 0), s.get("tur", 0), s.get("pf", 0),
+         s.get("foul_on", 0),
          s.get("fgm", 0), s.get("fga", 0), s.get("tpm", 0), s.get("tpa", 0),
          s.get("ftm", 0), s.get("fta", 0),
          s.get("secs", 0), s.get("plus_minus", 0), sheets_cache.now_iso()),
@@ -165,6 +168,7 @@ def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
                 "player_id": p.player_id, "number": p.number,
                 "pts": p.pts, "reb": p.reb, "reb_off": p.reb_o, "reb_def": p.reb_d,
                 "ast": p.ast, "stl": p.stl, "blk": p.blk, "tur": p.tur, "pf": p.pf,
+                "foul_on": p.foul_on,
                 "fgm": p.fg2m + p.fg3m, "fga": p.fg2a + p.fg3a,
                 "tpm": p.fg3m, "tpa": p.fg3a, "ftm": p.ftm, "fta": p.fta,
                 # Время SLPRO отдаёт секундами; плюс-минус в бокс-скоре нет.
@@ -231,6 +235,8 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
                 "reb_off": p.get("offensive_rebounds", 0), "reb_def": p.get("defensive_rebounds", 0),
                 "ast": p.get("assists", 0), "stl": p.get("steals", 0),
                 "blk": p.get("blocks", 0), "tur": p.get("turnovers", 0), "pf": p.get("fouls", 0),
+                # Инфобаскет отдаёт это готовым полем OpponentFoul.
+                "foul_on": p.get("opponent_fouls", 0),
                 "fgm": (p.get("field_goals_made", 0) + p.get("three_pointers_made", 0)),
                 "fga": (p.get("field_goals_attempted", 0) + p.get("three_pointers_attempted", 0)),
                 "tpm": p.get("three_pointers_made", 0), "tpa": p.get("three_pointers_attempted", 0),
@@ -487,7 +493,7 @@ def game_points(refs: List[str], source: str, game_id: Any,
 
 # Колонки, по которым имеет смысл суммировать (покрывают любые веса сезона).
 AGG_COLUMNS = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur",
-               "pf", "fgm", "fga", "tpm", "tpa", "ftm", "fta")
+               "pf", "foul_on", "fgm", "fga", "tpm", "tpa", "ftm", "fta")
 
 # Те же derived_stats, но на языке SQL: промахи складываются из сумм, а
 # дабл-даблы — только поштучно по играм, суммой их не восстановить.

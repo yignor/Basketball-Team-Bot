@@ -89,6 +89,47 @@ async def _slpro_stages(client, scope: str, team_names: List[str]) -> List[Dict[
     return [s for s in stages if s.get("season_id") in seasons]
 
 
+async def refetch_our_games(client, team_names: Optional[List[str]] = None,
+                            limit: int = 80, delay: float = DEFAULT_DELAY) -> BackfillStats:
+    """Перекачивает игры НАШИХ команд заново, свежим парсером.
+
+    Нужна, когда парсер научился новому: старые строки уже лежат в базе, и
+    сами по себе не обновятся — `is_game_fetched` больше не пустит бота за
+    этой игрой. Своих игр немного (десятки), поэтому проще перекачать все,
+    чем угадывать, каких именно полей не хватает."""
+    import slpro_client
+    import slpro_game
+
+    st = BackfillStats()
+    for ctx in await slpro_client.team_contexts(team_names or []):
+        team_id = ctx.get("team_id")
+        for g in await client.get_schedule(ctx):
+            if st.fetched >= limit:
+                st.remaining += 1
+                continue
+            if g.get("status") != SLPRO_FINISHED:
+                st.skipped_live += 1
+                continue
+            if team_id is not None and team_id not in (g.get("home_id"), g.get("guest_id")):
+                continue
+            gid = str(g.get("game_id"))
+            try:
+                resp = await client.get_game(gid, ctx)
+                box = slpro_game.parse_box_score(resp) if resp else None
+            except Exception as e:
+                log.warning("перекачка %s: %s", gid, e)
+                box = None
+            if not box:
+                st.failed += 1
+                continue
+            fantasy_stats.store_slpro_box(box, str(ctx.get("season_id") or ""),
+                                          ctx.get("stage_id") or "")
+            st.fetched += 1
+            await asyncio.sleep(delay)
+    log.info("перекачка наших игр: скачано %d, ошибок %d", st.fetched, st.failed)
+    return st
+
+
 async def refetch_missing_stage(client, team_names: Optional[List[str]] = None,
                                 delay: float = DEFAULT_DELAY) -> BackfillStats:
     """Прицельно перекачивает игры без стадии — по контекстам НАШИХ команд.

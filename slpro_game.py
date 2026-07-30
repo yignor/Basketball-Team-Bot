@@ -43,6 +43,7 @@ class PlayerStat:
     tur: int = 0
     blk: int = 0
     pf: int = 0
+    foul_on: int = 0             # фолы, заработанные игроком (на нём сфолили)
     time_played: int = 0
     plus_minus: int = 0
     start_five: bool = False
@@ -189,6 +190,11 @@ def parse_box_score(resp: Dict[str, Any]) -> Optional[BoxScore]:
             p.blk += 1
         elif action in ("foul", "unsportfoul"):
             p.pf += 1
+        elif action == "foul_on_player":
+            # Отдельное событие: на ком сфолили. В протоколе оно есть почти у
+            # каждого фола (31 из 32 в проверенной игре), поэтому заработанные
+            # фолы можно считать честно, а не выводить из штрафных бросков.
+            p.foul_on += 1
 
     box.quarters = [(quarter_pts[per][0], quarter_pts[per][1]) for per in sorted(quarter_pts)]
     return box

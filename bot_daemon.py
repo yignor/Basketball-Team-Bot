@@ -1059,6 +1059,8 @@ def _stats_screen() -> Tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(
             f"⬇️ Перекачать без стадии сейчас ({no_stage})",
             callback_data="admin:stats:now")])
+    rows.append([InlineKeyboardButton("🔄 Перекачать наши игры (свежим парсером)",
+                                      callback_data="admin:stats:ours")])
     if stale or no_stage:
         lines.append("Пометить их — и ночной бэкфилл перекачает протоколы "
                      "порциями по 200 за ночь. Уже скачанное не трогается.")
@@ -1623,6 +1625,29 @@ async def _render_prog_team(source: str, team_id: str) -> Tuple[str, InlineKeybo
         [InlineKeyboardButton("⬅️ К командам", callback_data="admin:prog:list")]])
 
 
+async def _refetch_our_games_now(query) -> None:
+    """Перекачка своих игр — после того, как парсер научился новому полю."""
+    import stats_backfill
+    import slpro_client
+    try:
+        teams = slpro_client.config_team_names() or slpro_client.env_team_names()
+        st = await stats_backfill.refetch_our_games(slpro_client.SlproClient(), teams)
+        with sheets_cache.get_connection() as conn:
+            got = conn.execute(
+                """SELECT COUNT(*) FROM game_player_stats
+                   WHERE source = 'slpro' AND foul_on > 0""").fetchone()[0]
+        text = (f"✅ Наши игры перекачаны.\n\n"
+                f"Скачано: {st.fetched}, ошибок: {st.failed}.\n"
+                f"Строк с заработанными фолами: {got}.")
+    except Exception as e:
+        log.error(f"Перекачка наших игр не прошла: {e}")
+        text = f"⚠️ Перекачка не прошла: {e}"
+    try:
+        await query.message.reply_text(text)
+    except Exception:
+        pass
+
+
 async def _refetch_no_stage_now(query) -> None:
     """Перекачивает игры без стадии прямо сейчас, не дожидаясь ночного крона.
 
@@ -2052,6 +2077,12 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 text, markup = _render_link_list()
             await query.edit_message_text(text, reply_markup=markup)
+
+        elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "ours":
+            await query.edit_message_text(
+                "⏳ Перекачиваю наши игры свежим парсером — пара минут.\n"
+                "Пришлю результат отдельным сообщением.")
+            asyncio.create_task(_refetch_our_games_now(query))
 
         elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "now":
             await query.edit_message_text(

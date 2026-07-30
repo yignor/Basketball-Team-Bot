@@ -270,6 +270,7 @@ CREATE TABLE IF NOT EXISTS game_player_stats (
     blk           INTEGER NOT NULL DEFAULT 0,
     tur           INTEGER NOT NULL DEFAULT 0,
     pf            INTEGER NOT NULL DEFAULT 0,
+    foul_on       INTEGER NOT NULL DEFAULT 0,   -- фолы, заработанные игроком
     fgm           INTEGER NOT NULL DEFAULT 0,
     fga           INTEGER NOT NULL DEFAULT 0,
     tpm           INTEGER NOT NULL DEFAULT 0,
@@ -487,6 +488,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_player_stats", "plus_minus", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "tg_user_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_player_stats", "stage_id", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "game_player_stats", "foul_on", "INTEGER NOT NULL", "0")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».
