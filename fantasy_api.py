@@ -631,7 +631,8 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
 TOP_PERIODS = ("last", "week", "month", "all")
 
 
-def _period_bounds(period: str, scopes: Any) -> Tuple[Optional[str], Optional[str], str]:
+def _period_bounds(period: str, scopes: Any,
+                   teams: Any = None) -> Tuple[Optional[str], Optional[str], str]:
     """(с какой даты, по какую, подпись) для среза топа игроков."""
     today = date.today()
     if period == "week":
@@ -639,7 +640,7 @@ def _period_bounds(period: str, scopes: Any) -> Tuple[Optional[str], Optional[st
     if period == "month":
         return (today - timedelta(days=30)).isoformat(), None, "за последние 30 дней"
     if period == "last":
-        d = fantasy_stats.last_game_date(scopes)
+        d = fantasy_stats.last_game_date(scopes, teams)
         # Берём именно дату последней игры, а не «сегодня»: игры бывают раз в
         # неделю, и срез «последняя игра» должен показывать её, а не пустоту.
         return (d or None), (d or None), (f"игра {d[8:10]}.{d[5:7]}" if d else "последняя игра")
@@ -661,11 +662,17 @@ async def handle_top(request: web.Request) -> web.Response:
 
     weights = fantasy.season_weights(season) if season else fantasy_stats.DEFAULT_WEIGHTS
     scopes = fantasy.effective_scopes(season) if season else []
-    d_from, d_to, title = _period_bounds(period, scopes)
+    pool = await build_pool(season=season)
+    # Команды берём из самого пула: чей это топ — тот и определяет, какая игра
+    # «последняя». Пул уже собран по командам сезона.
+    teams = sorted({(fantasy_stats.parse_ref(one)[0], one.split(":")[1])
+                    for p in pool for one in fantasy_stats.expand_refs([p["ref"]])
+                    if len(one.split(":")) >= 3})
+    d_from, d_to, title = _period_bounds(period, scopes, teams)
     agg = fantasy_stats.player_aggregates(weights, date_from=d_from, date_to=d_to, scope=scopes)
 
     rows = []
-    for p in await build_pool():
+    for p in pool:
         keys = [f"{fantasy_stats.parse_ref(lr)[0]}:{fantasy_stats.parse_ref(lr)[1]}"
                 for lr in fantasy_stats.expand_refs([p["ref"]])]
         st = fantasy_stats.combine_agg([agg.get(k, {}) for k in keys], weights)

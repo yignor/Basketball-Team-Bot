@@ -265,6 +265,10 @@ async def ingest_slpro(client, ctx: Dict[str, Any]) -> int:
     import slpro_game
     games = await client.get_our_games(ctx)
     season_id = str(ctx.get("season_id") or "")
+    # Стадию обязательно тянем из контекста: подсчёт очков фильтруется по
+    # (source, season_id, stage_id), и игра без стадии молча выпадает из
+    # зачёта — при том что скачана и лежит в базе.
+    stage_id = ctx.get("stage_id") or ""
     new_games = 0
     for g in games:
         if g.get("status") != 2:            # только завершённые
@@ -276,7 +280,7 @@ async def ingest_slpro(client, ctx: Dict[str, Any]) -> int:
         box = slpro_game.parse_box_score(resp) if resp else None
         if not box:
             continue
-        store_slpro_box(box, season_id)
+        store_slpro_box(box, season_id, stage_id)
         new_games += 1
     return new_games
 
@@ -432,15 +436,27 @@ def career_summary(source: str, player_id: str, form_n: int = 5) -> Dict[str, An
     }
 
 
-def last_game_date(scope: Optional[Any] = None) -> str:
+def last_game_date(scope: Optional[Any] = None,
+                   teams: Optional[List[Tuple[str, str]]] = None) -> str:
     """Дата последней игры, попавшей в локальную статистику (в рамках турниров
-    подсчёта). Нужна для среза «по последней игре»."""
+    подсчёта). Нужна для среза «по последней игре».
+
+    teams — пары (источник, team_id) наших команд. Без них берётся последняя
+    игра ВСЕГО турнира: в базе лежит вся лига, и срез «последняя игра» уезжал
+    на чужой матч, сыгранный позже нашего, — экран показывал пустоту."""
     sheets_cache.init_db()
-    scope_sql, scope_params = scope_where(scope)
+    scope_sql, params = scope_where(scope)
+    params = list(params)
+    team_sql = ""
+    if teams:
+        team_sql = " AND (" + " OR ".join(
+            "(source = ? AND team_id = ?)" for _ in teams) + ")"
+        for src, tid in teams:
+            params.extend([str(src), str(tid)])
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             f"""SELECT MAX(game_date) AS d FROM game_player_stats
-                WHERE game_date != ''{scope_sql}""", scope_params).fetchone()
+                WHERE game_date != ''{scope_sql}{team_sql}""", params).fetchone()
     return (row["d"] or "") if row else ""
 
 
