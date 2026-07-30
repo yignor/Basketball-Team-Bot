@@ -1368,6 +1368,25 @@ def _name_of(row: Dict[str, Any]) -> str:
     return " ".join(x for x in (row.get("surname"), row.get("name")) if x).strip()
 
 
+# Цифры в никах стоят вместо букв («an1m3_just» = «anime_just»), и без этой
+# замены очевидное родство с «@anime_bratishka» не видно.
+_LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t"})
+
+
+def _norm(text: str) -> str:
+    return "".join(ch for ch in (text or "").lower().translate(_LEET) if ch.isalnum())
+
+
+def _same_start(a: str, b: str, least: int = 4) -> bool:
+    """Совпадает ли начало — так ловятся и «@an1m3_just» против
+    «@anime_bratishka», и «максон» против «Максима»."""
+    a, b = _norm(a), _norm(b)
+    if len(a) < least or len(b) < least:
+        return False
+    common = os.path.commonprefix([a, b])
+    return len(common) >= least
+
+
 def _link_candidates(person: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Свободные строки листа, самые похожие — сверху.
 
@@ -1386,9 +1405,13 @@ def _link_candidates(person: Dict[str, Any]) -> List[Dict[str, Any]]:
             return 1
         if uname and nick and (uname in nick or nick in uname):
             return 2
+        if uname and nick and _same_start(uname, nick):
+            return 3                      # ник сменился, но начало то же
+        if first and (_same_start(first, name) or _same_start(first, surname)):
+            return 4                      # «максон» -> «Максим»
         if first and (first in name or name in first):
-            return 3
-        return 4
+            return 5
+        return 6
 
     rows = sheets_cache.free_player_rows()
     return sorted(rows, key=lambda r: (score(r), _name_of(r)))
