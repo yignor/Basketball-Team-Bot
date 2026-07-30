@@ -885,9 +885,12 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
         return
     import fantasy
     import fantasy_api
+    import fantasy_modes
     try:
         payload = json.loads(msg.web_app_data.data)
         refs = payload.get("refs") or []
+        raw_mode = payload.get("mode")
+        cats = payload.get("cats") or []
     except (json.JSONDecodeError, TypeError, AttributeError):
         await msg.reply_text("⚠️ Не удалось прочитать состав.")
         return
@@ -908,28 +911,45 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
             f"🔒 Сейчас идёт игра{since} — состав заморожен.\n\n"
             "Менять его можно будет сразу после того, как бот пришлёт результат.")
         return
+    # Режим приходит из приложения — и его НЕЛЬЗЯ терять. Раньше запасной вход
+    # сохранял состав без режима, то есть молча переводил человека в
+    # «свободный»: его очки уезжали в чужую таблицу, а он об этом не знал.
+    mode = fantasy_modes.normalize(season, raw_mode)
+    meta = {"cats": list(cats)} if mode == fantasy_modes.CATEGORY else {}
+    prices = None
     try:
-        pool_refs = {p["ref"] for p in await fantasy_api.build_pool()}
+        all_pool = await fantasy_api.build_pool(season=season)
+        pool_refs = {p["ref"] for p in all_pool}
+        prices = {p["ref"]: p.get("price", 0)
+                  for p in fantasy_api._pool_with_stats(all_pool, season)}
     except Exception:
         pool_refs = None  # пул недоступен — не заваливаем сохранение из-за этого
-    err = fantasy.validate_roster(season, refs, pool_refs or None)
+    err = fantasy.validate_roster(season, refs, pool_refs or None,
+                                  mode=mode, meta=meta, prices=prices)
     if err:
-        size = fantasy.roster_size(season)
+        size = fantasy_modes.roster_size(season, mode)
         problems = {
             "invalid_roster": f"Нужно выбрать ровно {size} игроков.",
             "unknown_player": "В составе есть игрок не из пула. Открой заново.",
             "too_many_copies": f"Одного игрока можно взять не больше "
                                f"{fantasy.max_per_player(season)} раз(а).",
+            "over_budget": f"Состав дороже бюджета "
+                           f"({fantasy_modes.cost(refs, prices)} из "
+                           f"{fantasy_modes.settings(season)['budget']}).",
+            "no_price": "У кого-то из выбранных нет цены — напиши админу.",
+            "bad_categories": "Нужно закрыть каждую категорию.",
+            "duplicate_player": "Один игрок может занимать только одну категорию.",
         }
         await msg.reply_text(problems.get(err, "Состав не прошёл проверку."))
         return
 
-    res = fantasy.save_roster(uid, season["id"], week_start, refs)
+    res = fantasy.save_roster(uid, season["id"], week_start, refs, mode=mode, meta=meta)
     if not res.get("ok"):
         reason = "набор на этот тур уже закрыт" if res.get("error") == "locked" else "не удалось сохранить"
         await msg.reply_text(f"⚠️ {reason.capitalize()}.")
         return
-    await msg.reply_text("✅ Состав сохранён! Удачи в туре 🏀")
+    title = fantasy_modes.MODE_TITLES.get(mode, mode)
+    await msg.reply_text(f"✅ Состав сохранён (режим «{title}»)! Удачи в туре 🏀")
 
 
 # Конфигурация кнопок "Запуск оповещений". "daily" (Оповещения на сегодня)

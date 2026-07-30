@@ -378,6 +378,9 @@
     });
     for (const r of (D.roster || [])) counts[r] = (counts[r] || 0) + 1;
     inherited = !!D.inherited;
+    // Кабинет приезжает прямо в кнопке — без живого API он тоже работает.
+    meData = D.me && D.me.found ? D.me : null;
+    $('tab-me').classList.toggle('hidden', !meData);
     setModes(D.season.modes, D.mode, D.cats);
     $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
   }
@@ -964,13 +967,17 @@
   // если бот опознал в человеке игрока команды; админ может открыть чужую.
 
   let meRef = '';           // пусто — свой кабинет
+  let meData = null;        // кабинет из payload (запасной вход)
 
   async function loadMe(ref) {
     const el = $('meBody');
     el.innerHTML = '<div class="banner">Загружаю…</div>';
     if (!live) {
-      el.innerHTML = '<div class="banner">Кабинет доступен только при связи с ботом. ' +
-        'Открой приложение кнопкой «Открыть» или нажми /start в чате.</div>';
+      // Запасной вход: свой кабинет уже приехал в кнопке, чужой без сервера
+      // не посмотреть.
+      el.innerHTML = meData ? meCards(meData)
+        : '<div class="banner">Кабинет откроется, когда бот свяжет тебя с игроком ' +
+          'команды. Нажми /start в чате — кнопка обновится.</div>';
       return;
     }
     let d;

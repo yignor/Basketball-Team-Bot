@@ -1146,6 +1146,39 @@ def _payload_variants(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _payload_me(shared: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    """Кабинет игрока для запасного входа.
+
+    Ищем человека в УЖЕ сжатом пуле (там есть и ссылка, и цена) — иначе
+    пришлось бы второй раз собирать пул ради одного имени. Не нашли (человек
+    не игрок команды или ФИО в листе расходится с ростером) — пустой словарь,
+    фронт просто не покажет вкладку."""
+    row = _my_player_row({"id": user_id})
+    if not row:
+        return {}
+    key = _price_key(f"{row.get('surname', '')} {row.get('name', '')}")
+    if not key.strip():
+        return {}
+    entry = next((p for p in shared["pool"] if _price_key(p.get("m", "")) == key), None)
+    if not entry:
+        parts = key.split()
+        if len(parts) >= 2:
+            sur, first = parts[0], parts[1]
+            for p in shared["pool"]:
+                o = _price_key(p.get("m", "")).split()
+                if len(o) >= 2 and ((o[0] == sur and _lev1(first, o[1]))
+                                    or (o[1] == first and _lev1(sur, o[0]))):
+                    entry = p
+                    break
+    if not entry or not entry.get("c"):
+        return {}
+    season = fantasy._get_season(shared["season_id"])
+    data = fantasy_prices.progress(entry["c"], [entry["r"]], season)
+    data.update({"ref": entry["r"], "name": entry.get("m", ""),
+                 "number": entry.get("n", ""), "mine": True})
+    return data
+
+
 def _encode(data: Dict[str, Any]) -> str:
     raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -1167,10 +1200,16 @@ def encode_webapp_payload(shared: Dict[str, Any], user_id: str,
         "season": shared["season"],
         "pool": shared["pool"],
         "roster": r["refs"] if r else [],
+        "mode": (r or {}).get("mode", ""),
+        "cats": ((r or {}).get("meta") or {}).get("cats", []),
         "inherited": bool(r.get("inherited")) if r else False,
         "locked": shared["sched_locked"] or (bool(r["locked"]) if r else False),
         "week_start": shared["week_start"],
         "standings": shared["standings"],
+        # Личный кабинет — тоже в кнопку. Он маленький (пара сотен символов),
+        # а без него человек без живого API остаётся без ответа на главный свой
+        # вопрос: где я и что мне сделать.
+        "me": _payload_me(shared, user_id),
     }
     budget = PAYLOAD_LIMIT if max_len is None else max_len
     if budget <= 0:
