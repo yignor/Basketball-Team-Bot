@@ -370,6 +370,7 @@ CREATE TABLE IF NOT EXISTS fantasy_game_scores (
     game_id      TEXT NOT NULL,
     game_date    TEXT NOT NULL DEFAULT '',
     points       REAL NOT NULL DEFAULT 0,
+    mode         TEXT NOT NULL DEFAULT '',     -- режим, которым состав собирали
     refs_json    TEXT NOT NULL DEFAULT '[]',
     computed_at  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (user_id, season_id, source, game_id)
@@ -493,6 +494,7 @@ def init_db() -> None:
         # «ID топика» и «Комментарий» секции голосований — колонки I и J листа.
         _ensure_column(conn, "fantasy_rosters", "mode", "TEXT NOT NULL", "''")
         _ensure_column(conn, "fantasy_rosters", "meta_json", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "fantasy_game_scores", "mode", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "price", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "tier", "TEXT NOT NULL", "''")
         _ensure_column(conn, "config_rows", "col_i", "TEXT NOT NULL", "''")

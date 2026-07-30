@@ -41,7 +41,7 @@
     /* В бюджетном режиме в кружке слева стоит ЦЕНА (по ней и собирают состав),
        а игровой номер уходит к фамилии — он там нужен для узнавания. */
     .num.cost { font-variant-numeric: tabular-nums; }
-    .jersey { color: var(--hint); font-weight: 400; margin-left: 4px; }
+    .jersey { color: var(--hint); font-weight: 700; }
     #adminBody .chip { white-space: normal; text-align: left; }
     /* Список игроков в админке — свёрнутый, иначе карточка лиги разъезжается. */
     .adm-players { margin: 6px 0; }
@@ -194,6 +194,7 @@
     <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
   </div>
   <div id="table" class="hidden">
+    <div class="bar hidden" id="tableModes"></div>
     <div class="bar"><div class="counter" id="weekLabel"></div></div>
     <div class="list" id="standings"></div>
   </div>
@@ -264,6 +265,9 @@
   // человек выбирает перед игрой; при одном включённом переключатель скрыт.
   let modes = [], mode = 'free', catPick = {}, activeCat = null;
   let pool = [], counts = {}, standings = [], weekStart = '';
+  // tables — по таблице на режим (живой вход). Запасной отдаёт одну: класть в
+  // кнопку три таблицы — снова упереться в лимит длины клавиатуры.
+  let tables = {}, myMode = '';
   let search = '', playedOnly = false, isAdmin = false;
   let seasonId = null, seasons = [];
 
@@ -381,6 +385,8 @@
     locked = !!r.locked;
     weekStart = r.week_start || s.week_start || '';
     standings = s.standings || [];
+    tables = s.tables || {};
+    myMode = s.my_mode || '';
     pool = (p.pool || []).map(x => ({
       ref: x.ref, name: x.name || x.ref, number: x.number || '', team: x.team || '',
       price: x.price || 0, tier: x.tier || '',
@@ -511,12 +517,16 @@
       const badge = costMode
         ? `<div class="num cost" title="стоимость">${p.price || '—'}</div>`
         : `<div class="num">${esc(p.number || '—')}</div>`;
-      const jersey = costMode && p.number ? `<span class="jersey">(${esc(p.number)})</span>` : '';
+      // Номер — во ВТОРУЮ строку: в первой он отъедал место у фамилии, и
+      // длинные превращались в «Шлепикас Р…». Цена в бюджете уже в кружке,
+      // поэтому в строке статистики её не дублируем.
+      const jersey = costMode && p.number ? `<b class="jersey">№${esc(p.number)}</b> · ` : '';
       c.innerHTML = badge +
         `<div class="info"><div class="pname">${tierBadge(p)}` +
-        `<span class="nm">${esc(p.name)}</span>${jersey}` +
+        `<span class="nm">${esc(p.name)}</span>` +
         (live ? '<span class="chev">›</span>' : '') + `</div>` +
-        `<div class="pstat">${costMode ? '' : priceLabel(p)}${esc(statLine(p))}</div></div>` +
+        `<div class="pstat">${jersey}${costMode ? '' : priceLabel(p)}` +
+        `${esc(statLine(p))}</div></div>` +
         `<div class="ctrl">${ctrl}</div>`;
       const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
       const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
@@ -860,11 +870,37 @@
   }
 
   let openRank = -1;   // раскрытая история участника
+  // У каждого режима своя таблица: правила разные, и общий зачёт сравнивал бы
+  // несравнимое. Очки остаются в таблице того режима, которым набраны.
+  let tableMode = '';
+
+  function renderTableModes() {
+    const bar = $('tableModes');
+    const ids = Object.keys(tables || {});
+    bar.classList.toggle('hidden', ids.length < 2);
+    if (ids.length < 2) { tableMode = ids[0] || ''; return; }
+    if (!ids.includes(tableMode)) tableMode = myMode && ids.includes(myMode) ? myMode : ids[0];
+    bar.innerHTML = ids.map(id =>
+      `<button class="chip${id === tableMode ? ' on' : ''}" ` +
+      `onclick="pickTableMode(${jattr(id)})">${esc(modeTitle(id))}` +
+      `${id === myMode ? ' · ты' : ''}</button>`).join('');
+  }
+
+  function pickTableMode(id) {
+    haptic('light');
+    tableMode = id; openRank = -1;
+    renderStandings();
+  }
+  window.pickTableMode = pickTableMode;
+
   function renderStandings() {
+    renderTableModes();
     const el = $('standings'); el.innerHTML = '';
-    $('weekLabel').textContent = 'Общий зачёт лиги';
-    if (!standings.length) { el.innerHTML = '<div class="banner">Пока нет очков</div>'; return; }
-    standings.forEach((row, i) => {
+    const rows = (tables && tables[tableMode]) || standings;
+    $('weekLabel').textContent = (tables && Object.keys(tables).length > 1)
+      ? `Зачёт режима «${modeTitle(tableMode)}»` : 'Общий зачёт лиги';
+    if (!rows.length) { el.innerHTML = '<div class="banner">Пока нет очков</div>'; return; }
+    rows.forEach((row, i) => {
       const medal = ['🥇','🥈','🥉'][i] || (i + 1) + '.';
       const div = document.createElement('div'); div.className = 'rank';
       div.innerHTML = `<div class="place">${medal}</div>` +
@@ -990,7 +1026,11 @@
       (ms.length > 1
         ? ruleCard('🎮 Режимы',
             'Перед игрой выбери, как играть — переключатель наверху вкладки ' +
-            '«Состав». Режимы считаются в один общий зачёт.')
+            '«Состав». Играть можно только в ОДНОМ режиме: соберёшь состав в ' +
+            'другом — прежний сбросится.<br><br>' +
+            'У каждого режима своя таблица, режимы между собой не соревнуются. ' +
+            'Правила у них разные, и складывать такие очки в один зачёт было бы ' +
+            'нечестно. Уже набранные очки остаются в таблице своего режима.')
         : '') +
       modeCards +
       ruleCard('⏱ Когда меняется',

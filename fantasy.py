@@ -733,12 +733,17 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
             # категории могли смениться после игры, а снимок обязан остаться тем.
             pts = fantasy_modes.game_points(season, entry.get("mode") or fantasy_modes.FREE,
                                             refs, entry.get("meta"), source, game_id, weights)
+            # Режим кладём В СНИМОК, а не смотрим текущий: таблицы у режимов
+            # раздельные, и очки обязаны остаться в той, в которой заработаны,
+            # даже если человек потом ушёл в другой режим.
             conn.execute(
                 """INSERT INTO fantasy_game_scores
-                   (user_id, season_id, source, game_id, game_date, points, refs_json, computed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   (user_id, season_id, source, game_id, game_date, points, mode,
+                    refs_json, computed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id, season_id, source, game_id) DO NOTHING""",
                 (uid, season["id"], source, str(game_id), game_date_iso, pts,
+                 entry.get("mode") or fantasy_modes.FREE,
                  json.dumps(refs, ensure_ascii=False), sheets_cache.now_iso()))
             out.append({"user_id": uid, "points": pts})
         conn.commit()
@@ -842,10 +847,16 @@ def backfill_if_stale(season: Dict[str, Any]) -> None:
         logging.getLogger(__name__).warning(f"фэнтези: бэкфилл очков не удался: {e}")
 
 
-def season_standings_live(season_id: int, history_limit: int = 20) -> List[Dict[str, Any]]:
+def season_standings_live(season_id: int, history_limit: int = 20,
+                          mode: Optional[str] = None) -> List[Dict[str, Any]]:
     """Живая таблица лиги: сумма зафиксированных очков участника за все игры +
     последние игры для истории при тапе. Считается из снимков, поэтому прошлые
     игры не пересчитываются — только прибавляются новые.
+
+    mode — считать только очки, заработанные этим режимом. Режимы играют по
+    разным правилам, и общая таблица сравнивала бы несравнимое; поэтому у
+    каждого своя. Очки остаются в таблице того режима, которым их набрали:
+    сменил режим — прежние очки никуда не переезжают.
 
     Итоги суммирует сама база; в Python тянем только хвост истории, иначе на
     длинном сезоне таблица разрасталась бы на сотни строк на каждого."""
@@ -853,15 +864,21 @@ def season_standings_live(season_id: int, history_limit: int = 20) -> List[Dict[
     season = _get_season(season_id)
     if season:
         backfill_if_stale(season)
+    # Снимки, сделанные до появления столбца, — это свободный режим: других
+    # тогда не было.
+    import fantasy_modes
+    where, params = "season_id = ?", [season_id]
+    if mode:
+        where += " AND (mode = ?" + (" OR mode = ''" if mode == fantasy_modes.FREE else "") + ")"
+        params.append(mode)
     with sheets_cache.get_connection() as conn:
         totals = conn.execute(
-            """SELECT user_id, ROUND(SUM(points), 2) AS points FROM fantasy_game_scores
-               WHERE season_id = ? GROUP BY user_id ORDER BY points DESC""",
-            (season_id,)).fetchall()
+            f"""SELECT user_id, ROUND(SUM(points), 2) AS points FROM fantasy_game_scores
+                WHERE {where} GROUP BY user_id ORDER BY points DESC""", params).fetchall()
         hist: Dict[str, List[Dict[str, Any]]] = {}
         for r in conn.execute(
-                """SELECT user_id, game_date, points FROM fantasy_game_scores
-                   WHERE season_id = ? ORDER BY game_date DESC""", (season_id,)):
+                f"""SELECT user_id, game_date, points FROM fantasy_game_scores
+                    WHERE {where} ORDER BY game_date DESC""", params):
             rows = hist.setdefault(str(r["user_id"]), [])
             if len(rows) < history_limit:
                 rows.append({"label": _game_label(r["game_date"]),

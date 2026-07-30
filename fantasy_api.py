@@ -957,7 +957,11 @@ async def webapp_shared() -> Optional[Dict[str, Any]]:
         return None
     pool = _compress_pool(_pool_with_stats(await build_pool(season=season), season))
     week_start, sched_locked = fantasy.active_selection(season)
-    table = fantasy.season_standings_live(season["id"])
+    # Запасной вход отдаёт таблицу ПЕРВОГО включённого режима: payload и так
+    # на пределе, а класть в кнопку три таблицы — верный способ снова упереться
+    # в лимит клавиатуры. Живой вход показывает все.
+    table = fantasy.season_standings_live(season["id"],
+                                          mode=fantasy_modes.enabled(season)[0])
     names = fantasy.display_names([str(r["user_id"]) for r in table])
     standings = [{"name": names.get(str(r["user_id"]), "Участник"),
                   "points": r["points"], "history": r.get("history", [])} for r in table]
@@ -1226,11 +1230,26 @@ async def handle_standings(request: web.Request) -> web.Response:
         return web.json_response({"standings": []})
     # Таблица — суммарные очки за всю лигу (не за неделю): не «пропадает» при
     # смене недели. История по турам — в каждой строке, для тапа.
-    table = fantasy.season_standings_live(season["id"])
-    names = fantasy.display_names([r["user_id"] for r in table])
-    for r in table:
-        r["name"] = names.get(str(r["user_id"]), "")
-    return web.json_response({"standings": table})
+    #
+    # У каждого режима таблица своя: правила разные, и общий зачёт сравнивал бы
+    # несравнимое. Отдаём все включённые сразу — переключение вкладок на фронте
+    # не должно ходить в сеть.
+    enabled = fantasy_modes.enabled(season)
+    tables = {}
+    for m in enabled:
+        rows = fantasy.season_standings_live(season["id"], mode=m)
+        names = fantasy.display_names([r["user_id"] for r in rows])
+        for r in rows:
+            r["name"] = names.get(str(r["user_id"]), "")
+        tables[m] = rows
+    # standings — таблица режима, в котором играет сам участник: старые версии
+    # приложения знают только это поле.
+    roster = fantasy.get_roster_effective(str(user["id"]), season["id"],
+                                          fantasy.active_selection(season)[0]) or {}
+    mine = fantasy_modes.normalize(season, roster.get("mode"))
+    return web.json_response({"standings": tables.get(mine, tables.get(enabled[0], [])),
+                              "tables": tables, "my_mode": mine,
+                              "modes": fantasy_modes.describe(season)})
 
 
 def create_app(bot_token: str) -> web.Application:
