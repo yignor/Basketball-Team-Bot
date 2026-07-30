@@ -1003,6 +1003,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
+        [InlineKeyboardButton("📈 Прогресс команды", callback_data="admin:prog:list")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
@@ -1559,6 +1560,69 @@ def _render_unlink_confirm(uid: str) -> Tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("Отмена", callback_data="admin:link:linked:0")]])
 
 
+# ─── прогресс команды (для тренера) ─────────────────────────────────────────
+
+async def _prog_teams() -> List[Dict[str, Any]]:
+    """Наши команды с названиями — из пула фэнтези (там они уже разрешены)."""
+    import fantasy_api
+    try:
+        teams = await fantasy_api._resolve_pool_teams()
+    except Exception as e:
+        log.warning(f"Прогресс: не удалось получить команды: {e}")
+        teams = []
+    out = []
+    for t in teams:
+        tid, src = str(t.get("team_id") or ""), str(t.get("source") or "")
+        if tid and src:
+            out.append({"team_id": tid, "source": src,
+                        "name": t.get("name") or t.get("team_name") or f"{src}:{tid}"})
+    return out
+
+
+async def _prog_names() -> Dict[str, str]:
+    """id игрока -> ФИО, транзитно из ростеров лиг (у себя ФИО не храним)."""
+    import fantasy_api
+    import fantasy_stats
+    names: Dict[str, str] = {}
+    try:
+        for p in await fantasy_api.build_pool():
+            for one in fantasy_stats.expand_refs([p["ref"]]):
+                _src, pid = fantasy_stats.parse_ref(one)
+                names[str(pid)] = p["name"]
+    except Exception as e:
+        log.warning(f"Прогресс: имена не подтянулись: {e}")
+    return names
+
+
+async def _render_prog_list() -> Tuple[str, InlineKeyboardMarkup]:
+    teams = await _prog_teams()
+    lines = ["📈 Прогресс команды", "",
+             "Разбор последней игры: что пошло не как обычно и кто в этом "
+             "участвовал. Сравнение — с собственными последними играми, "
+             "а не с абстрактной нормой.", ""]
+    rows = []
+    if not teams:
+        lines.append("Не нашёл наших команд. Проверь блок SLPRO/Инфобаскет в «Конфиге».")
+    for t in teams:
+        rows.append([InlineKeyboardButton(
+            f"🏀 {t['name']}"[:64],
+            callback_data=f"admin:prog:team:{t['source']}:{t['team_id']}")])
+    rows.append(_back_button())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _render_prog_team(source: str, team_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    import team_progress
+    teams = await _prog_teams()
+    title = next((t["name"] for t in teams
+                  if t["team_id"] == team_id and t["source"] == source), "")
+    names = await _prog_names()
+    rep = await asyncio.to_thread(team_progress.game_report, team_id, source, names)
+    text = team_progress.format_report(rep, title)
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ К командам", callback_data="admin:prog:list")]])
+
+
 async def _refetch_no_stage_now(query) -> None:
     """Перекачивает игры без стадии прямо сейчас, не дожидаясь ночного крона.
 
@@ -1953,6 +2017,15 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
             await _handle_report_action(query, kind, period)
+
+        elif parts[1] == "prog":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "team":
+                await query.edit_message_text("⏳ Считаю…")
+                text, markup = await _render_prog_team(parts[3], parts[4])
+            else:
+                text, markup = await _render_prog_list()
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "link":
             what = parts[2] if len(parts) > 2 else "list"
