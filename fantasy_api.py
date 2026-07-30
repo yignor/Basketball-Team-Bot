@@ -36,14 +36,16 @@ import fantasy_stats
 
 log = logging.getLogger(__name__)
 
-# Публичный адрес живого API. Основной транспорт — Cloudflare quick-tunnel: его
-# адрес меняется при каждом рестарте, поэтому deploy/cloudflared-fantasy.sh
-# пишет его в этот файл, а демон/рассылка подмешивают в ссылку Mini App (?api=).
-# Tailscale Funnel остаётся запасным: если тут пусто, фронт откатывается на него.
-_TUNNEL_URL_FILE = os.getenv(
-    "FANTASY_API_URL_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fantasy_api_url.txt"))
-
+# Публичный адрес живого API. Транспорт — Tailscale Funnel, он зашит во фронте
+# и не меняется. Здесь остаётся только запасной рычаг: переопределить адрес
+# через env, не пересобирая фронт (переезд tailnet, замена канала). Пусто —
+# фронт идёт на Funnel.
+#
+# Cloudflare quick-tunnel убран 30.07.2026. Он давал адрес, который менялся при
+# каждом рестарте, и бот подмешивал его в ссылку кнопки (?api=). Ссылка в
+# кнопке живёт до следующего /start, поэтому она регулярно указывала на
+# туннель, которого уже нет: имя переставало резолвиться, фронт упирался в
+# мёртвый адрес и уходил в запасной режим — при живом Funnel рядом.
 
 _dns_cache: Dict[str, Tuple[float, bool]] = {}
 _DNS_TTL = 300
@@ -52,10 +54,8 @@ _DNS_TTL = 300
 def _resolves(url: str) -> bool:
     """Резолвится ли хост адреса. Быстрый DNS-запрос, ответ кешируем на 5 минут.
 
-    Quick-tunnel Cloudflare умирает вместе с процессом, и его имя ПЕРЕСТАЁТ
-    резолвиться — а файл с адресом остаётся. Фронт же честно ходит по первому
-    адресу из списка, и мёртвый туннель отправлял его в запасной режим, хотя
-    рабочий Funnel был рядом."""
+    Страховка для env-override: мёртвый адрес хуже отсутствующего, потому что
+    во фронте он стоит ПЕРВЫМ и заслоняет рабочий Funnel."""
     import socket
     from urllib.parse import urlparse
     host = urlparse(url).hostname or ""
@@ -76,19 +76,9 @@ def _resolves(url: str) -> bool:
 
 
 def public_api_url() -> str:
-    """Текущий публичный адрес живого API для фронта. Приоритет: env-override
-    (FANTASY_API_PUBLIC_URL) -> файл от cloudflared-fantasy. Пусто -> фронт сам
-    уйдёт на Funnel (в т.ч. когда туннель лёг: скрипт стирает файл)."""
-    override = os.getenv("FANTASY_API_PUBLIC_URL", "").strip()
-    if override:
-        return override.rstrip("/")
-    try:
-        with open(_TUNNEL_URL_FILE, encoding="utf-8") as f:
-            url = f.read().strip().rstrip("/")
-    except OSError:
-        return ""
-    # Файл мог остаться от туннеля, который давно лёг (скрипт не всегда успевает
-    # его стереть). Мёртвый адрес хуже отсутствующего: он стоит ПЕРВЫМ в списке.
+    """Адрес живого API для фронта: env-override FANTASY_API_PUBLIC_URL.
+    Пусто (обычный случай) — фронт идёт на зашитый Funnel."""
+    url = os.getenv("FANTASY_API_PUBLIC_URL", "").strip().rstrip("/")
     return url if url and _resolves(url) else ""
 
 

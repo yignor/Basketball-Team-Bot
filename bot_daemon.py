@@ -64,9 +64,8 @@ _WEBAPP_VERSION = str(int(time.time()))
 def _webapp_url() -> str:
     """URL Mini App с версией и текущим адресом живого API. Версия (?v=) меняется
     при каждом перезапуске демона — после деплоя пользователь получает свежий
-    фронт, а не старый JS. Адрес API (?api=) — от Cloudflare quick-tunnel (он
-    меняется при рестарте туннеля), фронт берёт его отсюда; если пусто, фронт
-    сам откатится на Funnel."""
+    фронт, а не старый JS. Адрес API (?api=) добавляется, только если он задан
+    в env: обычно его нет, и фронт идёт на зашитый Funnel."""
     if not FANTASY_WEBAPP_URL:
         return ""
     sep = "&" if "?" in FANTASY_WEBAPP_URL else "?"

@@ -36,8 +36,8 @@ def _fantasy_webapp_base() -> Optional[str]:
 def _fantasy_reply_markup(base_url: str, payload: str) -> ReplyKeyboardMarkup:
     """Постоянная кнопка запасного входа: статика на Pages + данные в #d=.
     web_app (а не url) — чтобы из неё работал sendData и сохранение состава
-    уходило боту в обход живого API. ?v= бьёт HTTP-кеш страницы, ?api= передаёт
-    актуальный адрес Cloudflare-туннеля (нет — фронт откатится на Funnel)."""
+    уходило боту в обход живого API. ?v= бьёт HTTP-кеш страницы, ?api= —
+    переопределение адреса из env (обычно пусто: фронт идёт на Funnel)."""
     import fantasy_api
     sep = "&" if "?" in base_url else "?"
     url = f"{base_url}{sep}v={int(time.time())}"
