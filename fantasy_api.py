@@ -47,6 +47,11 @@ log = logging.getLogger(__name__)
 # туннель, которого уже нет: имя переставало резолвиться, фронт упирался в
 # мёртвый адрес и уходил в запасной режим — при живом Funnel рядом.
 
+# Публичный вход, который видят игроки: Tailscale Funnel. Держим его тёплым
+# (см. keep_funnel_warm) и заодно измеряем — жалобы «не грузится» иначе
+# невозможно отличить от «у человека плохая сеть».
+FUNNEL_URL = os.getenv("FANTASY_FUNNEL_URL", "https://botpc.tail5ed4ef.ts.net").rstrip("/")
+
 _dns_cache: Dict[str, Tuple[float, bool]] = {}
 _DNS_TTL = 300
 
@@ -80,6 +85,36 @@ def public_api_url() -> str:
     Пусто (обычный случай) — фронт идёт на зашитый Funnel."""
     url = os.getenv("FANTASY_API_PUBLIC_URL", "").strip().rstrip("/")
     return url if url and _resolves(url) else ""
+
+
+async def keep_funnel_warm(timeout: float = 30.0) -> Optional[float]:
+    """Стучится в СВОЙ публичный адрес снаружи. Возвращает время ответа, сек
+    (None — не достучались).
+
+    Funnel засыпает: первый запрос после простоя поднимает соединение и идёт
+    около 15 секунд — ровно столько же, сколько ждёт фронт, поэтому игрок
+    получал таймаут и уходил в запасной режим на пустом месте. Регулярный пинг
+    не даёт каналу остыть.
+
+    Ходим именно по внешнему адресу, а не в 127.0.0.1: греть надо весь путь
+    (DNS, ingress Tailscale, TLS), а не локальный сокет. Заодно в журнале
+    появляется честная история доступности."""
+    if not FUNNEL_URL:
+        return None
+    import aiohttp
+    started = time.time()
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(f"{FUNNEL_URL}/health",
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                await r.read()
+                took = time.time() - started
+                if took > 3:
+                    log.info("Funnel прогрет за %.1fс (был холодный)", took)
+                return took
+    except Exception as e:
+        log.warning("Funnel не отвечает (%.0fс): %s", time.time() - started, e)
+        return None
 
 
 # ─────────────────────────── initData auth ───────────────────────────────────

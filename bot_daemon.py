@@ -1749,6 +1749,24 @@ _POOL_WARM_INTERVAL = 2400.0
 _pool_warm_at: float = 0.0
 
 
+_funnel_warm_at = 0.0
+_FUNNEL_WARM_INTERVAL = 600      # 10 минут: Funnel остывает за минуты, не за часы
+
+
+async def _keep_funnel_warm() -> None:
+    """Не даёт публичному входу остыть. Холодный Funnel отвечает ~15с — столько
+    же, сколько фронт готов ждать, и игрок сваливается в запасной режим, хотя
+    канал рабочий."""
+    global _funnel_warm_at
+    if not (FANTASY_API_ENABLED and BOT_TOKEN):
+        return
+    now = time.time()
+    if now - _funnel_warm_at < _FUNNEL_WARM_INTERVAL:
+        return
+    _funnel_warm_at = now
+    await fantasy_api.keep_funnel_warm()
+
+
 async def _warm_fantasy_pool() -> None:
     global _pool_warm_at
     if not (FANTASY_API_ENABLED and BOT_TOKEN):
@@ -1787,6 +1805,7 @@ async def _background_loop(app: Application) -> None:
             _refresh_db_cache()
             _periodic_push_local_changes()
             await _warm_fantasy_pool()
+            await _keep_funnel_warm()
             # Адрес Cloudflare-туннеля меняется при его рестарте (независимо от
             # демона). Заметив смену, пере-ставим кнопку меню на свежий адрес —
             # иначе «Открыть» вело бы на мёртвый туннель.

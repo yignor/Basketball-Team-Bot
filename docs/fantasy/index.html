@@ -320,7 +320,11 @@
     // Выбранную лигу подмешиваем во ВСЕ вызовы — бэкенд считает по ней.
     if (seasonId) path += (path.indexOf('?') >= 0 ? '&' : '?') + 'season=' + encodeURIComponent(seasonId);
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), timeoutMs || 15000);  // мобильная сеть бывает медленной
+    // Первый заход после простоя поднимает Funnel и идёт заметно дольше обычного,
+    // а на мобильной сети к этому добавляется её собственная задержка. Ждать
+    // 15с здесь означало гарантированно свалиться в запасной режим на рабочем
+    // канале — держим запас.
+    const timer = setTimeout(() => ctl.abort(), timeoutMs || 25000);
     try {
       const r = await fetch(API + path, Object.assign({
         signal: ctl.signal,
@@ -1467,7 +1471,13 @@
           // медленным, поэтому одна повторная попытка после обрыва по времени.
           let ok;
           try { ok = await fromApi(); }
-          catch (e) { if (e.name !== 'AbortError') throw e; ok = await fromApi(); }
+          catch (e) {
+            if (e.name !== 'AbortError') throw e;
+            // Первая попытка разбудила канал — вторая обычно уже быстрая.
+            msg('Подключаюсь к боту…');
+            ok = await fromApi();
+          }
+          msg('');
           if (!ok) return;
           live = true;
           break;
