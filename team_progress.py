@@ -460,17 +460,200 @@ def roster_stats(team_id: str, source: str, series: List[Dict[str, Any]],
         fp = fantasy_stats.fantasy_points({k: (v or 0) for k, v in r.items()})
         out.append({
             "player_id": str(r["player_id"]),
+            "number": str(r["number"] or ""),
             "name": names.get(str(r["player_id"])) or f"№{r['number'] or r['player_id']}",
             "games": r["games"], "mins": round((r["secs"] or 0) / 60 / n, 1),
             "pts": round((r["pts"] or 0) / n, 1), "reb": round((r["reb"] or 0) / n, 1),
             "ast": round((r["ast"] or 0) / n, 1), "stl": round((r["stl"] or 0) / n, 1),
-            "tur": round((r["tur"] or 0) / n, 1), "pf": round((r["pf"] or 0) / n, 1),
+            "blk": round((r["blk"] or 0) / n, 1), "tur": round((r["tur"] or 0) / n, 1),
+            "pf": round((r["pf"] or 0) / n, 1),
             "fg": _pct(r["fgm"] or 0, r["fga"] or 0),
             "plus_minus": round((r["plus_minus"] or 0) / n, 1),
             "fp": round(fp / n, 1),
         })
     out.sort(key=lambda x: x["fp"], reverse=True)
     return out
+
+
+# ── Лидеры по показателям: наши и соперника ────────────────────────────────
+
+LEADER_METRICS: Tuple[Tuple[str, str], ...] = (
+    ("pts", "Очки"),
+    ("reb", "Подборы"),
+    ("ast", "Передачи"),
+    ("stl", "Перехваты"),
+    ("blk", "Блок-шоты"),
+    ("fp", "Общий вклад"),
+)
+
+
+def leaders(roster: List[Dict[str, Any]], games_total: int = 0) -> List[Dict[str, Any]]:
+    """По каждому показателю — первый номер команды (в среднем за игру).
+
+    Случайных людей в лидеры не пускаем: 20 очков в единственном матче — это
+    не «лучший бомбардир», а один вечер. Порог — треть игр команды; если под
+    него не проходит никто (команда только начала сезон), считаем по всем."""
+    if not roster:
+        return []
+    total = games_total or max((r.get("games") or 0) for r in roster)
+    need = max(1, round(total / 3))
+    pool = [r for r in roster if (r.get("games") or 0) >= need] or roster
+    out: List[Dict[str, Any]] = []
+    for key, title in LEADER_METRICS:
+        best = max(pool, key=lambda r: r.get(key) or 0)
+        if not (best.get(key) or 0):
+            continue
+        out.append({"key": key, "title": title, "name": best["name"],
+                    "number": best.get("number", ""), "value": best[key],
+                    "games": best["games"]})
+    return out
+
+
+def last_opponent(team_id: str, source: str) -> Dict[str, Any]:
+    """Кто соперник последней игры — чтобы вызывающий успел сходить в лигу за
+    их заявкой ДО сборки отчёта (сам модуль в сеть не ходит)."""
+    series = season_series(team_id, source)
+    if not series:
+        return {}
+    g = series[-1]
+    return {"team_id": g["opp_id"], "name": g["opp_name"],
+            "season_id": str(g.get("season_id") or "")}
+
+
+# ── Тренировки: явка за последний месяц ────────────────────────────────────
+
+TRAINING_WINDOW_DAYS = 30
+
+
+def training_attendance(days: int = TRAINING_WINDOW_DAYS,
+                        today: Optional[str] = None) -> Dict[str, Any]:
+    """Кто сколько раз был на тренировке за последние `days` дней.
+
+    Считаем ровно по тем же правилам, что и лист «Тренировки»
+    (attendance_summary): один опрос может закрывать две тренировки («Среда и
+    пятница»), поэтому знаменатель — предложенные ДНИ, а не число опросов.
+    Свой упрощённый подсчёт разъехался бы с отчётом, который тренер уже
+    читает, и одному и тому же человеку показывал бы разные цифры."""
+    from datetime import date, timedelta
+    import attendance_summary
+    from report_common import load_roster, make_resolver
+
+    sheets_cache.init_db()
+    end = date.fromisoformat(today) if today else date.today()
+    start = end - timedelta(days=days - 1)
+    empty = {"from": start.isoformat(), "to": end.isoformat(), "days": days,
+             "trainings": 0, "polls": 0, "by_key": {}, "by_name": {}}
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            """SELECT user_id, username, first_name, last_name, vote_text,
+                      vote_type, training_date, revote_count
+               FROM attendance
+               WHERE training_date >= ? AND training_date <= ?
+                 AND vote_type IN ('PRESENT', 'ABSENT')""",
+            (start.isoformat(), end.isoformat()))]
+    if not rows:
+        return empty
+
+    by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        r["revotes"] = r.pop("revote_count", 0)
+        by_date.setdefault(r["training_date"], []).append(r)
+    events = []
+    for iso, votes in by_date.items():
+        try:
+            events.append((date.fromisoformat(iso), votes))
+        except ValueError:
+            continue
+    if not events:
+        return empty
+
+    stats = attendance_summary.aggregate(events, make_resolver(load_roster()))
+    # Знаменатель — тот же, что в сводке листа: сколько тренировочных ДНЕЙ
+    # вообще предлагалось за период.
+    trainings = sum(len(attendance_summary._offered_days(v, d)) for d, v in events)
+
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for name, p in stats.items():
+        by_key[p["key"]] = {
+            "name": name, "nick": p["nick"], "present": p["present"],
+            "absent": p["absent"], "no_answer": max(0, trainings - p["voted"]),
+        }
+    return {"from": start.isoformat(), "to": end.isoformat(), "days": days,
+            "trainings": trainings, "polls": len(events), "by_key": by_key,
+            "by_name": {_norm_name(v["name"]): v for v in by_key.values()}}
+
+
+def _norm_name(text: str) -> str:
+    return " ".join((text or "").lower().replace("ё", "е").split())
+
+
+def _attendance_index(source: str) -> Dict[str, str]:
+    """{id игрока в лиге -> ключ человека в сводке тренировок}.
+
+    Идём через привязку профиля (её игрок делает сам ссылкой) — это точное
+    сопоставление. Совпадение по ФИО оставляем запасным путём в
+    attach_attendance: однофамильцев в команде нет, но опечатка в листе не
+    должна ломать всю колонку."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        links = {str(r["tg_user_id"]): int(r["player_row"]) for r in conn.execute(
+            "SELECT tg_user_id, player_row FROM player_links")}
+        idents = [(str(r["player_id"]), str(r["tg_user_id"])) for r in conn.execute(
+            "SELECT player_id, tg_user_id FROM player_identities WHERE source = ?",
+            (source,))]
+    return {pid: f"row:{links[uid]}" for pid, uid in idents if uid in links}
+
+
+def attach_attendance(roster: List[Dict[str, Any]], att: Dict[str, Any],
+                      source: str) -> None:
+    """Дописывает каждому в составе явку на тренировках (на месте).
+
+    Три разных случая, и их нельзя смешивать:
+      • голосовал — ставим, сколько раз был;
+      • есть в листе «Игроки», но ни разу не ответил — это честный 0, человек
+        на тренировках не появлялся;
+      • в листе его нет вовсе (играет, но в состав не внесён) — None, прочерк:
+        про его тренировки мы попросту ничего не знаем.
+    В `att["unmatched"]` складываем обратный случай — ходит на тренировки, но в
+    протоколах не появлялся: тренеру это отдельный разговор."""
+    sheet_by_name, rows_in_sheet = _sheet_index()
+    idx = _attendance_index(source)
+    by_key, by_name = att.get("by_key") or {}, att.get("by_name") or {}
+    used = set()
+    for r in roster:
+        norm = _norm_name(r["name"])
+        key = idx.get(r["player_id"]) or sheet_by_name.get(norm, "")
+        rec = by_key.get(key) if key else None
+        if not rec:
+            rec = by_name.get(norm)
+            if rec and not key:
+                key = next((k for k, v in by_key.items()
+                            if _norm_name(v["name"]) == norm), "")
+        if key:
+            used.add(key)
+        if rec:
+            r["att_present"] = rec["present"]
+        else:
+            r["att_present"] = 0 if key in rows_in_sheet else None
+        r["att_total"] = att.get("trainings") or 0
+    # Только те, кто есть в листе «Игроки» (row:) — посторонние из чата в отчёт
+    # о составе не попадают. И только реально ходившие: «ноль тренировок и ноль
+    # игр» — это просто неактивный человек, отдельной строки он не стоит.
+    att["unmatched"] = sorted(
+        (v for k, v in by_key.items()
+         if k.startswith("row:") and k not in used and v["present"] > 0),
+        key=lambda v: -v["present"])
+
+
+def _sheet_index() -> Tuple[Dict[str, str], set]:
+    """{норм. ФИО из листа «Игроки» -> ключ человека} и множество этих ключей."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT row_index, surname, name FROM players WHERE surname != '' OR name != ''")]
+    by_name = {_norm_name(f"{r['surname']} {r['name']}"): f"row:{r['row_index']}"
+               for r in rows}
+    return by_name, set(by_name.values())
 
 
 def split_progress(series: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -601,7 +784,8 @@ def insights(cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
 def detailed_report(team_id: str, source: str, team_title: str = "",
                     names: Optional[Dict[str, str]] = None,
                     standings: Optional[List[Dict[str, Any]]] = None,
-                    team_names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+                    team_names: Optional[Dict[str, str]] = None,
+                    opp_names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Всё для подробного отчёта: сезон, динамика, лига, состав, соперник.
 
     standings/team_names приходят из лиги (их берёт вызывающий — модуль без
@@ -635,6 +819,34 @@ def detailed_report(team_id: str, source: str, team_title: str = "",
         opp_avg = {k: round(sum(v.get(k, 0) or 0 for v in opps.values()) / n, 1)
                    for k in keys}
 
+    # Лидеры соперника — по ИХ сезону, а не только по матчам с нами: тренеру
+    # нужно знать, кого держать, а одна очная встреча про это не говорит.
+    h2h = head_to_head(series, opp["team_id"])
+    our_roster = roster_stats(team_id, source, cur_season["series"], names)
+    opp_names = {str(k): v for k, v in (opp_names or {}).items()}
+    opp_season = [g for g in season_series(opp["team_id"], source)
+                  if str(g.get("season_id") or "") == str(cur_season["season_id"])
+                  ] if opp["team_id"] else []
+    lead = {
+        "us": leaders(our_roster, len(cur_season["series"])),
+        "them": leaders(roster_stats(opp["team_id"], source, opp_season, opp_names),
+                        len(opp_season)) if opp_season else [],
+        "us_games": len(cur_season["series"]), "them_games": len(opp_season),
+    }
+    h2h_lead = {}
+    if h2h:
+        h2h_lead = {
+            "us": leaders(roster_stats(team_id, source, h2h, names), len(h2h)),
+            "them": leaders(roster_stats(opp["team_id"], source, h2h, opp_names),
+                            len(h2h)),
+            "games": len(h2h),
+        }
+
+    # Тренировки: посещаемость за последний месяц рядом с игровой статистикой.
+    # Игровой спад и пропуски тренировок разговор про них ведут вместе.
+    att = training_attendance()
+    attach_attendance(our_roster, att, source)
+
     return {
         "ok": True,
         "team_title": team_title or f"{source}:{team_id}",
@@ -645,8 +857,11 @@ def detailed_report(team_id: str, source: str, team_title: str = "",
         "split": split_progress(cur_season["series"]) if not prev else None,
         "last_game": last,
         "opponent": opp,
-        "head_to_head": head_to_head(series, opp["team_id"]),
-        "roster": roster_stats(team_id, source, cur_season["series"], names),
+        "head_to_head": h2h,
+        "roster": our_roster,
+        "leaders": lead,
+        "h2h_leaders": h2h_lead,
+        "attendance": att,
         "standings": standings or [],
         "our_team_id": str(team_id),
         "opp_avg": opp_avg,

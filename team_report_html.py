@@ -32,6 +32,14 @@ def _e(text: Any) -> str:
     return html.escape(str(text if text is not None else ""))
 
 
+def _games(n: int) -> str:
+    """«1 игре», «2 играм», «11 играм» — иначе отчёт читается как машинный."""
+    n = int(n or 0)
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} игре"
+    return f"{n} играм"
+
+
 def _dmy(iso: str) -> str:
     return f"{iso[8:10]}.{iso[5:7]}" if len(iso) >= 10 else iso
 
@@ -136,7 +144,8 @@ def _ai_prompt(team: str, cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
         "2) что команда делает хорошо и на чём это можно строить;",
         "3) как менялась игра по ходу сезона (тренд, а не разовые всплески);",
         "4) 3–5 конкретных упражнений или установок на тренировку;",
-        "5) чего в этих данных не хватает, чтобы вывод был крепче.",
+        "5) кого у соперника надо держать в первую очередь и чем ему мешать;",
+        "6) чего в этих данных не хватает, чтобы вывод был крепче.",
         "Не пересказывай таблицу, считай сам и делай выводы. Пиши по-русски, "
         "коротко и по делу.",
         "",
@@ -163,15 +172,43 @@ def _ai_prompt(team: str, cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
                       f"передачи {o.get('ast')}, потери {o.get('tur')}, "
                       f"броски {o.get('fgm')}/{o.get('fga')}"]
     roster = data.get("roster") or []
+    att = data.get("attendance") or {}
     if roster:
-        lines += ["", "СОСТАВ (игрок; игр; минут; очки; подборы; передачи; перехваты; "
-                      "потери; броски; +/-; фэнтези-очки — всё в среднем за игру):"]
+        head = ("СОСТАВ (игрок; игр; минут; очки; подборы; передачи; перехваты; "
+                "потери; броски; +/-; фэнтези-очки — всё в среднем за игру")
+        head += ("; тренировок посещено из "
+                 f"{att['trainings']} за {att['from']}–{att['to']}):"
+                 if att.get("trainings") else "):")
+        lines += ["", head]
         for p_ in roster:
+            row = (f"{p_['name']}; {p_['games']}; {p_['mins']}; {p_['pts']}; {p_['reb']}; "
+                   f"{p_['ast']}; {p_['stl']}; {p_['tur']}; "
+                   f"{(str(round(p_['fg'] * 100)) + '%') if p_['fg'] else '—'}; "
+                   f"{p_['plus_minus']:+g}; {p_['fp']}")
+            if att.get("trainings"):
+                got = p_.get("att_present")
+                row += f"; {got if got is not None else 'н/д'}"
+            lines.append(row)
+        rest = att.get("unmatched") or []
+        if rest:
+            lines += ["", "ХОДЯТ НА ТРЕНИРОВКИ, НО В ПРОТОКОЛАХ НЕ ПОЯВЛЯЛИСЬ "
+                          f"(из {att['trainings']}): "
+                      + ", ".join(f"{r['name']} — {r['present']}" for r in rest)]
+    lead = data.get("leaders") or {}
+    opp_name = (data.get("opponent") or {}).get("name") or "соперник"
+    if lead.get("us") or lead.get("them"):
+        lines += ["", "ЛУЧШИЕ ПО ПОКАЗАТЕЛЯМ, в среднем за игру (показатель; "
+                      f"наш лидер; «{opp_name}»):"]
+        a = {x["key"]: x for x in lead.get("us") or []}
+        b = {x["key"]: x for x in lead.get("them") or []}
+        for k in dict.fromkeys(list(a) + list(b)):
+            x, y = a.get(k), b.get(k)
+            title = (x or y).get("title", k)
             lines.append(
-                f"{p_['name']}; {p_['games']}; {p_['mins']}; {p_['pts']}; {p_['reb']}; "
-                f"{p_['ast']}; {p_['stl']}; {p_['tur']}; "
-                f"{(str(round(p_['fg'] * 100)) + '%') if p_['fg'] else '—'}; "
-                f"{p_['plus_minus']:+g}; {p_['fp']}")
+                f"{title}; {(x['name'] + ' ' + str(x['value'])) if x else 'н/д'}; "
+                f"{(y['name'] + ' ' + str(y['value'])) if y else 'н/д'}")
+        lines.append(f"Считано: наших игр {lead.get('us_games', 0)}, "
+                     f"игр соперника {lead.get('them_games', 0)}.")
     st = data.get("standings") or []
     if st:
         ordered = sorted(st, key=lambda r: (-(r.get("wins") or 0), r.get("losses") or 0))
@@ -185,11 +222,25 @@ def _ai_prompt(team: str, cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
     return "\n".join(lines)
 
 
-def _roster_table(roster: List[Dict[str, Any]]) -> str:
+def _att_cell(p: Dict[str, Any], total: int) -> str:
+    """«5/8» с подсветкой. Прочерк — если игрока нет в листе «Игроки»: ноль там
+    читался бы как прогульщик, а мы про него просто ничего не знаем."""
+    got = p.get("att_present")
+    if got is None:
+        return '<td class="num" title="нет в листе «Игроки»">—</td>'
+    share = got / total if total else 0
+    cls = "pos" if share >= 0.7 else ("neg" if share < 0.4 else "")
+    return f'<td class="num {cls}">{got}/{total}</td>'
+
+
+def _roster_table(roster: List[Dict[str, Any]],
+                  att: Optional[Dict[str, Any]] = None) -> str:
     """Состав: кто сколько играл и что принёс. Средние за игру, а не суммы —
     иначе сыгравший 11 матчей всегда выше сыгравшего три."""
     if not roster:
         return '<div class="empty">Нет данных по составу.</div>'
+    total = (att or {}).get("trainings") or 0
+    th = '<th title="был на тренировках за последний месяц">Трен</th>' if total else ""
     rows = "".join(
         f'<tr><td>{_e(p["name"])}</td><td class="num">{p["games"]}</td>'
         f'<td class="num">{p["mins"] or "—"}</td><td class="num">{p["pts"]}</td>'
@@ -197,11 +248,40 @@ def _roster_table(roster: List[Dict[str, Any]]) -> str:
         f'<td class="num">{p["stl"]}</td><td class="num">{p["tur"]}</td>'
         f'<td class="num">{(str(round(p["fg"] * 100)) + "%") if p["fg"] else "—"}</td>'
         f'<td class="num">{p["plus_minus"]:+g}</td>'
-        f'<td class="num"><b>{p["fp"]}</b></td></tr>' for p in roster)
+        f'<td class="num"><b>{p["fp"]}</b></td>'
+        f'{_att_cell(p, total) if total else ""}</tr>' for p in roster)
     return ('<table><thead><tr><th>Игрок</th><th>И</th><th>Мин</th><th>Очк</th>'
             '<th>Подб</th><th>Пас</th><th>Пх</th><th>Пот</th><th>Броски</th>'
-            '<th>±</th><th>ФО</th></tr></thead>'
+            f'<th>±</th><th>ФО</th>{th}</tr></thead>'
             f'<tbody>{rows}</tbody></table>')
+
+
+def _leaders_table(us: List[Dict[str, Any]], them: List[Dict[str, Any]],
+                   us_title: str, them_title: str) -> str:
+    """Лучший по каждому показателю с обеих сторон — в одной строке, чтобы
+    сравнение читалось глазами, а не подсчётом в уме."""
+    if not us and not them:
+        return ""
+    a = {x["key"]: x for x in us}
+    b = {x["key"]: x for x in them}
+
+    def cell(x: Optional[Dict[str, Any]]) -> str:
+        if not x:
+            return '<td>—</td><td class="num">—</td>'
+        who = _e(x["name"])
+        if x.get("number"):
+            who += f' <span class="kn">№{_e(x["number"])}</span>'
+        return f'<td>{who}</td><td class="num"><b>{x["value"]:g}</b></td>'
+
+    order = [x["key"] for x in us] + [x["key"] for x in them if x["key"] not in a]
+    body = ""
+    for k in dict.fromkeys(order):
+        title = (a.get(k) or b.get(k) or {}).get("title", k)
+        body += f'<tr><td>{_e(title)}</td>{cell(a.get(k))}{cell(b.get(k))}</tr>'
+    return ('<div class="tablewrap"><table class="lead"><thead><tr><th></th>'
+            f'<th colspan="2">{_e(us_title)}</th>'
+            f'<th colspan="2">{_e(them_title)}</th></tr></thead>'
+            f'<tbody>{body}</tbody></table></div>')
 
 
 def _standings_table(rows: List[Dict[str, Any]], our_id: str) -> str:
@@ -291,6 +371,63 @@ def build(data: Dict[str, Any]) -> str:
                 f'играли впервые — сравнивать не с чем.</div>'
                 if not h2h else _games_table(h2h, limit=20))
 
+    # Лидеры: кого держать у них и на ком держимся мы. Первым — сезон (общая
+    # картина), ниже — очные встречи (как это выглядело против нас).
+    lead = data.get("leaders") or {}
+    them_title = opp_name or "Соперник"
+    lead_html = ""
+    if lead.get("us") or lead.get("them"):
+        them_games = lead.get("them_games", 0)
+        note = (f'Наши — по {_games(lead.get("us_games", 0))} сезона, '
+                f'«{_e(them_title)}» — по {them_games}. ')
+        if them_games and them_games <= len(h2h):
+            # Молодая команда: в базе только её матчи с нами. Сказать это прямо,
+            # иначе «лучший бомбардир» из одного вечера читается как их звезда.
+            note += 'Других их протоколов у нас нет — это только игры против нас. '
+        elif not them_games:
+            note += 'Их протоколов в базе нет. '
+        lead_html = (
+            '<div class="chart"><div class="ct">Лучшие по показателям</div>'
+            f'<div class="legend">В среднем за игру. {note}'
+            'Игроки с парой матчей в лидеры не попадают.</div>'
+            + _leaders_table(lead.get("us") or [], lead.get("them") or [],
+                             team, them_title) + '</div>')
+    hl = data.get("h2h_leaders") or {}
+    h2h_lead_html = ""
+    # Отдельный блок по очным встречам нужен, только когда он не повторяет
+    # блок выше: одна встреча уже разобрана во вкладке «Последняя игра».
+    if hl.get("games", 0) >= 2 and (lead.get("us_games", 0) > hl["games"]
+                                    or lead.get("them_games", 0) > hl["games"]):
+        h2h_lead_html = (
+            '<div class="chart"><div class="ct">Лучшие в очных встречах</div>'
+            f'<div class="legend">В среднем за игру, по {_games(hl["games"])} '
+            'между собой.</div>'
+            + _leaders_table(hl.get("us") or [], hl.get("them") or [],
+                             team, them_title) + '</div>')
+
+    # Тренировки: игровой спад и пропуски занятий обсуждаются вместе, поэтому
+    # явка стоит в той же таблице, что и статистика состава.
+    att = data.get("attendance") or {}
+    att_note, att_extra = "", ""
+    if att.get("trainings"):
+        att_note = (f'<div class="legend">Столбец «Трен» — сколько раз игрок был на '
+                    f'тренировке за последний месяц ({_dmy(att["from"])}–{_dmy(att["to"])}): '
+                    f'всего прошло {att["trainings"]} занятий. Прочерк — игрока нет '
+                    f'в листе «Игроки», про его тренировки мы ничего не знаем.</div>')
+        rest = att.get("unmatched") or []
+        if rest:
+            items = "".join(
+                f'<tr><td>{_e(r["name"])}</td>'
+                f'<td class="num">{r["present"]}/{att["trainings"]}</td></tr>'
+                for r in rest)
+            att_extra = ('<div class="chart"><div class="ct">Ходят на тренировки, '
+                         'но в протоколах не появлялись</div>'
+                         f'<div class="tablewrap"><table><tbody>{items}</tbody>'
+                         '</table></div></div>')
+    elif att:
+        att_note = ('<div class="legend">Опросов о тренировках за последний месяц '
+                    'в базе нет — явку показать не могу.</div>')
+
     prompt = _ai_prompt(team, cur, prev, series, ins, data)
     ins_html = "".join(f"<li>{_e(i)}</li>" for i in ins) or "<li>Пока без выводов.</li>"
 
@@ -346,6 +483,12 @@ table {{ width:100%; border-collapse:collapse; font-size:13px; }}
 th,td {{ padding:7px 6px; border-bottom:1px solid var(--line); text-align:left; }}
 th {{ color:var(--muted); font-weight:600; }}
 td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
+td.num.pos {{ color:var(--pos); }} td.num.neg {{ color:var(--neg); }}
+thead th[colspan] {{ text-align:center; }}
+/* Граница между «мы» и «они»: без неё две пары колонок сливаются в кашу. */
+.lead td:nth-child(4), .lead th:nth-child(3) {{ border-left:1px solid var(--line);
+                                                padding-left:12px; }}
+.lead td.num {{ width:64px; }}
 tr.w td:first-child {{ box-shadow:inset 3px 0 var(--pos); }}
 tr.l td:first-child {{ box-shadow:inset 3px 0 var(--neg); }}
 tr.me {{ background:color-mix(in srgb, var(--acc) 18%, transparent); font-weight:600; }}
@@ -395,7 +538,9 @@ button.copy {{ background:var(--acc); color:#fff; border:none; border-radius:10p
 
 <div class="pane" id="p6">
   <div class="chart"><div class="ct">Состав: в среднем за игру</div>
-    <div class="tablewrap">{_roster_table(data.get('roster') or [])}</div></div>
+    {att_note}
+    <div class="tablewrap">{_roster_table(data.get('roster') or [], att)}</div></div>
+  {att_extra}
 </div>
 
 <div class="pane" id="p7">
@@ -406,8 +551,10 @@ button.copy {{ background:var(--acc); color:#fff; border:none; border-radius:10p
 </div>
 
 <div class="pane" id="p4">
-  <div class="ct" style="margin-bottom:8px">Встречи с «{_e(opp_name or '—')}»</div>
-  <div class="tablewrap">{h2h_html}</div>
+  {lead_html}
+  {h2h_lead_html}
+  <div class="chart"><div class="ct">Встречи с «{_e(opp_name or '—')}»</div>
+    <div class="tablewrap">{h2h_html}</div></div>
 </div>
 
 <div class="pane" id="p5">

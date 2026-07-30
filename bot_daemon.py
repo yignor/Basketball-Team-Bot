@@ -1682,6 +1682,36 @@ async def _prog_standings(source: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
         return [], {}
 
 
+async def _prog_opp_names(source: str, opp_id: str, comp_id: str = "") -> Dict[str, str]:
+    """ФИО игроков СОПЕРНИКА — транзитно из заявки лиги.
+
+    Без этого их лидеры в отчёте остаются номерами: у себя мы ФИО не храним
+    (юр-инвариант), а в протоколах лежат только id и номер."""
+    if not opp_id:
+        return {}
+    try:
+        if source == "slpro":
+            import slpro_client
+            roster = await slpro_client.SlproClient().get_roster(int(opp_id))
+            return {str(p.get("player_id")):
+                    f"{p.get('surname', '')} {p.get('name', '')}".strip()
+                    for p in roster if p.get("player_id") is not None}
+        import stats_backfill
+        import run_backfill
+        # У Инфобаскета заявка живёт внутри соревнования; comp_id их игр лежит
+        # у нас в season_id, остальные берём из Конфига — заявка бывает и в
+        # соседнем турнире.
+        comps = ([comp_id] if comp_id else []) + [
+            str(c) for c in run_backfill._ib_comps() if str(c) != comp_id]
+        for c in comps:
+            roster = await stats_backfill.fetch_infobasket_roster(opp_id, c)
+            if roster:
+                return {str(p["player_id"]): p["name"] for p in roster if p.get("name")}
+    except Exception as e:
+        log.warning(f"Заявка соперника {source}:{opp_id} недоступна: {e}")
+    return {}
+
+
 async def _prog_send(message, source: str, team_id: str) -> None:
     """Короткая сводка в чат + подробный разбор файлом.
 
@@ -1695,10 +1725,15 @@ async def _prog_send(message, source: str, team_id: str) -> None:
                   if t["team_id"] == team_id and t["source"] == source), "")
     names = await _prog_names()
     standings, team_names = await _prog_standings(source)
+    # Кто соперник, узнаём заранее: в лигу за их заявкой надо сходить ДО сборки
+    # отчёта — сам team_progress в сеть не ходит.
+    last_opp = await asyncio.to_thread(team_progress.last_opponent, team_id, source)
+    opp_names = await _prog_opp_names(source, last_opp.get("team_id", ""),
+                                      last_opp.get("season_id", ""))
     rep = await asyncio.to_thread(team_progress.game_report, team_id, source, names)
     detail = await asyncio.to_thread(team_progress.detailed_report,
                                      team_id, source, title, names,
-                                     standings, team_names)
+                                     standings, team_names, opp_names)
     await message.reply_text(team_progress.short_summary(rep, detail),
                              reply_markup=InlineKeyboardMarkup(
                                  [[InlineKeyboardButton("⬅️ К командам",
