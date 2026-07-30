@@ -110,6 +110,64 @@ def is_real_game(game: Dict[str, Any]) -> bool:
             and game["us"].get("fga", 0) >= MIN_REAL_SHOTS)
 
 
+def opponent(game: Dict[str, Any]) -> Dict[str, Any]:
+    """Кто был соперником: id, название, наш ли это был домашний матч."""
+    meta = game.get("meta") or {}
+    home = str(meta.get("home_team_id")) == str(game["team_id"])
+    return {
+        "team_id": str(meta.get("guest_team_id") if home else meta.get("home_team_id") or ""),
+        "name": (meta.get("guest_name") if home else meta.get("home_name")) or "",
+        "we_home": home,
+        "our_score": meta.get("home_score") if home else meta.get("guest_score"),
+        "their_score": meta.get("guest_score") if home else meta.get("home_score"),
+    }
+
+
+def history_with(team_id: str, source: str, opp_id: str,
+                 exclude_game: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+    """Прошлые встречи с этим же соперником — от свежих к старым.
+
+    Тренеру важнее не «мы стали лучше вообще», а «мы стали лучше против НИХ»:
+    соперники разной силы, и средняя по всем играм тут врёт."""
+    if not opp_id:
+        return []
+    sheets_cache.init_db()
+    out: List[Dict[str, Any]] = []
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT * FROM game_meta
+               WHERE source = ? AND game_id != ?
+                 AND ((home_team_id = ? AND guest_team_id = ?)
+                   OR (home_team_id = ? AND guest_team_id = ?))
+               ORDER BY game_date DESC LIMIT ?""",
+            (source, str(exclude_game), str(team_id), str(opp_id),
+             str(opp_id), str(team_id), limit)).fetchall()
+        for r in rows:
+            m = dict(r)
+            home = str(m.get("home_team_id")) == str(team_id)
+            ours = m.get("home_score") if home else m.get("guest_score")
+            theirs = m.get("guest_score") if home else m.get("home_score")
+            out.append({"date": m.get("game_date", ""), "our_score": ours,
+                        "their_score": theirs, "diff": (ours or 0) - (theirs or 0),
+                        "game_id": m.get("game_id")})
+    return out
+
+
+def lineup(game: Dict[str, Any], names: Dict[str, str]) -> Dict[str, Any]:
+    """Кто вышел на площадку и кто из них тащил.
+
+    «Играл» — есть в протоколе с ненулевым временем или хоть каким-то
+    действием: в заявке бывают те, кто просидел всю игру, и записывать их в
+    состав нечестно."""
+    played, bench = [], []
+    for p in game.get("players") or []:
+        active = (p.get("secs") or 0) > 0 or any(
+            (p.get(k) or 0) for k in ("pts", "reb", "ast", "stl", "blk", "tur", "pf", "fga"))
+        name = names.get(str(p["player_id"])) or f"№{p.get('number') or p['player_id']}"
+        (played if active else bench).append(name)
+    return {"played": sorted(played), "bench": sorted(bench)}
+
+
 def _baseline(games: List[Dict[str, Any]], side: str = "us") -> Dict[str, float]:
     """Среднее по играм БАЗЫ (без разбираемой игры)."""
     if not games:
@@ -221,6 +279,8 @@ def game_report(team_id: str, source: str, names: Optional[Dict[str, str]] = Non
     base = _baseline(base_games)
     devs = _deviations(game, base)
     names = names or {}
+    opp = opponent(game)
+    hist = history_with(str(team_id), source, opp["team_id"], exclude_game=game["game_id"])
     for d in devs:
         if d["kind"] == "count":
             d["who"] = _culprits(d["key"], game, base_games,
@@ -230,22 +290,23 @@ def game_report(team_id: str, source: str, names: Optional[Dict[str, str]] = Non
     return {"ok": True, "date": game["date"], "source": source, "team_id": str(team_id),
             "meta": game["meta"], "us": game["us"], "them": game["them"],
             "base_games": len(base_games), "deviations": devs,
-            "quarter": _quarters(game)}
+            "quarter": _quarters(game), "opponent": opp, "history": hist,
+            "lineup": lineup(game, names)}
 
 
 def format_report(rep: Dict[str, Any], team_title: str = "") -> str:
     """Текст для Telegram. Коротко: тренеру нужны 3–5 строк, а не простыня."""
     if not rep.get("ok"):
         return f"📈 Прогресс команды\n\nПока не могу разобрать: {rep.get('reason')}."
-    meta = rep.get("meta") or {}
-    score = ""
-    if meta:
-        home = str(meta.get("home_team_id")) == rep["team_id"]
-        ours = meta.get("home_score") if home else meta.get("guest_score")
-        theirs = meta.get("guest_score") if home else meta.get("home_score")
-        score = f" · {ours}:{theirs}"
+    opp = rep.get("opponent") or {}
     d = rep["date"]
-    head = f"📈 {team_title or 'Команда'} · игра {d[8:10]}.{d[5:7]}{score}"
+    score = ""
+    if opp.get("our_score") is not None:
+        score = f" · {opp['our_score']}:{opp['their_score']}"
+    vs = f" против «{opp['name']}»" if opp.get("name") else ""
+    where = "дома" if opp.get("we_home") else "в гостях"
+    head = (f"📈 {team_title or 'Команда'} · игра {d[8:10]}.{d[5:7]}{score}\n"
+            f"{vs.strip() or 'Соперник неизвестен'} · {where}")
 
     bad = [x for x in rep["deviations"] if not x["good"]][:3]
     good = [x for x in rep["deviations"] if x["good"]][:2]
@@ -273,5 +334,30 @@ def format_report(rep: Dict[str, Any], team_title: str = "") -> str:
         parts += [line(x) for x in good]
     if not bad and not good:
         parts.append("Игра прошла ровно по нашим средним — ярких отклонений нет.")
+    # История именно с ЭТИМ соперником: «стали ли мы лучше вообще» тренеру
+    # менее интересно, чем «стали ли мы лучше против них».
+    hist = rep.get("history") or []
+    if hist:
+        parts += ["", f"Прошлые встречи с «{opp.get('name') or 'ними'}»:"]
+        for h in hist:
+            hd = h["date"]
+            parts.append(f"• {hd[8:10]}.{hd[5:7]} — {h['our_score']}:{h['their_score']} "
+                         f"({h['diff']:+d})")
+        now_diff = (opp.get("our_score") or 0) - (opp.get("their_score") or 0)
+        was = hist[0]["diff"]
+        delta = now_diff - was
+        if delta > 0:
+            parts.append(f"Сейчас {now_diff:+d} — на {delta} лучше прошлой встречи.")
+        elif delta < 0:
+            parts.append(f"Сейчас {now_diff:+d} — на {abs(delta)} хуже прошлой встречи.")
+        else:
+            parts.append(f"Сейчас {now_diff:+d} — ровно как в прошлый раз.")
+
+    line_up = rep.get("lineup") or {}
+    if line_up.get("played"):
+        parts += ["", f"Играли ({len(line_up['played'])}): " + ", ".join(line_up["played"])]
+    if line_up.get("bench"):
+        parts.append(f"В заявке, но без игрового времени: " + ", ".join(line_up["bench"]))
+
     parts += ["", f"Сравнение с последними {rep['base_games']} играми этой команды."]
     return "\n".join(parts)

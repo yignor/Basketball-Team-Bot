@@ -177,17 +177,22 @@ def _mark_fetched(conn, source: str, game_id: str, game_date: str) -> None:
 
 
 def _store_game_meta(conn, source: str, game_id: Any, meta: Dict[str, Any]) -> None:
-    """Матч целиком (счёт, соперники, стадия). Только id команд — названия и
-    ФИО в наших таблицах не живут."""
+    """Матч целиком: счёт, соперник, стадия, четверти.
+
+    Названия команд храним — это не персональные данные, а публичное имя
+    клуба, и без него отчёт тренеру пишет «против 38116» вместо соперника.
+    ФИО игроков по-прежнему не храним ([[legal-data-invariant]])."""
     conn.execute(
         """INSERT INTO game_meta (source, game_id, game_date, game_time, season_id, stage_id,
-                                  home_team_id, guest_team_id, home_score, guest_score,
+                                  home_team_id, guest_team_id, home_name, guest_name,
+                                  home_score, guest_score,
                                   quarters_json, arena, video_vk, fetched_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(source, game_id) DO UPDATE SET
                game_date=excluded.game_date, game_time=excluded.game_time,
                season_id=excluded.season_id, stage_id=excluded.stage_id,
                home_team_id=excluded.home_team_id, guest_team_id=excluded.guest_team_id,
+               home_name=excluded.home_name, guest_name=excluded.guest_name,
                home_score=excluded.home_score, guest_score=excluded.guest_score,
                quarters_json=excluded.quarters_json, arena=excluded.arena,
                video_vk=excluded.video_vk, fetched_at=excluded.fetched_at""",
@@ -196,6 +201,7 @@ def _store_game_meta(conn, source: str, game_id: Any, meta: Dict[str, Any]) -> N
         (source, str(game_id), meta.get("game_date") or "", meta.get("game_time") or "",
          str(meta.get("season_id") or ""), str(meta.get("stage_id") or ""),
          str(meta.get("home_team_id") or ""), str(meta.get("guest_team_id") or ""),
+         str(meta.get("home_name") or ""), str(meta.get("guest_name") or ""),
          int(meta.get("home_score", 0) or 0), int(meta.get("guest_score", 0) or 0),
          json.dumps(meta.get("quarters") or [], ensure_ascii=False),
          meta.get("arena") or "", meta.get("video_vk") or "", sheets_cache.now_iso()),
@@ -213,6 +219,7 @@ def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
             "game_date": game_date, "game_time": box.game_time,
             "season_id": season_id, "stage_id": stage_id,
             "home_team_id": box.home_id, "guest_team_id": box.guest_id,
+            "home_name": box.home_name, "guest_name": box.guest_name,
             "home_score": box.home_score, "guest_score": box.guest_score,
             "quarters": [list(q) for q in (box.quarters or [])],
             "arena": box.arena, "video_vk": box.video_vk,
@@ -277,6 +284,7 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
                 "game_date": game_date, "game_time": game_info.get("time", ""),
                 "season_id": season_id,
                 "home_team_id": teams[0].get("id", ""), "guest_team_id": teams[1].get("id", ""),
+                "home_name": teams[0].get("name", ""), "guest_name": teams[1].get("name", ""),
                 "home_score": teams[0].get("score", 0), "guest_score": teams[1].get("score", 0),
                 "arena": game_info.get("venue", ""),
             })
