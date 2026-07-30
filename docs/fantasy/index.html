@@ -161,6 +161,7 @@
     <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
     <button class="tab" id="tab-top" onclick="showTab('top')">🔥 Топ</button>
+    <button class="tab hidden" id="tab-me" onclick="showTab('me')">👤 Я</button>
     <button class="tab" id="tab-rules" onclick="showTab('rules')">📖</button>
     <button class="tab hidden" id="tab-admin" onclick="showTab('admin')">⚙️</button>
   </div>
@@ -212,6 +213,10 @@
     </div>
     <div class="list" id="topList"></div>
     <div class="list hidden" id="guessList"></div>
+  </div>
+  <div id="me" class="hidden">
+    <div class="bar hidden" id="meWho"></div>
+    <div class="list" id="meBody"></div>
   </div>
   <div id="rules" class="hidden">
     <div class="list" id="rulesBody"></div>
@@ -406,6 +411,8 @@
     inherited = !!r.inherited;
     setModes(p.season.modes, r.mode, r.cats);
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
+    // Кабинет — только тем, кого бот опознал как игрока команды (или админу).
+    $('tab-me').classList.toggle('hidden', !(p.player || p.admin));
     return true;
   }
 
@@ -937,7 +944,7 @@
   }
 
   function showTab(name) {
-    for (const t of ['draft', 'table', 'top', 'rules', 'admin']) {
+    for (const t of ['draft', 'table', 'top', 'me', 'rules', 'admin']) {
       $(t).classList.toggle('hidden', name !== t);
       $('tab-' + t).classList.toggle('active', name === t);
     }
@@ -945,8 +952,126 @@
     if (name === 'top' && !$('topList').children.length) showTop(topPeriod);
     if (name === 'admin') loadAdmin();
     if (name === 'rules') renderRules();
+    if (name === 'me') loadMe(meRef);
   }
   window.showTab = showTab;
+
+  // ─── личный кабинет игрока ─────────────────────────────────────────────────
+  //
+  // Показывает не «цену 63», а дорогу: где человек, что держит его здесь и что
+  // нужно сделать. Все числа приходят из того же движка, которым бот двигает
+  // цену, — обещать одно и делать другое нельзя. Вкладка появляется, только
+  // если бот опознал в человеке игрока команды; админ может открыть чужую.
+
+  let meRef = '';           // пусто — свой кабинет
+
+  async function loadMe(ref) {
+    const el = $('meBody');
+    el.innerHTML = '<div class="banner">Загружаю…</div>';
+    if (!live) {
+      el.innerHTML = '<div class="banner">Кабинет доступен только при связи с ботом. ' +
+        'Открой приложение кнопкой «Открыть» или нажми /start в чате.</div>';
+      return;
+    }
+    let d;
+    try {
+      d = await api('/fantasy/me' + (ref ? '?ref=' + encodeURIComponent(ref) : ''));
+    } catch (e) {
+      el.innerHTML = '<div class="banner">Не удалось загрузить кабинет.</div>';
+      return;
+    }
+    renderMePicker(d);
+    if (!d.found) {
+      el.innerHTML = '<div class="banner">' + (d.reason === 'no_player'
+        ? 'Пока не могу связать тебя с игроком команды. Напиши админу — он ' +
+          'сопоставит тебя со строкой в таблице, и кабинет откроется.'
+        : 'Не нашёл такого игрока.') + '</div>';
+      return;
+    }
+    el.innerHTML = meCards(d);
+  }
+  window.loadMe = loadMe;
+
+  // Админу — выбор, чей кабинет смотреть: вопросы «почему у меня так» приходят
+  // ему, и отвечать вслепую невозможно.
+  function renderMePicker(d) {
+    const bar = $('meWho');
+    bar.classList.toggle('hidden', !isAdmin);
+    if (!isAdmin) return;
+    const opts = ['<option value="">— мой кабинет —</option>'].concat(
+      pool.filter(p => !p.excluded).map(p =>
+        `<option value="${esc(p.ref)}"${p.ref === meRef ? ' selected' : ''}>` +
+        `${esc(p.name)}</option>`)).join('');
+    bar.innerHTML = `<select id="meSelect" aria-label="Чей кабинет">${opts}</select>`;
+    $('meSelect').onchange = e => { meRef = e.target.value; loadMe(meRef); };
+  }
+
+  function meCards(d) {
+    const icon = TIER_ICON[d.tier] || '';
+    const inBand = d.high > d.low ? Math.round((d.price - d.low) / (d.high - d.low) * 100) : 0;
+
+    // Куда идёт дело: сравниваем форму с порогами своего ранга.
+    let mood = 'Держишься в своём ранге.';
+    if (d.up_threshold !== null && d.form_up >= d.up_threshold) mood = '📈 Идёшь на повышение!';
+    else if (d.down_threshold !== null && d.form_down < d.down_threshold) mood = '📉 Форма ниже пола ранга.';
+
+    const head = ruleCard(`${icon} ${esc(d.name)}${d.number ? ' · №' + esc(d.number) : ''}`,
+      `<b>Цена ${d.price}</b> · ранг «${esc(d.rank)}» (${d.low}–${d.high})<br>` +
+      `Внутри ранга ты на ${inBand}%.<br><br>${mood}`);
+
+    const form = ruleCard('📊 Твоя форма',
+      `За последние ${d.form_up_games || 0} ${plural(d.form_up_games || 0, 'игру', 'игры', 'игр')} — ` +
+      `<b>${d.form_up}</b> фэнтези-очков за игру.` +
+      (d.form_up_games < d.up_games
+        ? `<br><br>Для движения ранга нужно ${d.up_games} ` +
+          `${plural(d.up_games, 'игра', 'игры', 'игр')} — сыграно ${d.form_up_games}. ` +
+          'Пока игр меньше, цена стоит: двигать не на чем.'
+        : ''));
+
+    let up = '';
+    if (d.up_rank) {
+      up = ruleCard(`⬆️ До ранга «${esc(d.up_rank)}»`,
+        `Нужно держать <b>${d.up_threshold}</b> очков за игру ` +
+        `${d.up_games} ${plural(d.up_games, 'игру', 'игры', 'игр')} подряд.<br><br>` +
+        (d.need_up_next === null
+          ? 'Пока сыграно мало игр — считать не от чего.'
+          : (d.need_up_next <= 0
+            ? '✅ Ты уже проходишь: даже слабая игра не собьёт среднее. ' +
+              'Сыграй ближайший матч — и ранг вырастет.'
+            : `В следующей игре нужно набрать <b>${d.need_up_next}</b> очков — ` +
+              'самая старая игра выпадает из окна, и среднее считается заново.')));
+    } else {
+      up = ruleCard('👑 Выше некуда', 'Ты в высшем ранге. Осталось только держаться.');
+    }
+
+    let down = '';
+    if (d.down_rank) {
+      down = ruleCard(`⬇️ Чтобы не упасть в «${esc(d.down_rank)}»`,
+        `Провал ниже <b>${d.down_threshold}</b> очков за игру ` +
+        `${d.down_games} ${plural(d.down_games, 'игру', 'игры', 'игр')} подряд — и ранг ниже.<br><br>` +
+        (d.keep_next === null
+          ? 'Пока сыграно мало игр — падение не грозит.'
+          : (d.keep_next <= 0
+            ? `✅ Запас есть: даже 0 очков в следующей игре не уронит ранг.`
+            : `⚠️ В следующей игре нужно набрать хотя бы <b>${d.keep_next}</b>, иначе упадёшь.`)));
+    }
+
+    const next = d.next && d.next.price ? ruleCard('🔮 После ближайшей игры',
+      d.next.price === d.price
+        ? 'При нынешней форме цена не изменится.'
+        : `При нынешней форме цена станет <b>${d.next.price}</b> ` +
+          `(${d.next.price > d.price ? '+' : ''}${d.next.price - d.price}).` +
+          (d.next.rank !== d.rank ? ` Ранг: «${esc(d.next.rank)}».` : '') +
+          '<br><br>Цена меняется только если ты играл в этой игре.') : '';
+
+    const games = (d.games || []).length
+      ? '<div class="sect">Последние игры</div>' + d.games.map(g =>
+          `<div class="row"><span>${esc((g.date || '').slice(8, 10))}.` +
+          `${esc((g.date || '').slice(5, 7))}</span><b>${g.fp}</b></div>`).join('')
+      : '';
+
+    return head + form + up + down + next + games;
+  }
 
   // ─── правила ───────────────────────────────────────────────────────────────
   //

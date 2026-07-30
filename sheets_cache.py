@@ -636,6 +636,45 @@ def write_player_tg_id(spreadsheet, player_row: int, tg_user_id: str) -> bool:
         return False
 
 
+PLAYERS_NICK_HEADER = "Telegram ID"       # исторически там @ники, не числа
+
+
+def write_player_nickname(spreadsheet, player_row: int, username: str) -> bool:
+    """Обновляет @ник в листе «Игроки» после опознания.
+
+    Ник в таблице устаревает: человек сменил @, и строка перестаёт совпадать с
+    ним — следующий игрок с похожим ником уже не опознается, а админ видит в
+    листе адрес, которого нет. Пишем только когда ник реально изменился, чтобы
+    не дёргать Sheets на каждом входе."""
+    uname = (username or "").lstrip("@").strip()
+    if not uname:
+        return False
+    init_db()
+    with _connection() as conn:
+        row = conn.execute("SELECT telegram_id FROM players WHERE row_index = ?",
+                           (int(player_row),)).fetchone()
+    current = (row["telegram_id"] if row else "").lstrip("@").strip().lower()
+    if current == uname.lower():
+        return False
+    try:
+        ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
+        header = ws.row_values(1)
+        if PLAYERS_NICK_HEADER not in header:
+            logger.warning("В листе «Игроки» нет столбца «Telegram ID» — ник не пишем")
+            return False
+        col = header.index(PLAYERS_NICK_HEADER) + 1
+        ws.update_cell(int(player_row), col, f"@{uname}")
+    except Exception as e:
+        logger.warning(f"Не удалось обновить ник в листе: {e}")
+        return False
+    with _connection() as conn:
+        conn.execute("UPDATE players SET telegram_id = ? WHERE row_index = ?",
+                     (f"@{uname}", int(player_row)))
+        conn.commit()
+    logger.info(f"Ник в листе обновлён: строка {player_row} -> @{uname}")
+    return True
+
+
 def sync_attendance(spreadsheet) -> None:
     init_db()
     with _connection() as conn:

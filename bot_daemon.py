@@ -1545,11 +1545,15 @@ def _do_link(uid: str, row_index: int) -> str:
         return "Не получилось: человек или строка уже заняты. Открой список заново."
     if not sheets_cache.link_player(str(uid), (person.get("username") or "").lower(), int(row_index)):
         return "Не получилось привязать — строка уже за кем-то закреплена."
-    # Числовой id в лист — чтобы связка была видна и в таблице, не только у бота.
+    # Числовой id и актуальный ник — в лист: связка должна быть видна и в
+    # таблице, а не только у бота. Ник в листе к этому моменту почти всегда
+    # старый (из-за него человек и не опознался сам).
     try:
-        sheets_cache.write_player_tg_id(_get_spreadsheet(), int(row_index), str(uid))
+        ss = _get_spreadsheet()
+        sheets_cache.write_player_tg_id(ss, int(row_index), str(uid))
+        sheets_cache.write_player_nickname(ss, int(row_index), person.get("username") or "")
     except Exception as e:
-        log.warning(f"Привязка: числовой id не записан в лист: {e}")
+        log.warning(f"Привязка: связка не записана в лист: {e}")
     log.info(f"Админ привязал id {uid} к строке {row_index} ({_name_of(target)})")
     return (f"✅ {_name_of(target)} — это {person.get('first_name') or ''} "
             f"(@{person.get('username') or '—'}, id {uid}).\n\n"

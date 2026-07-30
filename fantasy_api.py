@@ -272,6 +272,7 @@ def ensure_player_link(telegram_id: Any, username: str = "") -> bool:
             "SELECT row_index FROM players WHERE tg_user_id = ? LIMIT 1", (uid,)).fetchone()
         if row:
             sheets_cache.link_player(uid, uname, row["row_index"])
+            _push_tg_id_to_sheet(row["row_index"], uid, uname)
             return True
         # 3. Первое знакомство: ищем строку по нику — но только СВОБОДНУЮ.
         if not uname:
@@ -288,18 +289,22 @@ def ensure_player_link(telegram_id: Any, username: str = "") -> bool:
     if not sheets_cache.link_player(uid, uname, cand["row_index"]):
         return False
     log.info(f"фэнтези: @{uname} закреплён за строкой {cand['row_index']} (id {uid})")
-    _push_tg_id_to_sheet(cand["row_index"], uid)
+    _push_tg_id_to_sheet(cand["row_index"], uid, uname)
     return True
 
 
-def _push_tg_id_to_sheet(player_row: int, tg_user_id: str) -> None:
-    """Best-effort: показать числовой id в листе. Доступ живёт в локальной
-    player_links, поэтому недоступность Sheets вход не ломает."""
+def _push_tg_id_to_sheet(player_row: int, tg_user_id: str, username: str = "") -> None:
+    """Best-effort: показать в листе числовой id и актуальный @ник. Доступ живёт
+    в локальной player_links, поэтому недоступность Sheets вход не ломает."""
     try:
         from collect_votes import _init_sheets
-        sheets_cache.write_player_tg_id(_init_sheets(), player_row, tg_user_id)
+        ss = _init_sheets()
+        sheets_cache.write_player_tg_id(ss, player_row, tg_user_id)
+        # Ник в таблице устаревает — обновляем на тот, под которым человек
+        # реально пришёл. Иначе в листе остаётся адрес, которого больше нет.
+        sheets_cache.write_player_nickname(ss, player_row, username)
     except Exception as e:
-        log.warning(f"фэнтези: числовой id не записан в лист: {e}")
+        log.warning(f"фэнтези: связка не записана в лист: {e}")
 
 
 # ─────────────────────────── Пул драфта ──────────────────────────────────────
@@ -1209,6 +1214,10 @@ async def handle_pool(request: web.Request) -> web.Response:
         "pool": pool,
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
         "admin": _is_admin(user),
+        # Нашёлся ли сам человек среди игроков пула — от этого зависит, есть ли
+        # у него личный кабинет. Участник фэнтези и игрок команды — не одно и
+        # то же: играть может и тот, кто сам на площадку не выходит.
+        "player": bool(await _my_card(user, season)),
     })
 
 
@@ -1356,6 +1365,84 @@ async def handle_player(request: web.Request) -> web.Response:
     return web.json_response(profile)
 
 
+def _my_player_row(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Строка листа «Игроки», закреплённая за этим Telegram id."""
+    link = sheets_cache.get_player_link(str(user.get("id")))
+    if not link:
+        return None
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute("SELECT * FROM players WHERE row_index = ?",
+                           (int(link["player_row"]),)).fetchone()
+    return dict(row) if row else None
+
+
+async def _card_for_ref(ref: str, season: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return next((p for p in await build_pool(season=season) if p["ref"] == ref), None)
+
+
+async def _my_card(user: Dict[str, Any],
+                   season: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Карточка пула, соответствующая человеку.
+
+    Мостик тот же, что и у цены: строка листа -> ФИО -> карточка пула, с
+    поправкой на разное написание в лигах. Своего id в лиге человек нам не
+    сообщал, а ФИО в листе ведёт тренер — это единственная связка."""
+    row = _my_player_row(user)
+    if not row:
+        return None
+    key = _price_key(f"{row.get('surname', '')} {row.get('name', '')}")
+    if not key.strip():
+        return None
+    pool = await build_pool(season=season)
+    exact = next((p for p in pool if _price_key(p["name"]) == key), None)
+    if exact:
+        return exact
+    # Одна буква разницы («Лысюк»/«Лисюк») — тот же человек.
+    parts = key.split()
+    if len(parts) < 2:
+        return None
+    sur, first = parts[0], parts[1]
+    for p in pool:
+        o = _price_key(p["name"]).split()
+        if len(o) >= 2 and ((o[0] == sur and _lev1(first, o[1]))
+                            or (o[1] == first and _lev1(sur, o[0]))):
+            return p
+    return None
+
+
+async def handle_me(request: web.Request) -> web.Response:
+    """Личный кабинет игрока: ранг, форма, что нужно для подъёма и падения.
+
+    Только для опознанных игроков команды — как и всё остальное в фэнтези.
+    Админ может открыть чужой кабинет (?ref=…): вопросы «а почему у меня так»
+    приходят ему, и отвечать вслепую невозможно."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
+    season = _season(request)
+    ref = request.query.get("ref", "")
+    if ref and not _is_admin(user):
+        return web.json_response({"error": "forbidden"}, status=403)
+
+    card = await _card_for_ref(ref, season) if ref else await _my_card(user, season)
+    if not card:
+        return web.json_response({
+            "found": False,
+            "reason": "no_player" if not ref else "unknown_player",
+            "admin": _is_admin(user)})
+
+    enriched = _pool_with_stats([card], season)[0]
+    data = fantasy_prices.progress(enriched.get("price"), [card["ref"]], season)
+    data.update({"ref": card["ref"], "name": card["name"],
+                 "number": card.get("number", ""), "tier": enriched.get("tier", ""),
+                 "stats": enriched.get("stats", {}), "admin": _is_admin(user),
+                 "mine": not ref})
+    return web.json_response(data)
+
+
 async def handle_standings(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
@@ -1397,6 +1484,7 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/roster", handle_get_roster),
         web.post("/fantasy/roster", handle_save_roster),
         web.get("/fantasy/player", handle_player),
+        web.get("/fantasy/me", handle_me),
         web.get("/fantasy/standings", handle_standings),
         web.get("/fantasy/top", handle_top),
         web.get("/fantasy/admin", handle_admin_state),

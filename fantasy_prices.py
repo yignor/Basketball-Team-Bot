@@ -288,3 +288,80 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
     return {"updated": written, "checked": len(by_row), "dry_run": dry_run,
             "changes": changes}
 
+
+# ── Личный кабинет игрока ─────────────────────────────────────────────────
+#
+# Игрок должен видеть не «цену 63», а понятную дорогу: где он, что держит его
+# здесь и что нужно сделать. Все числа берутся из того же движка, которым бот
+# двигает цену, — иначе кабинет обещал бы одно, а пересчёт делал другое.
+
+def progress(price: Any, refs: List[str],
+             season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Где игрок и что ему нужно: ранг, форма, сколько до подъёма и падения."""
+    import fantasy_stats
+    import sheets_cache
+
+    # Одиночную ссылку принимаем как есть: строка развернулась бы посимвольно.
+    if isinstance(refs, str):
+        refs = [refs]
+    cfg = settings(season)
+    rank = rank_of(price)
+    try:
+        cur = int(price)
+    except (TypeError, ValueError):
+        cur = 0
+    if not rank:
+        return {"found": False, "reason": "нет цены"}
+    band = RANKS[rank]
+
+    # Последние игры человека — по ним считается всё остальное.
+    sheets_cache.init_db()
+    rows: List[Dict[str, Any]] = []
+    window = max(cfg["up_games"], cfg["down_games"])
+    with sheets_cache.get_connection() as conn:
+        for one in fantasy_stats.expand_refs(refs):
+            src, pid = fantasy_stats.parse_ref(one)
+            rows.extend(dict(r) for r in conn.execute(
+                """SELECT * FROM game_player_stats
+                   WHERE source = ? AND player_id = ? AND game_date != ''
+                   ORDER BY game_date DESC LIMIT ?""", (src, str(pid), window)))
+    rows.sort(key=lambda r: r.get("game_date") or "", reverse=True)
+    weights = None
+    if season:
+        import fantasy
+        weights = fantasy.season_weights(season)
+    games = [{"date": r.get("game_date", ""),
+              "fp": fantasy_stats.fantasy_points(r, weights)} for r in rows[:window]]
+
+    up_fp, up_n = form_fp(refs, cfg["up_games"])
+    down_fp, down_n = form_fp(refs, cfg["down_games"])
+    higher, lower = neighbour(rank, up=True), neighbour(rank, up=False)
+
+    def need_next(threshold: Optional[float], games_n: int) -> Optional[float]:
+        """Сколько набрать в СЛЕДУЮЩЕЙ игре, чтобы среднее окна вышло на порог.
+
+        Окно скользит: самая старая игра из него выпадает, поэтому считаем от
+        суммы последних (N-1), а не от текущего среднего."""
+        if threshold is None:
+            return None
+        kept = [g["fp"] for g in games[:games_n - 1]]
+        if len(kept) < games_n - 1:
+            return None                    # игр ещё не хватает — окно не полное
+        return round(threshold * games_n - sum(kept), 1)
+
+    return {
+        "found": True,
+        "price": cur, "rank": rank, "low": band["low"], "high": band["high"],
+        "up_rank": higher, "down_rank": lower,
+        "up_threshold": band["up"], "down_threshold": band["down"],
+        "up_games": cfg["up_games"], "down_games": cfg["down_games"], "step": cfg["step"],
+        "form_up": up_fp, "form_up_games": up_n,
+        "form_down": down_fp, "form_down_games": down_n,
+        "need_up_next": need_next(band["up"], cfg["up_games"]),
+        "keep_next": need_next(band["down"], cfg["down_games"]),
+        "games": games,
+        # Что бот сделает с ценой после ближайшей игры при нынешней форме —
+        # тот же самый вызов, никакой отдельной «витринной» математики.
+        "next": next_price(cur, refs, season),
+    }
+
