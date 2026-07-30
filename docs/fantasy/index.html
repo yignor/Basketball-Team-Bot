@@ -357,7 +357,9 @@
     pool = (D.pool || []).map(p => {
       const s = p.s || {};
       return { ref: p.r, name: p.m || p.r, number: p.n || '', team: '',
-        price: p.c || 0, tier: p.t || '',
+        // Уровень может не приехать (ужатый payload) — выводим из цены сами:
+        // он и так всегда следует за ней, полосы рангов есть в season.ranks.
+        price: p.c || 0, tier: p.t || tierByPrice(p.c || 0),
         st: {games:s.g||0, pts:s.p||0, reb:s.rb||0, ast:s.a||0,
              stl:s.s||0, blk:s.b||0, tur:s.t||0, fp:s.f||0,
              fp_avg: s.g ? Math.round((s.f||0)/s.g*10)/10 : 0},
@@ -457,6 +459,14 @@
   // поэтому фильтр один: чип показывает и ранг, и диапазон. Отдельный список
   // «ценовых диапазонов» дублировал бы эти же границы.
   let tierFilter = new Set(), affordable = false;
+
+  // Ранг по цене — те же полосы, что у бота (fantasy_modes.tier_for).
+  function tierByPrice(price) {
+    if (!price) return '';
+    const bands = ((seasonInfo || {}).ranks || {}).ranks || [];
+    for (const b of bands) if (price >= b.low) return b.rank;   // сверху вниз
+    return '';
+  }
 
   function rankBands() {
     const info = (seasonInfo && seasonInfo.ranks && seasonInfo.ranks.ranks) || [];

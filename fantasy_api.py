@@ -1032,7 +1032,9 @@ def _payload_variants(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     # это правила игры, без неё экран бесполезен, а статистика лишь помогает
     # выбирать. Раньше следующая ступень выкидывала всё сразу, и запасной вход
     # показывал голый список фамилий.
-    nostat_pool = [{k: v for k, v in p.items() if k != "s"}
+    # Уровень («t») тоже выкидываем: он ОДНОЗНАЧНО следует из цены, а полосы
+    # рангов уже едут в season.ranks — фронт выведет значок сам.
+    nostat_pool = [{k: v for k, v in p.items() if k not in ("s", "t")}
                    for p in data.get("pool") or []]
     bare_pool = [{"r": p.get("r"), "m": p.get("m")} for p in data.get("pool") or []]
     return [
