@@ -45,6 +45,36 @@ _TUNNEL_URL_FILE = os.getenv(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fantasy_api_url.txt"))
 
 
+_dns_cache: Dict[str, Tuple[float, bool]] = {}
+_DNS_TTL = 300
+
+
+def _resolves(url: str) -> bool:
+    """Резолвится ли хост адреса. Быстрый DNS-запрос, ответ кешируем на 5 минут.
+
+    Quick-tunnel Cloudflare умирает вместе с процессом, и его имя ПЕРЕСТАЁТ
+    резолвиться — а файл с адресом остаётся. Фронт же честно ходит по первому
+    адресу из списка, и мёртвый туннель отправлял его в запасной режим, хотя
+    рабочий Funnel был рядом."""
+    import socket
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    if not host:
+        return False
+    now = time.time()
+    hit = _dns_cache.get(host)
+    if hit and now - hit[0] < _DNS_TTL:
+        return hit[1]
+    try:
+        socket.getaddrinfo(host, None)
+        ok = True
+    except OSError:
+        ok = False
+        log.info("адрес живого API не резолвится, отдаём фронту Funnel: %s", host)
+    _dns_cache[host] = (now, ok)
+    return ok
+
+
 def public_api_url() -> str:
     """Текущий публичный адрес живого API для фронта. Приоритет: env-override
     (FANTASY_API_PUBLIC_URL) -> файл от cloudflared-fantasy. Пусто -> фронт сам
@@ -54,9 +84,12 @@ def public_api_url() -> str:
         return override.rstrip("/")
     try:
         with open(_TUNNEL_URL_FILE, encoding="utf-8") as f:
-            return f.read().strip().rstrip("/")
+            url = f.read().strip().rstrip("/")
     except OSError:
         return ""
+    # Файл мог остаться от туннеля, который давно лёг (скрипт не всегда успевает
+    # его стереть). Мёртвый адрес хуже отсутствующего: он стоит ПЕРВЫМ в списке.
+    return url if url and _resolves(url) else ""
 
 
 # ─────────────────────────── initData auth ───────────────────────────────────
@@ -995,12 +1028,19 @@ def _payload_variants(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     самое тяжёлое (10 участников × 20 игр ≈ 18 КБ из 26)."""
     lite_standings = [{k: v for k, v in s.items() if k != "history"}
                       for s in data.get("standings") or []]
-    lite_pool = [{"r": p.get("r"), "m": p.get("m")} for p in data.get("pool") or []]
+    # Без статистики, но С ЦЕНОЙ, уровнем и номером: в бюджетном режиме цена —
+    # это правила игры, без неё экран бесполезен, а статистика лишь помогает
+    # выбирать. Раньше следующая ступень выкидывала всё сразу, и запасной вход
+    # показывал голый список фамилий.
+    nostat_pool = [{k: v for k, v in p.items() if k != "s"}
+                   for p in data.get("pool") or []]
+    bare_pool = [{"r": p.get("r"), "m": p.get("m")} for p in data.get("pool") or []]
     return [
         data,
         {**data, "standings": lite_standings},
         {**data, "standings": []},
-        {**data, "standings": [], "pool": lite_pool},
+        {**data, "standings": [], "pool": nostat_pool},
+        {**data, "standings": [], "pool": bare_pool},
     ]
 
 
