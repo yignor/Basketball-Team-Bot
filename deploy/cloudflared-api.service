@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Tunnel to fantasy API (named)
+After=network-online.target basketball-bot.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Именованный туннель, в отличие от quick: адрес постоянный и живёт в DNS
+# Cloudflare, поэтому кнопка в чате не может указать на «вчерашний» туннель.
+# Именно из-за сменного адреса quick-туннель был выкинут 30.07.2026.
+ExecStart=/usr/local/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
