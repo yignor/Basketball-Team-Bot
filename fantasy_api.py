@@ -1142,7 +1142,10 @@ def _payload_variants(data: Dict[str, Any]) -> List[Dict[str, Any]]:
         {**data, "standings": lite_standings},
         {**data, "standings": []},
         {**data, "standings": [], "pool": nostat_pool},
-        {**data, "standings": [], "pool": bare_pool},
+        # Кабинет уходит РАНЬШЕ цен: без цен в бюджетном режиме нечего делать
+        # вообще, а кабинет — приятное дополнение.
+        {**data, "standings": [], "pool": nostat_pool, "me": {}},
+        {**data, "standings": [], "pool": bare_pool, "me": {}},
     ]
 
 
@@ -1174,6 +1177,11 @@ def _payload_me(shared: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         return {}
     season = fantasy._get_season(shared["season_id"])
     data = fantasy_prices.progress(entry["c"], [entry["r"]], season)
+    # Ужимаем: в кнопке каждый символ на счету. Последних игр хватит трёх, а
+    # причина движения цены — служебная строка, экран её не показывает.
+    data["games"] = (data.get("games") or [])[:3]
+    if isinstance(data.get("next"), dict):
+        data["next"] = {k: v for k, v in data["next"].items() if k != "reason"}
     data.update({"ref": entry["r"], "name": entry.get("m", ""),
                  "number": entry.get("n", ""), "mine": True})
     return data
