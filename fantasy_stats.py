@@ -79,6 +79,24 @@ OVERLAPPING = {"reb": ("reb_off", "reb_def"), "fga": ("fgm",), "fta": ("ftm",),
                "tpa": ("tpm",)}
 
 
+def _time_to_secs(value: Any) -> int:
+    """«12:34» -> 754. Инфобаскет отдаёт время строкой, SLPRO — секундами."""
+    if value is None or value == "":
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    parts = str(value).strip().split(":")
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return 0
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[0] * 60 if nums else 0
+
+
 def derived_stats(row: Dict[str, Any]) -> Dict[str, float]:
     """Промахи и дабл-даблы — их нет в протоколе строкой, но они есть в цифрах.
 
@@ -274,6 +292,11 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
                 "blk": p.get("blocks", 0), "tur": p.get("turnovers", 0), "pf": p.get("fouls", 0),
                 # Инфобаскет отдаёт это готовым полем OpponentFoul.
                 "foul_on": p.get("opponent_fouls", 0),
+                # Время и плюс-минус лига тоже отдаёт (PlayedTime, PlusMinus) —
+                # просто раньше мы их не забирали, и в админке эти два
+                # показателя работали бы только у SLPRO.
+                "secs": _time_to_secs(p.get("minutes")),
+                "plus_minus": p.get("plus_minus", 0) or 0,
                 "fgm": (p.get("field_goals_made", 0) + p.get("three_pointers_made", 0)),
                 "fga": (p.get("field_goals_attempted", 0) + p.get("three_pointers_attempted", 0)),
                 "tpm": p.get("three_pointers_made", 0), "tpa": p.get("three_pointers_attempted", 0),
