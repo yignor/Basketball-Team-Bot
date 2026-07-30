@@ -982,6 +982,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
+        [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
@@ -1355,6 +1356,128 @@ def _render_bot_users_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
 
 
+# ─── опознание игроков ──────────────────────────────────────────────────────
+#
+# Доступ к фэнтези и личной статистике держится на связке «числовой Telegram id
+# ↔ строка листа». Сама она возникает при /start по совпадению @ника, но ник в
+# листе бывает старым, чужим или его нет вовсе — и человек навсегда остаётся
+# «не игроком команды». Разобрать такое может только тот, кто знает людей в
+# лицо, поэтому здесь список и ручная привязка.
+
+def _name_of(row: Dict[str, Any]) -> str:
+    return " ".join(x for x in (row.get("surname"), row.get("name")) if x).strip()
+
+
+def _link_candidates(person: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Свободные строки листа, самые похожие — сверху.
+
+    Похожесть считаем по тому, что вообще известно про человека в Telegram:
+    его @ник и имя. Это подсказка, а не решение — выбирает всё равно админ."""
+    uname = (person.get("username") or "").lstrip("@").lower()
+    first = (person.get("first_name") or "").strip().lower()
+
+    def score(r: Dict[str, Any]) -> int:
+        nick = (r.get("telegram_id") or "").lstrip("@").lower()
+        name = (r.get("name") or "").lower()
+        surname = (r.get("surname") or "").lower()
+        if uname and nick == uname:
+            return 0                      # ник совпал точно — почти наверняка он
+        if first and first in (name, surname):
+            return 1
+        if uname and nick and (uname in nick or nick in uname):
+            return 2
+        if first and (first in name or name in first):
+            return 3
+        return 4
+
+    rows = sheets_cache.free_player_rows()
+    return sorted(rows, key=lambda r: (score(r), _name_of(r)))
+
+
+def _render_link_list() -> Tuple[str, InlineKeyboardMarkup]:
+    people = sheets_cache.unlinked_bot_users()
+    free = sheets_cache.free_player_rows()
+    lines = ["🔗 Опознание игроков", ""]
+    if people:
+        lines += [f"В боте, но не сопоставлены с листом: {len(people)}.",
+                  "Нажми на человека — предложу, кому он может быть.", ""]
+    else:
+        lines.append("Все, кто нажимал /start, сопоставлены с игроками. ✅")
+    rows: List[List[InlineKeyboardButton]] = []
+    for p in people[:12]:
+        nick = f"@{p['username']}" if p["username"] else "без ника"
+        title = f"{p['first_name'] or 'без имени'} · {nick}"
+        rows.append([InlineKeyboardButton(title[:64],
+                                          callback_data=f"admin:link:pick:{p['telegram_id']}:0")])
+    if free:
+        lines += ["", f"Строк листа без привязки: {len(free)} — эти игроки в бот "
+                      f"ещё не заходили или их не опознали."]
+        rows.append([InlineKeyboardButton(f"📋 Кого нет в боте ({len(free)})",
+                                          callback_data="admin:link:free:0")])
+    rows.append(_back_button())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _render_link_pick(uid: str, offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    person = next((p for p in sheets_cache.unlinked_bot_users()
+                   if str(p["telegram_id"]) == str(uid)), None)
+    if not person:
+        return "Этот человек уже привязан или пропал из списка.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К списку", callback_data="admin:link:list")]])
+    nick = f"@{person['username']}" if person["username"] else "без ника"
+    cand = _link_candidates(person)
+    page = cand[offset:offset + PAGE_SIZE]
+    lines = [f"🔗 Кто это: {person['first_name'] or '—'} · {nick}",
+             f"id {person['telegram_id']}", "",
+             "Выбери строку листа «Игроки». Сверху — самые похожие.",
+             f"Свободных строк: {len(cand)}", ""]
+    rows = [[InlineKeyboardButton(
+        (f"{_name_of(r)}" + (f" · {r['telegram_id']}" if r["telegram_id"] else ""))[:64],
+        callback_data=f"admin:link:do:{uid}:{r['row_index']}")] for r in page]
+    nav = _pagination_row(f"admin:link:pick:{uid}", offset, PAGE_SIZE, len(cand))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:link:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _render_link_free(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
+    free = sheets_cache.free_player_rows()
+    page = free[offset:offset + PAGE_SIZE]
+    shown_to = min(offset + len(page), len(free))
+    lines = [f"📋 В листе без привязки ({offset + 1}-{shown_to} из {len(free)})", "",
+             "Этим людям достаточно нажать /start в боте: если ник в листе совпадёт "
+             "с их @, бот опознает их сам. Если ника нет или он другой — вернись "
+             "сюда и привяжи руками.", ""]
+    for r in page:
+        nick = r["telegram_id"] or "— ника нет —"
+        lines.append(f"• {_name_of(r)} — {nick}")
+    rows = [_pagination_row("admin:link:free", offset, PAGE_SIZE, len(free))]
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:link:list")])
+    return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+def _do_link(uid: str, row_index: int) -> str:
+    """Привязывает и возвращает текст ответа админу."""
+    people = {str(p["telegram_id"]): p for p in sheets_cache.unlinked_bot_users()}
+    person = people.get(str(uid))
+    target = next((r for r in sheets_cache.free_player_rows()
+                   if int(r["row_index"]) == int(row_index)), None)
+    if not person or not target:
+        return "Не получилось: человек или строка уже заняты. Открой список заново."
+    if not sheets_cache.link_player(str(uid), (person.get("username") or "").lower(), int(row_index)):
+        return "Не получилось привязать — строка уже за кем-то закреплена."
+    # Числовой id в лист — чтобы связка была видна и в таблице, не только у бота.
+    try:
+        sheets_cache.write_player_tg_id(_get_spreadsheet(), int(row_index), str(uid))
+    except Exception as e:
+        log.warning(f"Привязка: числовой id не записан в лист: {e}")
+    log.info(f"Админ привязал id {uid} к строке {row_index} ({_name_of(target)})")
+    return (f"✅ {_name_of(target)} — это {person.get('first_name') or ''} "
+            f"(@{person.get('username') or '—'}, id {uid}).\n\n"
+            "Теперь у него работает живая статистика и фэнтези.")
+
+
 def _render_user_log_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
     data = sheets_cache.get_user_action_log(offset=offset, limit=10)
     shown_to = min(data["offset"] + len(data["rows"]), data["total"])
@@ -1669,6 +1792,24 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
             await _handle_report_action(query, kind, period)
+
+        elif parts[1] == "link":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "list":
+                text, markup = _render_link_list()
+            elif what == "free":
+                text, markup = _render_link_free(int(parts[3]) if len(parts) > 3 else 0)
+            elif what == "pick":
+                text, markup = _render_link_pick(parts[3], int(parts[4]) if len(parts) > 4 else 0)
+            elif what == "do":
+                # Привязка ходит в Sheets — в фоновый поток, чтобы не морозить
+                # обработчик кнопок на время сетевого запроса.
+                answer = await asyncio.to_thread(_do_link, parts[3], int(parts[4]))
+                text, markup = _render_link_list()
+                text = answer + "\n\n" + text
+            else:
+                text, markup = _render_link_list()
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "refetch":
             import stats_backfill

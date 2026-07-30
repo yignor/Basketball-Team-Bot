@@ -1006,6 +1006,33 @@ def get_bot_users_page(offset: int = 0, limit: int = 8) -> Dict[str, Any]:
     return {"rows": rows, "total": total, "offset": offset, "limit": limit}
 
 
+def unlinked_bot_users() -> List[Dict[str, Any]]:
+    """Кто нажимал /start, но не сопоставлен ни с одной строкой листа.
+
+    Это те, кому бот отвечает «не игрок команды»: сменил @ник, ника в листе нет
+    вовсе — или он вообще посторонний. Разобрать может только человек, поэтому
+    список выносим в админку."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            """SELECT telegram_id, username, first_name, first_seen_at FROM bot_users
+               WHERE telegram_id NOT IN (SELECT tg_user_id FROM player_links)
+               ORDER BY first_seen_at DESC""").fetchall()
+    return [dict(r) for r in rows]
+
+
+def free_player_rows() -> List[Dict[str, Any]]:
+    """Строки листа «Игроки», ещё ни за кем не закреплённые."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            """SELECT row_index, surname, name, telegram_id, tg_user_id FROM players
+               WHERE name != ''
+                 AND row_index NOT IN (SELECT player_row FROM player_links)
+               ORDER BY surname, name""").fetchall()
+    return [dict(r) for r in rows]
+
+
 def report_error(source: str, message: str, spreadsheet=None) -> None:
     """Логирует ошибку в SQLite (для быстрого показа в /admin) и, если
     передан spreadsheet, дублирует в лист "Ошибки". Сама никогда не
