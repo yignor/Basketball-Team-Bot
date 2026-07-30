@@ -1661,6 +1661,27 @@ async def _render_prog_list(is_admin: bool = False) -> Tuple[str, InlineKeyboard
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
+async def _prog_standings(source: str) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    """Турнирная таблица лиги и имена команд.
+
+    Имена берём отсюда, а не из своей базы: у нас они появляются только у
+    перекачанных игр, а лига знает их всегда — и соперники в отчёте перестают
+    быть номерами."""
+    if source != "slpro":
+        return [], {}
+    try:
+        import slpro_client
+        teams = slpro_client.config_team_names() or slpro_client.env_team_names()
+        ctxs = await slpro_client.team_contexts(teams)
+        if not ctxs:
+            return [], {}
+        rows = await slpro_client.SlproClient().get_standings(ctxs[0])
+        return rows, {str(r.get("team_id")): r.get("name") or "" for r in rows}
+    except Exception as e:
+        log.warning(f"Таблица лиги недоступна: {e}")
+        return [], {}
+
+
 async def _prog_send(message, source: str, team_id: str) -> None:
     """Короткая сводка в чат + подробный разбор файлом.
 
@@ -1673,9 +1694,11 @@ async def _prog_send(message, source: str, team_id: str) -> None:
     title = next((t["name"] for t in teams
                   if t["team_id"] == team_id and t["source"] == source), "")
     names = await _prog_names()
+    standings, team_names = await _prog_standings(source)
     rep = await asyncio.to_thread(team_progress.game_report, team_id, source, names)
     detail = await asyncio.to_thread(team_progress.detailed_report,
-                                     team_id, source, title, names)
+                                     team_id, source, title, names,
+                                     standings, team_names)
     await message.reply_text(team_progress.short_summary(rep, detail),
                              reply_markup=InlineKeyboardMarkup(
                                  [[InlineKeyboardButton("⬅️ К командам",

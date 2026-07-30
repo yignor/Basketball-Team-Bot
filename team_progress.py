@@ -407,6 +407,86 @@ def season_series(team_id: str, source: str) -> List[Dict[str, Any]]:
     return [g for g in out if g["players"] >= MIN_REAL_PLAYERS and g["fga"] >= MIN_REAL_SHOTS]
 
 
+def opponents_series(team_id: str, source: str,
+                     game_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Суммы СОПЕРНИКА в каждой нашей игре.
+
+    Это честная база для сравнения «мы против лиги»: соперники в протоколе
+    наши же, значит считаем по тем самым играм, а не по чужим турнирам, где
+    другой темп и другой уровень."""
+    if not game_ids:
+        return {}
+    sheets_cache.init_db()
+    marks = ",".join("?" * len(game_ids))
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(f"""
+            SELECT game_id, SUM(pts) pts, SUM(reb) reb, SUM(reb_off) reb_off,
+                   SUM(reb_def) reb_def, SUM(ast) ast, SUM(stl) stl, SUM(blk) blk,
+                   SUM(tur) tur, SUM(pf) pf, SUM(fgm) fgm, SUM(fga) fga,
+                   SUM(tpm) tpm, SUM(tpa) tpa, SUM(ftm) ftm, SUM(fta) fta
+            FROM game_player_stats
+            WHERE source = ? AND team_id != ? AND game_id IN ({marks})
+            GROUP BY game_id""", [source, str(team_id)] + list(game_ids)).fetchall()
+    return {r["game_id"]: dict(r) for r in rows}
+
+
+def roster_stats(team_id: str, source: str, series: List[Dict[str, Any]],
+                 names: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Разбор по составу: кто сколько играл и что принёс.
+
+    Считаем только по играм ЭТОГО сезона (game_ids из series), иначе новичок и
+    ветеран сравнивались бы на разных отрезках."""
+    ids = [g["game_id"] for g in series]
+    if not ids:
+        return []
+    import fantasy_stats
+    sheets_cache.init_db()
+    marks = ",".join("?" * len(ids))
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(f"""
+            SELECT player_id, number, COUNT(*) games, SUM(secs) secs,
+                   SUM(pts) pts, SUM(reb) reb, SUM(reb_off) reb_off, SUM(ast) ast,
+                   SUM(stl) stl, SUM(blk) blk, SUM(tur) tur, SUM(pf) pf,
+                   SUM(foul_on) foul_on, SUM(fgm) fgm, SUM(fga) fga,
+                   SUM(tpm) tpm, SUM(tpa) tpa, SUM(ftm) ftm, SUM(fta) fta,
+                   SUM(plus_minus) plus_minus
+            FROM game_player_stats
+            WHERE source = ? AND team_id = ? AND game_id IN ({marks})
+            GROUP BY player_id""", [source, str(team_id)] + ids)]
+    names = names or {}
+    out = []
+    for r in rows:
+        n = r["games"] or 1
+        fp = fantasy_stats.fantasy_points({k: (v or 0) for k, v in r.items()})
+        out.append({
+            "player_id": str(r["player_id"]),
+            "name": names.get(str(r["player_id"])) or f"№{r['number'] or r['player_id']}",
+            "games": r["games"], "mins": round((r["secs"] or 0) / 60 / n, 1),
+            "pts": round((r["pts"] or 0) / n, 1), "reb": round((r["reb"] or 0) / n, 1),
+            "ast": round((r["ast"] or 0) / n, 1), "stl": round((r["stl"] or 0) / n, 1),
+            "tur": round((r["tur"] or 0) / n, 1), "pf": round((r["pf"] or 0) / n, 1),
+            "fg": _pct(r["fgm"] or 0, r["fga"] or 0),
+            "plus_minus": round((r["plus_minus"] or 0) / n, 1),
+            "fp": round(fp / n, 1),
+        })
+    out.sort(key=lambda x: x["fp"], reverse=True)
+    return out
+
+
+def split_progress(series: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Первая половина сезона против второй — когда прошлого сезона ещё нет.
+
+    «Прогресса не с чем сравнить» — плохой ответ тренеру: динамика внутри
+    сезона видна и по одному сезону, надо только разрезать его пополам."""
+    if len(series) < 6:
+        return None
+    half = len(series) // 2
+    first, second = series[:half], series[half:]
+    return {"first": summarize(first), "second": summarize(second),
+            "first_from": first[0]["game_date"], "first_to": first[-1]["game_date"],
+            "second_from": second[0]["game_date"], "second_to": second[-1]["game_date"]}
+
+
 def seasons_of(series: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Сезоны в порядке «свежий первым»: id, период, сколько игр."""
     by: Dict[str, List[Dict[str, Any]]] = {}
@@ -451,7 +531,8 @@ def head_to_head(series: List[Dict[str, Any]], opp_id: str) -> List[Dict[str, An
 
 
 def insights(cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
-             series: List[Dict[str, Any]]) -> List[str]:
+             series: List[Dict[str, Any]],
+             opp_avg: Optional[Dict[str, float]] = None) -> List[str]:
     """Выводы словами. Не пересказ таблицы, а то, что видно только в сравнении."""
     out: List[str] = []
     if not cur:
@@ -488,6 +569,25 @@ def insights(cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
             if was and abs(now - was) / was >= 0.2:
                 sign = "выросли" if now > was else "упали"
                 out.append(f"Сезон к сезону {title} {sign}: {was} → {now} за игру.")
+    # Сравнение с соперниками — не с абстрактной нормой, а с теми, против кого
+    # реально играли: их протоколы лежат в тех же играх.
+    if opp_avg:
+        for key, title, more_better in (("reb", "подборам", True),
+                                        ("ast", "передачам", True),
+                                        ("tur", "потерям", False)):
+            ours, theirs = cur["avg"].get(key, 0), opp_avg.get(key, 0)
+            if not theirs:
+                continue
+            d = ours - theirs
+            if abs(d) / theirs >= 0.15:
+                better = (d > 0) == more_better
+                out.append(f"По {title} {'выигрываем' if better else 'проигрываем'} "
+                           f"соперникам: {ours} против {theirs} за игру.")
+        our_fg = _pct(cur["avg"].get("fgm", 0), cur["avg"].get("fga", 0))
+        opp_fg = _pct(opp_avg.get("fgm", 0), opp_avg.get("fga", 0))
+        if our_fg and opp_fg and abs(our_fg - opp_fg) >= 0.04:
+            out.append(f"Реализация: у нас {our_fg*100:.0f}%, у соперников "
+                       f"{opp_fg*100:.0f}% — {'лучше' if our_fg > opp_fg else 'хуже'}.")
     if len(series) >= 6:
         last3 = series[-3:]
         prev3 = series[-6:-3]
@@ -499,31 +599,58 @@ def insights(cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
 
 
 def detailed_report(team_id: str, source: str, team_title: str = "",
-                    names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Всё для подробного отчёта: сезон, прошлый сезон, соперник, выводы."""
+                    names: Optional[Dict[str, str]] = None,
+                    standings: Optional[List[Dict[str, Any]]] = None,
+                    team_names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Всё для подробного отчёта: сезон, динамика, лига, состав, соперник.
+
+    standings/team_names приходят из лиги (их берёт вызывающий — модуль без
+    сети). Названия команд оттуда же: в нашей базе они появляются только у
+    перекачанных игр, а таблица лиги знает их всегда."""
     from datetime import datetime
 
     series = season_series(team_id, source)
     if not series:
         return {"ok": False, "reason": "нет игр"}
+    team_names = {str(k): v for k, v in (team_names or {}).items()}
+    for g in series:                       # дозаполняем имена соперников из лиги
+        if not g["opp_name"] and g["opp_id"] in team_names:
+            g["opp_name"] = team_names[g["opp_id"]]
+
     seasons = seasons_of(series)
     cur_season = seasons[0]
     prev_season = seasons[1] if len(seasons) > 1 else None
+    cur = summarize(cur_season["series"])
+    prev = summarize(prev_season["series"]) if prev_season else None
     last = series[-1]
     opp = {"team_id": last["opp_id"], "name": last["opp_name"]}
+
+    # Соперники в НАШИХ играх — база для «мы против лиги».
+    opps = opponents_series(team_id, source, [g["game_id"] for g in cur_season["series"]])
+    opp_avg = {}
+    if opps:
+        n = len(opps)
+        keys = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur", "pf",
+                "fgm", "fga", "tpm", "tpa", "ftm", "fta")
+        opp_avg = {k: round(sum(v.get(k, 0) or 0 for v in opps.values()) / n, 1)
+                   for k in keys}
+
     return {
         "ok": True,
         "team_title": team_title or f"{source}:{team_id}",
         "generated": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "series": cur_season["series"],
-        "season": summarize(cur_season["series"]),
-        "prev_season": summarize(prev_season["series"]) if prev_season else None,
+        "season": cur,
+        "prev_season": prev,
+        "split": split_progress(cur_season["series"]) if not prev else None,
         "last_game": last,
         "opponent": opp,
         "head_to_head": head_to_head(series, opp["team_id"]),
-        "insights": insights(summarize(cur_season["series"]),
-                             summarize(prev_season["series"]) if prev_season else None,
-                             cur_season["series"]),
+        "roster": roster_stats(team_id, source, cur_season["series"], names),
+        "standings": standings or [],
+        "our_team_id": str(team_id),
+        "opp_avg": opp_avg,
+        "insights": insights(cur, prev, cur_season["series"], opp_avg),
     }
 
 

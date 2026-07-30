@@ -122,11 +122,13 @@ def _games_table(series: List[Dict[str, Any]], limit: int = 20) -> str:
 
 
 def _ai_prompt(team: str, cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
-               series: List[Dict[str, Any]], insights: List[str]) -> str:
+               series: List[Dict[str, Any]], insights: List[str],
+               data: Optional[Dict[str, Any]] = None) -> str:
     """Готовый текст для ИИ: цифры + роль + чего мы от него хотим.
 
     Кладём компактную таблицу, а не пересказ: модели проще считать самой, чем
     доверять нашим выводам, а выводы даём отдельно — пусть спорит."""
+    data = data or {}
     lines = [
         "Ты профессиональный баскетбольный аналитик. Ниже — статистика "
         f"любительской команды «{team}» по играм. Разбери её как для тренера:",
@@ -154,10 +156,66 @@ def _ai_prompt(team: str, cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
             f"{'дома' if g['home'] else 'гости'}; {g['our_score']}:{g['their_score']}; "
             f"{g['reb']}; {g['reb_off']}; {g['ast']}; {g['stl']}; {g['tur']}; {g['pf']}; "
             f"{g['fgm']}/{g['fga']}; {g['tpm']}/{g['tpa']}; {g['ftm']}/{g['fta']}")
+    if data.get("opp_avg"):
+        o = data["opp_avg"]
+        lines += ["", "СОПЕРНИКИ В ЭТИХ ЖЕ ИГРАХ (в среднем за игру): "
+                      f"очки {o.get('pts')}, подборы {o.get('reb')}, "
+                      f"передачи {o.get('ast')}, потери {o.get('tur')}, "
+                      f"броски {o.get('fgm')}/{o.get('fga')}"]
+    roster = data.get("roster") or []
+    if roster:
+        lines += ["", "СОСТАВ (игрок; игр; минут; очки; подборы; передачи; перехваты; "
+                      "потери; броски; +/-; фэнтези-очки — всё в среднем за игру):"]
+        for p_ in roster:
+            lines.append(
+                f"{p_['name']}; {p_['games']}; {p_['mins']}; {p_['pts']}; {p_['reb']}; "
+                f"{p_['ast']}; {p_['stl']}; {p_['tur']}; {p_['fg']}; "
+                f"{p_['plus_minus']:+g}; {p_['fp']}")
+    st = data.get("standings") or []
+    if st:
+        ordered = sorted(st, key=lambda r: (-(r.get("wins") or 0), r.get("losses") or 0))
+        lines += ["", "ТУРНИРНАЯ ТАБЛИЦА (место; команда; победы; поражения):"]
+        for i, r in enumerate(ordered, 1):
+            mark = " <- мы" if str(r.get("team_id")) == str(data.get("our_team_id")) else ""
+            lines.append(f"{i}; {r.get('name')}; {r.get('wins')}; {r.get('losses')}{mark}")
     if insights:
         lines += ["", "ЧТО ЗАМЕТИЛ БОТ (проверь и поспорь, если не согласен):"]
         lines += [f"- {i}" for i in insights]
     return "\n".join(lines)
+
+
+def _roster_table(roster: List[Dict[str, Any]]) -> str:
+    """Состав: кто сколько играл и что принёс. Средние за игру, а не суммы —
+    иначе сыгравший 11 матчей всегда выше сыгравшего три."""
+    if not roster:
+        return '<div class="empty">Нет данных по составу.</div>'
+    rows = "".join(
+        f'<tr><td>{_e(p["name"])}</td><td class="num">{p["games"]}</td>'
+        f'<td class="num">{p["mins"] or "—"}</td><td class="num">{p["pts"]}</td>'
+        f'<td class="num">{p["reb"]}</td><td class="num">{p["ast"]}</td>'
+        f'<td class="num">{p["stl"]}</td><td class="num">{p["tur"]}</td>'
+        f'<td class="num">{p["fg"]}</td>'
+        f'<td class="num">{p["plus_minus"]:+g}</td>'
+        f'<td class="num"><b>{p["fp"]}</b></td></tr>' for p in roster)
+    return ('<table><thead><tr><th>Игрок</th><th>И</th><th>Мин</th><th>Очк</th>'
+            '<th>Подб</th><th>Пас</th><th>Пх</th><th>Пот</th><th>Броски</th>'
+            '<th>±</th><th>ФО</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table>')
+
+
+def _standings_table(rows: List[Dict[str, Any]], our_id: str) -> str:
+    """Турнирная таблица лиги — как она есть у самой лиги, с нашей строкой."""
+    if not rows:
+        return '<div class="empty">Турнирная таблица недоступна для этой лиги.</div>'
+    ordered = sorted(rows, key=lambda r: (-(r.get("wins") or 0), r.get("losses") or 0))
+    body = "".join(
+        f'<tr class="{"me" if str(r.get("team_id")) == str(our_id) else ""}">'
+        f'<td class="num">{i}</td><td>{_e(r.get("name") or r.get("team_id"))}</td>'
+        f'<td class="num">{r.get("wins", 0)}</td><td class="num">{r.get("losses", 0)}</td>'
+        f'<td class="num">{r.get("points", 0)}</td></tr>'
+        for i, r in enumerate(ordered, 1))
+    return ('<table><thead><tr><th>#</th><th>Команда</th><th>В</th><th>П</th>'
+            f'<th>Очки</th></tr></thead><tbody>{body}</tbody></table>')
 
 
 def build(data: Dict[str, Any]) -> str:
@@ -201,11 +259,38 @@ def build(data: Dict[str, Any]) -> str:
             prev_rows.append((title, cur["avg"].get(key, 0), prev["avg"].get(key, 0)))
     prev_bars = _bars(prev_rows, "Этот сезон против прошлого", "сейчас", "прошлый сезон")
 
+    # Прошлого сезона может не быть вовсе (команда играет первый) — тогда
+    # показываем динамику ВНУТРИ сезона: первая половина против второй.
+    split = data.get("split")
+    split_html = ""
+    if not prev and split:
+        f, sc = split["first"], split["second"]
+        split_rows = [(t, sc["avg"].get(k, 0), f["avg"].get(k, 0)) for k, t in METRIC_TITLES]
+        split_html = (
+            f'<div class="sub">Прошлого сезона в базе нет, поэтому сравниваем '
+            f'половины текущего: {_dmy(split["first_from"])}–{_dmy(split["first_to"])} '
+            f'против {_dmy(split["second_from"])}–{_dmy(split["second_to"])}.</div>'
+            + _kpi([
+                ("Первая половина", f"{f['wins']}–{f['losses']}", f"разница {f['diff']:+.1f}"),
+                ("Вторая половина", f"{sc['wins']}–{sc['losses']}", f"разница {sc['diff']:+.1f}"),
+                ("Сдвиг", f"{sc['diff'] - f['diff']:+.1f}", "очков за игру"),
+            ])
+            + _bars(split_rows, "Вторая половина против первой", "вторая", "первая"))
+
+    # «Мы против соперников» — по протоколам тех же игр, а не по чужим турнирам.
+    opp_avg = data.get("opp_avg") or {}
+    league_bars = ""
+    if opp_avg and cur.get("avg"):
+        league_rows = [(t, cur["avg"].get(k, 0), opp_avg.get(k, 0))
+                       for k, t in METRIC_TITLES if k in opp_avg]
+        league_bars = _bars(league_rows, "Мы против соперников (в наших же играх)",
+                            "мы", "соперники")
+
     h2h_html = (f'<div class="empty">С «{_e(opp_name or "этим соперником")}» '
                 f'играли впервые — сравнивать не с чем.</div>'
                 if not h2h else _games_table(h2h, limit=20))
 
-    prompt = _ai_prompt(team, cur, prev, series, ins)
+    prompt = _ai_prompt(team, cur, prev, series, ins, data)
     ins_html = "".join(f"<li>{_e(i)}</li>" for i in ins) or "<li>Пока без выводов.</li>"
 
     prev_title = ""
@@ -262,6 +347,7 @@ th {{ color:var(--muted); font-weight:600; }}
 td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 tr.w td:first-child {{ box-shadow:inset 3px 0 var(--pos); }}
 tr.l td:first-child {{ box-shadow:inset 3px 0 var(--neg); }}
+tr.me {{ background:color-mix(in srgb, var(--acc) 18%, transparent); font-weight:600; }}
 ul.ins {{ padding-left:18px; }} ul.ins li {{ margin:6px 0; }}
 .empty {{ color:var(--muted); padding:12px 0; }}
 pre {{ background:var(--card); border-radius:12px; padding:12px; white-space:pre-wrap;
@@ -277,7 +363,9 @@ button.copy {{ background:var(--acc); color:#fff; border:none; border-radius:10p
   <button class="tab on" data-p="p0">Обзор</button>
   <button class="tab" data-p="p1">Сезон</button>
   <button class="tab" data-p="p2">Последняя игра</button>
-  <button class="tab" data-p="p3">Прошлый сезон</button>
+  <button class="tab" data-p="p3">Динамика</button>
+  <button class="tab" data-p="p6">Состав</button>
+  <button class="tab" data-p="p7">Лига</button>
   <button class="tab" data-p="p4">Соперник</button>
   <button class="tab" data-p="p5">Промт для ИИ</button>
 </div>
@@ -299,8 +387,21 @@ button.copy {{ background:var(--acc); color:#fff; border:none; border-radius:10p
 </div>
 
 <div class="pane" id="p3">
-  {'<div class="sub">' + _e(prev_title) + '</div>' + prev_bars if prev
-   else '<div class="empty">Прошлого сезона в базе пока нет.</div>'}
+  {('<div class="sub">' + _e(prev_title) + '</div>' + prev_bars) if prev
+   else (split_html or '<div class="empty">Игр пока мало: динамику покажем, '
+                       'когда наберётся хотя бы шесть.</div>')}
+</div>
+
+<div class="pane" id="p6">
+  <div class="chart"><div class="ct">Состав: в среднем за игру</div>
+    <div class="tablewrap">{_roster_table(data.get('roster') or [])}</div></div>
+</div>
+
+<div class="pane" id="p7">
+  <div class="chart"><div class="ct">Турнирная таблица</div>
+    <div class="tablewrap">{_standings_table(data.get('standings') or [],
+                                             data.get('our_team_id', ''))}</div></div>
+  {league_bars}
 </div>
 
 <div class="pane" id="p4">
