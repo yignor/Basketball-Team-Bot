@@ -1553,12 +1553,20 @@ def _render_unlink_confirm(uid: str) -> Tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("Отмена", callback_data="admin:link:linked:0")]])
 
 
+def _link_row_name(player_row: int) -> str:
+    with sheets_cache.get_connection() as conn:
+        r = conn.execute("SELECT surname, name FROM players WHERE row_index = ?",
+                         (player_row,)).fetchone()
+    return f"{r['surname']} {r['name']}".strip() if r else ""
+
+
 def _do_unlink(uid: str) -> str:
     row = sheets_cache.unlink_player(str(uid))
     if not row:
         return "Привязки уже не было."
     try:
-        sheets_cache.write_player_tg_id(_get_spreadsheet(), int(row), "")
+        sheets_cache.write_player_tg_id(_get_spreadsheet(), int(row), "",
+                                        _link_row_name(int(row)))
     except Exception as e:
         log.warning(f"Отвязка: не удалось стереть id в листе: {e}")
     log.info(f"Админ снял привязку id {uid} со строки {row}")
@@ -1580,8 +1588,10 @@ def _do_link(uid: str, row_index: int) -> str:
     # старый (из-за него человек и не опознался сам).
     try:
         ss = _get_spreadsheet()
-        sheets_cache.write_player_tg_id(ss, int(row_index), str(uid))
-        sheets_cache.write_player_nickname(ss, int(row_index), person.get("username") or "")
+        expect = _name_of(target)
+        sheets_cache.write_player_tg_id(ss, int(row_index), str(uid), expect)
+        sheets_cache.write_player_nickname(ss, int(row_index),
+                                           person.get("username") or "", expect)
     except Exception as e:
         log.warning(f"Привязка: связка не записана в лист: {e}")
     log.info(f"Админ привязал id {uid} к строке {row_index} ({_name_of(target)})")

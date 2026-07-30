@@ -625,18 +625,56 @@ def link_player(tg_user_id: str, username: str, player_row: int) -> bool:
             return False
 
 
-def write_player_tg_id(spreadsheet, player_row: int, tg_user_id: str) -> bool:
+def _norm_name(text: str) -> str:
+    return " ".join((text or "").lower().replace("ё", "е").split())
+
+
+def _verify_player_row(ws, player_row: int, expect: str) -> Optional[int]:
+    """Та ли это строка. Возвращает номер строки для записи (или None).
+
+    Номер приходит из зеркала, а лист живёт своей жизнью: тренер отсортировал
+    его по ФИО между синхронизациями — и запись по старому номеру попадёт в
+    чужую строку. Поэтому перед записью сверяем ФИО, а если не сошлось —
+    ищем строку заново. Не нашли — лучше не писать вовсе."""
+    if not expect:
+        return int(player_row)
+    header = ws.row_values(1)
+    try:
+        i_sur, i_name = header.index("Фамилия"), header.index("Имя")
+    except ValueError:
+        return int(player_row)
+    row = ws.row_values(int(player_row))
+    here = _norm_name(" ".join([row[i_sur] if len(row) > i_sur else "",
+                                row[i_name] if len(row) > i_name else ""]))
+    if here == _norm_name(expect):
+        return int(player_row)
+    for idx, r in enumerate(ws.get_all_values()[1:], start=2):
+        cand = _norm_name(" ".join([r[i_sur] if len(r) > i_sur else "",
+                                    r[i_name] if len(r) > i_name else ""]))
+        if cand == _norm_name(expect):
+            logger.warning("Лист сдвинулся: «%s» теперь в строке %s, а не %s",
+                           expect, idx, player_row)
+            return idx
+    logger.warning("Не нашёл «%s» в листе — записывать вслепую не буду", expect)
+    return None
+
+
+def write_player_tg_id(spreadsheet, player_row: int, tg_user_id: str,
+                       expect: str = "") -> bool:
     """Вписывает числовой id в лист «Игроки» — чтобы было видно, кто подключился.
     Best-effort: доступ держится на локальной player_links, поэтому сбой записи
     в Sheets не должен ломать вход."""
     try:
         ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
+        row_no = _verify_player_row(ws, player_row, expect)
+        if row_no is None:
+            return False
         header = ws.row_values(1)
         if PLAYERS_TG_ID_HEADER not in header:
             header.append(PLAYERS_TG_ID_HEADER)
             ws.update_cell(1, len(header), PLAYERS_TG_ID_HEADER)
         col = header.index(PLAYERS_TG_ID_HEADER) + 1
-        ws.update_cell(int(player_row), col, str(tg_user_id))
+        ws.update_cell(row_no, col, str(tg_user_id))
         return True
     except Exception as e:
         logger.warning(f"Не удалось записать числовой TG id в лист: {e}")
@@ -646,7 +684,8 @@ def write_player_tg_id(spreadsheet, player_row: int, tg_user_id: str) -> bool:
 PLAYERS_NICK_HEADER = "Telegram ID"       # исторически там @ники, не числа
 
 
-def write_player_nickname(spreadsheet, player_row: int, username: str) -> bool:
+def write_player_nickname(spreadsheet, player_row: int, username: str,
+                          expect: str = "") -> bool:
     """Обновляет @ник в листе «Игроки» после опознания.
 
     Ник в таблице устаревает: человек сменил @, и строка перестаёт совпадать с
@@ -669,8 +708,11 @@ def write_player_nickname(spreadsheet, player_row: int, username: str) -> bool:
         if PLAYERS_NICK_HEADER not in header:
             logger.warning("В листе «Игроки» нет столбца «Telegram ID» — ник не пишем")
             return False
+        row_no = _verify_player_row(ws, player_row, expect)
+        if row_no is None:
+            return False
         col = header.index(PLAYERS_NICK_HEADER) + 1
-        ws.update_cell(int(player_row), col, f"@{uname}")
+        ws.update_cell(row_no, col, f"@{uname}")
     except Exception as e:
         logger.warning(f"Не удалось обновить ник в листе: {e}")
         return False

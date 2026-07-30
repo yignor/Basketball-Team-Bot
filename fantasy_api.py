@@ -272,7 +272,7 @@ def ensure_player_link(telegram_id: Any, username: str = "") -> bool:
             "SELECT row_index FROM players WHERE tg_user_id = ? LIMIT 1", (uid,)).fetchone()
         if row:
             sheets_cache.link_player(uid, uname, row["row_index"])
-            _push_tg_id_to_sheet(row["row_index"], uid, uname)
+            _push_tg_id_to_sheet(row["row_index"], uid, uname, _row_name(conn, row["row_index"]))
             return True
         # 3. Первое знакомство: ищем строку по нику — но только СВОБОДНУЮ.
         if not uname:
@@ -289,20 +289,34 @@ def ensure_player_link(telegram_id: Any, username: str = "") -> bool:
     if not sheets_cache.link_player(uid, uname, cand["row_index"]):
         return False
     log.info(f"фэнтези: @{uname} закреплён за строкой {cand['row_index']} (id {uid})")
-    _push_tg_id_to_sheet(cand["row_index"], uid, uname)
+    _push_tg_id_to_sheet(cand["row_index"], uid, uname, _row_name(None, cand["row_index"]))
     return True
 
 
-def _push_tg_id_to_sheet(player_row: int, tg_user_id: str, username: str = "") -> None:
+def _row_name(conn: Any, player_row: int) -> str:
+    """ФИО из строки зеркала — чтобы запись в лист могла себя проверить."""
+    def fetch(c):
+        r = c.execute("SELECT surname, name FROM players WHERE row_index = ?",
+                      (int(player_row),)).fetchone()
+        return f"{r['surname']} {r['name']}".strip() if r else ""
+    if conn is not None:
+        return fetch(conn)
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as c:
+        return fetch(c)
+
+
+def _push_tg_id_to_sheet(player_row: int, tg_user_id: str, username: str = "",
+                         expect: str = "") -> None:
     """Best-effort: показать в листе числовой id и актуальный @ник. Доступ живёт
     в локальной player_links, поэтому недоступность Sheets вход не ломает."""
     try:
         from collect_votes import _init_sheets
         ss = _init_sheets()
-        sheets_cache.write_player_tg_id(ss, player_row, tg_user_id)
+        sheets_cache.write_player_tg_id(ss, player_row, tg_user_id, expect)
         # Ник в таблице устаревает — обновляем на тот, под которым человек
         # реально пришёл. Иначе в листе остаётся адрес, которого больше нет.
-        sheets_cache.write_player_nickname(ss, player_row, username)
+        sheets_cache.write_player_nickname(ss, player_row, username, expect)
     except Exception as e:
         log.warning(f"фэнтези: связка не записана в лист: {e}")
 
