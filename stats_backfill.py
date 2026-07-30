@@ -130,6 +130,60 @@ async def refetch_our_games(client, team_names: Optional[List[str]] = None,
     return st
 
 
+async def refetch_our_games_ib(comp_ids: List[int], team_ids: Optional[List[str]] = None,
+                               limit: int = 80, delay: float = DEFAULT_DELAY) -> BackfillStats:
+    """То же, что refetch_our_games, но для Инфобаскета.
+
+    Отдельная функция, потому что у лиг разный путь к игре: у SLPRO —
+    расписание стадии, у Инфобаскета — календарь соревнования. Общего кода
+    тут было бы больше, чем разного."""
+    from enhanced_game_parser import EnhancedGameParser
+
+    st = BackfillStats()
+    ours = {str(t) for t in (team_ids or [])}
+    todo: List[Tuple[str, int]] = []
+    async with _ib_session() as session:
+        for comp_id in comp_ids:
+            for g in await _ib_calendar(session, comp_id):
+                if g.get("GameStatus") != IB_FINISHED:
+                    st.skipped_live += 1
+                    continue
+                gid = str(g.get("GameID") or "")
+                if not gid:
+                    continue
+                if ours:
+                    # В календаре Инфобаскета команды лежат как TeamAid/TeamBid
+                    # (именно так, маленькая «i» — проверено на живом ответе).
+                    teams = {str(g.get("TeamAid") or ""), str(g.get("TeamBid") or "")}
+                    if not (teams & ours):
+                        continue
+                todo.append((gid, comp_id))
+            await asyncio.sleep(delay)
+    if limit and len(todo) > limit:
+        st.remaining = len(todo) - limit
+        todo = todo[:limit]
+
+    async with EnhancedGameParser() as parser:
+        for gid, comp_id in todo:
+            try:
+                api_data = await parser.get_game_data_from_api(gid, IB_API)
+                info = await parser.parse_game_info(api_data) if api_data else None
+                if info:
+                    info["player_stats"] = parser.extract_player_statistics(api_data)
+                if not info or not (info.get("player_stats") or {}).get("players"):
+                    st.failed += 1
+                else:
+                    info["game_id"] = info.get("game_id") or gid
+                    fantasy_stats.store_infobasket_game(info, str(comp_id))
+                    st.fetched += 1
+            except Exception as e:
+                log.warning("перекачка infobasket %s: %s", gid, e)
+                st.failed += 1
+            await asyncio.sleep(delay)
+    log.info("перекачка наших игр Инфобаскета: скачано %d, ошибок %d", st.fetched, st.failed)
+    return st
+
+
 async def refetch_missing_stage(client, team_names: Optional[List[str]] = None,
                                 delay: float = DEFAULT_DELAY) -> BackfillStats:
     """Прицельно перекачивает игры без стадии — по контекстам НАШИХ команд.

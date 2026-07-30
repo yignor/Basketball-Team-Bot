@@ -1632,13 +1632,20 @@ async def _refetch_our_games_now(query) -> None:
     try:
         teams = slpro_client.config_team_names() or slpro_client.env_team_names()
         st = await stats_backfill.refetch_our_games(slpro_client.SlproClient(), teams)
+        # Инфобаскет качаем тем же заходом: иначе основа осталась бы без
+        # заработанных фолов, а Farm с ними — и цены поехали бы у одних.
+        import run_backfill
+        ib = await stats_backfill.refetch_our_games_ib(
+            run_backfill._ib_comps(), team_ids=[t for t in ("36502",)])
         with sheets_cache.get_connection() as conn:
-            got = conn.execute(
-                """SELECT COUNT(*) FROM game_player_stats
-                   WHERE source = 'slpro' AND foul_on > 0""").fetchone()[0]
+            rows = conn.execute(
+                """SELECT source, COUNT(*) n FROM game_player_stats
+                   WHERE foul_on > 0 GROUP BY source""").fetchall()
+        got = ", ".join(f"{r['source']}: {r['n']}" for r in rows) or "нет"
         text = (f"✅ Наши игры перекачаны.\n\n"
-                f"Скачано: {st.fetched}, ошибок: {st.failed}.\n"
-                f"Строк с заработанными фолами: {got}.")
+                f"SLPRO: {st.fetched}, Инфобаскет: {ib.fetched}, "
+                f"ошибок: {st.failed + ib.failed}.\n"
+                f"Строк с заработанными фолами — {got}.")
     except Exception as e:
         log.error(f"Перекачка наших игр не прошла: {e}")
         text = f"⚠️ Перекачка не прошла: {e}"
