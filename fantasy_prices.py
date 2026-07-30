@@ -27,6 +27,10 @@
 
 Окна (сколько последних игр смотреть) задаются в админке отдельно для подъёма
 и падения: подняться сложнее — окно длиннее.
+
+Двигается цена только у тех, кто в этой игре ИГРАЛ (см. recalc): форма берётся
+по последним сыгранным матчам, и без этого правила пропустивший месяц получал
+бы повышение в вечер, когда его даже не было в зале.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -202,8 +206,14 @@ def describe(season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 # строки и только столбец «Стоимость».
 
 def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
-           dry_run: bool = False) -> Dict[str, Any]:
-    """Пересчёт цен всего пула. {updated, changes: [{name, old, new, reason}]}."""
+           dry_run: bool = False, source: Optional[str] = None,
+           game_id: Any = None) -> Dict[str, Any]:
+    """Пересчёт цен. {updated, checked, changes: [{name, old, new, reason}]}.
+
+    source/game_id — двигаем ТОЛЬКО тех, кто есть в протоколе этой игры. Цена
+    меняется по итогам матча, в котором человек играл: иначе пропустивший месяц
+    получал повышение по старым играм в тот вечер, когда его даже не было в
+    зале. Без игры (ручной прогон из админки) пересчитываются все."""
     import asyncio
     import fantasy
     import fantasy_api
@@ -220,6 +230,20 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
         sheets_cache.sync_players(spreadsheet)
 
     prices = sheets_cache.get_player_prices()
+
+    # Кто играл в этой игре. Пустой протокол (статистика ещё не приехала) — не
+    # повод двигать всех: тогда лучше не двигать никого.
+    only: Optional[set] = None
+    if source and game_id:
+        sheets_cache.init_db()
+        with sheets_cache.get_connection() as conn:
+            only = {(source, str(r["player_id"])) for r in conn.execute(
+                "SELECT player_id FROM game_player_stats WHERE source = ? AND game_id = ?",
+                (source, str(game_id)))}
+        if not only:
+            return {"updated": 0, "checked": 0, "dry_run": dry_run, "changes": [],
+                    "skipped": "в протоколе игры нет игроков"}
+
     try:
         pool = asyncio.run(fantasy_api.build_pool(force=True, season=season))
     except RuntimeError:                       # уже внутри event loop
@@ -232,7 +256,12 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
     # Строка листа -> все ссылки этого человека: одна фамилия может прийти
     # карточками из двух лиг, а цена у неё одна.
     by_row: Dict[int, Dict[str, Any]] = {}
+    import fantasy_stats
     for card in pool:
+        if only is not None and not any(
+                fantasy_stats.parse_ref(one) in only
+                for one in fantasy_stats.expand_refs([card["ref"]])):
+            continue                       # в этой игре не играл — цену не трогаем
         pr = fantasy_api._lookup_price(card.get("name", ""), prices)
         row, price = pr.get("row"), int(pr.get("price") or 0)
         if not row or price <= 0:

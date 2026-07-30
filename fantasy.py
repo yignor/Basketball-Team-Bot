@@ -663,7 +663,7 @@ def apply_game_result(source: str, game_id: Any, game_date_iso: str) -> Dict[str
     try:
         if out:
             import fantasy_prices
-            prices = fantasy_prices.recalc()
+            prices = fantasy_prices.recalc(source=source, game_id=game_id)
     except Exception as e:                      # цены — не повод уронить результат
         logging.getLogger(__name__).warning(f"Пересчёт цен после игры не прошёл: {e}")
         prices = {"error": str(e)}
