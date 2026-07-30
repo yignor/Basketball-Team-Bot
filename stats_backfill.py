@@ -89,6 +89,57 @@ async def _slpro_stages(client, scope: str, team_names: List[str]) -> List[Dict[
     return [s for s in stages if s.get("season_id") in seasons]
 
 
+async def refetch_missing_stage(client, team_names: Optional[List[str]] = None,
+                                delay: float = DEFAULT_DELAY) -> BackfillStats:
+    """Прицельно перекачивает игры без стадии — по контекстам НАШИХ команд.
+
+    Общий бэкфилл для этого не годится: он идёт по всем стадиям подряд и
+    упирается в потолок за прогон, так что до нужных десяти игр очередь может
+    не дойти вовсе (а именно они и не считаются в зачёте). Здесь наоборот:
+    берём список «без стадии» и ищем эти игры в расписании своих турниров.
+
+    Помечать игры к перекачке не нужно — запись идёт upsert'ом и просто
+    проставляет стадию поверх пустой."""
+    import slpro_client
+    import slpro_game
+
+    st = BackfillStats()
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        left = {str(r["game_id"]) for r in conn.execute(
+            """SELECT DISTINCT game_id FROM game_player_stats
+               WHERE source = ? AND (stage_id IS NULL OR stage_id = '')""",
+            (fantasy_stats.SOURCE_SLPRO,))}
+    if not left:
+        return st
+    for ctx in await slpro_client.team_contexts(team_names or []):
+        if not left:
+            break
+        if not ctx.get("stage_id"):
+            continue                     # контекст сам без стадии — не поможет
+        for g in await client.get_schedule(ctx):
+            gid = str(g.get("game_id"))
+            if gid not in left:
+                continue
+            try:
+                resp = await client.get_game(gid, ctx)
+                box = slpro_game.parse_box_score(resp) if resp else None
+            except Exception as e:
+                log.warning("перекачка %s: %s", gid, e)
+                box = None
+            if not box:
+                st.failed += 1
+                continue
+            fantasy_stats.store_slpro_box(box, str(ctx.get("season_id") or ""),
+                                          ctx.get("stage_id") or "")
+            st.fetched += 1
+            left.discard(gid)
+            await asyncio.sleep(delay)
+    st.remaining = len(left)
+    log.info("перекачка без стадии: скачано %d, не нашлось %d", st.fetched, st.remaining)
+    return st
+
+
 async def backfill_slpro(client, scope: str = "league", team_names: Optional[List[str]] = None,
                          limit: int = DEFAULT_LIMIT, delay: float = DEFAULT_DELAY,
                          dry_run: bool = False) -> BackfillStats:

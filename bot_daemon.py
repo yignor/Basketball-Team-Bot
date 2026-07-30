@@ -1568,21 +1568,21 @@ async def _refetch_no_stage_now(query) -> None:
     import stats_backfill
     import slpro_client
     try:
-        marked = await asyncio.to_thread(stats_backfill.forget_games_without_stage, "slpro")
         teams = slpro_client.config_team_names() or slpro_client.env_team_names()
-        st = await stats_backfill.backfill_slpro(
-            slpro_client.SlproClient(), scope="all", team_names=teams,
-            limit=60, delay=1.0)
+        st = await stats_backfill.refetch_missing_stage(slpro_client.SlproClient(), teams)
         with sheets_cache.get_connection() as conn:
             left = conn.execute(
                 """SELECT COUNT(DISTINCT game_id) FROM game_player_stats
                    WHERE source = 'slpro' AND (stage_id IS NULL OR stage_id = '')"""
             ).fetchone()[0]
         text = (f"✅ Перекачка закончена.\n\n"
-                f"Помечено: {marked}, скачано: {st.fetched}, ошибок: {st.failed}.\n"
+                f"Скачано: {st.fetched}, ошибок: {st.failed}.\n"
                 f"Осталось игр без стадии: {left}.")
         if not left:
             text += "\n\nТоп за последнюю игру и неделю теперь считает все игры."
+        elif st.remaining:
+            text += (f"\n\n{st.remaining} игр нет в расписании наших турниров — "
+                     "видимо, из другого дивизиона.")
     except Exception as e:
         log.error(f"Перекачка без стадии не прошла: {e}")
         text = f"⚠️ Перекачка не прошла: {e}"
