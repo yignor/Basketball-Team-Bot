@@ -29,7 +29,36 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "stl": 3.0,
     "blk": 3.0,
     "tur": -1.0,
+    # Ниже — то, чего в протоколе нет отдельной строкой: считаем сами из
+    # попыток и попаданий (см. derived_stats). Штрафы за брак делают дорогим
+    # не того, кто много бросает, а того, кто попадает.
+    "miss": -0.5,      # промах с игры
+    "ftmiss": -0.5,    # промах штрафного
+    "pf": -0.5,        # фол
+    "dd": 3.0,         # дабл-дабл
+    "td": 5.0,         # трипл-дабл (вместо дабл-дабла, не сверх него)
 }
+
+# Показатели, по которым считаются дабл-дабл и трипл-дабл.
+DOUBLE_KEYS = ("pts", "reb", "ast", "stl", "blk")
+
+
+def derived_stats(row: Dict[str, Any]) -> Dict[str, float]:
+    """Промахи и дабл-даблы — их нет в протоколе строкой, но они есть в цифрах.
+
+    Промахи с игры считаем как попытки минус попадания (fga уже включает
+    трёхочковые у обеих лиг). Трипл-дабл НЕ складывается с дабл-даблом:
+    три показателя по 10 — это +5, а не +8."""
+    def num(key: str) -> float:
+        return float(row.get(key, 0) or 0)
+
+    doubles = sum(1 for k in DOUBLE_KEYS if num(k) >= 10)
+    return {
+        "miss": max(0.0, num("fga") - num("fgm")),
+        "ftmiss": max(0.0, num("fta") - num("ftm")),
+        "dd": 1.0 if doubles == 2 else 0.0,
+        "td": 1.0 if doubles >= 3 else 0.0,
+    }
 
 SOURCE_SLPRO = "slpro"
 SOURCE_INFOBASKET = "infobasket"
@@ -257,9 +286,10 @@ async def ingest_slpro(client, ctx: Dict[str, Any]) -> int:
 def fantasy_points(stat_row: Dict[str, Any], weights: Optional[Dict[str, float]] = None) -> float:
     """Очки за одну игру игрока по весам."""
     w = weights or DEFAULT_WEIGHTS
+    row = {**stat_row, **derived_stats(stat_row)}
     total = 0.0
     for key, coeff in w.items():
-        total += float(stat_row.get(key, 0) or 0) * coeff
+        total += float(row.get(key, 0) or 0) * coeff
     return round(total, 2)
 
 
@@ -329,11 +359,11 @@ def combine_agg(parts: List[Dict[str, Any]], weights: Optional[Dict[str, float]]
     if not parts:
         return {}
     out: Dict[str, Any] = {"games": 0}
-    for c in AGG_COLUMNS:
+    for c in AGG_KEYS:
         out[c] = 0
     for a in parts:
         out["games"] += int(a.get("games", 0) or 0)
-        for c in AGG_COLUMNS:
+        for c in AGG_KEYS:
             out[c] += int(a.get(c, 0) or 0)
     out["fp"] = round(sum(float(out.get(k, 0)) * coeff for k, coeff in w.items()), 2)
     out["fp_avg"] = round(out["fp"] / out["games"], 2) if out["games"] else 0.0
@@ -443,6 +473,17 @@ def game_points(refs: List[str], source: str, game_id: Any,
 AGG_COLUMNS = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur",
                "pf", "fgm", "fga", "tpm", "tpa", "ftm", "fta")
 
+# Те же derived_stats, но на языке SQL: промахи складываются из сумм, а
+# дабл-даблы — только поштучно по играм, суммой их не восстановить.
+_DOUBLES = " + ".join(f"({k} >= 10)" for k in DOUBLE_KEYS)
+AGG_DERIVED = {
+    "miss": "SUM(MAX(fga - fgm, 0))",
+    "ftmiss": "SUM(MAX(fta - ftm, 0))",
+    "dd": f"SUM(CASE WHEN ({_DOUBLES}) = 2 THEN 1 ELSE 0 END)",
+    "td": f"SUM(CASE WHEN ({_DOUBLES}) >= 3 THEN 1 ELSE 0 END)",
+}
+AGG_KEYS = AGG_COLUMNS + tuple(AGG_DERIVED)
+
 
 def player_aggregates(weights: Optional[Dict[str, float]] = None,
                       date_from: Optional[str] = None,
@@ -455,7 +496,8 @@ def player_aggregates(weights: Optional[Dict[str, float]] = None,
     пересчётом по каждой игре."""
     sheets_cache.init_db()
     w = weights or DEFAULT_WEIGHTS
-    sums = ", ".join(f"SUM({c}) AS {c}" for c in AGG_COLUMNS)
+    sums = ", ".join([f"SUM({c}) AS {c}" for c in AGG_COLUMNS] +
+                     [f"{expr} AS {name}" for name, expr in AGG_DERIVED.items()])
     query = f"SELECT source, player_id, COUNT(*) AS games, {sums} FROM game_player_stats WHERE 1=1"
     params: List[Any] = []
     if date_from:
@@ -473,7 +515,7 @@ def player_aggregates(weights: Optional[Dict[str, float]] = None,
             r = dict(row)
             games = int(r["games"] or 0)
             agg: Dict[str, Any] = {"games": games}
-            for c in AGG_COLUMNS:
+            for c in AGG_KEYS:
                 agg[c] = int(r[c] or 0)
             agg["fp"] = round(sum(float(agg.get(k, 0)) * coeff for k, coeff in w.items()), 2)
             agg["fp_avg"] = round(agg["fp"] / games, 2) if games else 0.0

@@ -237,11 +237,18 @@ def roster_size(season: Dict[str, Any]) -> int:
 
 
 def season_weights(season: Dict[str, Any]) -> Dict[str, float]:
+    """Веса сезона поверх текущих значений по умолчанию.
+
+    Слияние, а не замена: сезон, заведённый до появления нового компонента
+    (промахи, фолы, дабл-даблы), знает только старый набор — без слияния он
+    навсегда остался бы со старой формулой, и две лиги считались бы
+    по-разному."""
     try:
         w = json.loads(season.get("scoring_json") or "")
-        return {k: float(v) for k, v in w.items()} if w else fantasy_stats.DEFAULT_WEIGHTS
+        stored = {k: float(v) for k, v in w.items()} if w else {}
     except (json.JSONDecodeError, TypeError, ValueError):
-        return fantasy_stats.DEFAULT_WEIGHTS
+        stored = {}
+    return {**fantasy_stats.DEFAULT_WEIGHTS, **stored}
 
 
 def season_settings(season: Dict[str, Any]) -> Dict[str, Any]:
