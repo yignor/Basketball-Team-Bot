@@ -89,6 +89,7 @@ def public_api_url() -> str:
 
 _funnel_ips: Tuple[float, List[str]] = (0.0, [])
 _FUNNEL_IP_TTL = 3600
+_funnel_seen = False
 
 
 async def _funnel_public_ips() -> List[str]:
@@ -157,8 +158,16 @@ async def keep_funnel_warm(timeout: float = 30.0) -> Optional[float]:
             async with r:
                 await r.read()
             took = time.time() - started
+            global _funnel_seen
             if took > 3:
                 log.info("Funnel прогрет за %.1fс (был холодный)", took)
+            elif not _funnel_seen:
+                # Один раз после старта — чтобы в журнале была видна работа
+                # прогрева. Дальше молчим: раз в 10 минут писать «всё хорошо»
+                # значит утопить в этом остальной журнал.
+                log.info("Прогрев Funnel работает: %s, ответ за %.2fс",
+                         ips[0] if ips else "по имени", took)
+            _funnel_seen = True
             return took
     except Exception as e:
         log.warning("Funnel не отвечает (%.0fс): %s", time.time() - started, e)
