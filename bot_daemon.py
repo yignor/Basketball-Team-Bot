@@ -317,20 +317,28 @@ def _is_admin(user) -> bool:
     return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
 
 
-def _can_see_reports(user) -> bool:
-    """Кому открыт «Прогресс команды»: админам и тем, кому админ выдал доступ.
+def _has_access(kind: str, user) -> bool:
+    """Открыт ли человеку закрытый раздел. Админу — всё, остальным по выдаче.
 
-    Выдаётся по @нику, но живёт на числовом id — ник меняется и переуступается
-    (см. sheets_cache.has_report_access)."""
+    Доступ даётся по @нику, но живёт на числовом id: ник меняется и
+    переуступается (см. sheets_cache.has_access)."""
     if not user:
         return False
     if _is_admin(user):
         return True
     try:
-        return sheets_cache.has_report_access(str(user.id), user.username or "")
+        return sheets_cache.has_access(kind, str(user.id), user.username or "")
     except Exception as e:
-        log.warning(f"Проверка доступа к отчётам не прошла: {e}")
+        log.warning(f"Проверка доступа «{kind}» не прошла: {e}")
         return False
+
+
+def _can_see_reports(user) -> bool:
+    return _has_access(sheets_cache.ACCESS_TEAM, user)
+
+
+def _can_see_personal(user) -> bool:
+    return _has_access(sheets_cache.ACCESS_PERSONAL, user)
 
 
 # Подписи кнопок нижней клавиатуры. Она постоянная (is_persistent) и висит под
@@ -338,13 +346,14 @@ def _can_see_reports(user) -> bool:
 # держать их под рукой удобнее, чем искать сообщение с меню.
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
 PROGRESS_KEYBOARD_LABEL = "📈 Прогресс команды"
+MYSTATS_KEYBOARD_LABEL = "📊 Моя статистика"
 FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
 FEEDBACK_KEYBOARD_LABEL = "💬 Написать админам"
 
 
 def _bottom_keyboard(payload: str = "", is_admin: bool = False,
-                     with_fantasy: bool = True,
-                     with_reports: bool = False) -> ReplyKeyboardMarkup:
+                     with_fantasy: bool = True, with_reports: bool = False,
+                     with_personal: bool = False) -> ReplyKeyboardMarkup:
     """Нижняя клавиатура: фэнтези, обратная связь и — админу — панель.
 
     Фэнтези открывается как web_app: только reply-кнопка даёт sendData, поэтому
@@ -355,8 +364,15 @@ def _bottom_keyboard(payload: str = "", is_admin: bool = False,
         url = _webapp_url() + ("#d=" + payload if payload else "")
         rows.append([KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))])
     rows.append([KeyboardButton(FEEDBACK_KEYBOARD_LABEL)])
+    # Закрытые разделы: у кого есть доступ, тот и видит кнопку. Нет ни одного —
+    # ни одной лишней кнопки под чатом.
+    closed = []
+    if with_personal:
+        closed.append(KeyboardButton(MYSTATS_KEYBOARD_LABEL))
     if with_reports:
-        rows.append([KeyboardButton(PROGRESS_KEYBOARD_LABEL)])
+        closed.append(KeyboardButton(PROGRESS_KEYBOARD_LABEL))
+    if closed:
+        rows.append(closed)
     if is_admin:
         rows.append([KeyboardButton(ADMIN_KEYBOARD_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
@@ -376,9 +392,9 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
     с 26.07, пока payload не дорос до 26 КБ)."""
     is_admin = _is_admin(user)
     uid = str(user.id)
-    # Кнопка отчётов — тренерам, которым админ выдал доступ. Админу она не
-    # нужна: у него та же вкладка внутри админ-панели.
-    with_reports = _can_see_reports(user) and not is_admin
+    # Закрытые разделы — по выданному доступу, у админа оба.
+    with_reports = _can_see_reports(user)
+    with_personal = _can_see_personal(user)
     # Кнопка фэнтези — только игрокам команды: остальным она бесполезна.
     with_fantasy = False
     if FANTASY_WEBAPP_URL and _webapp_url():
@@ -400,7 +416,7 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
         try:
             await message.reply_text(text, reply_markup=_bottom_keyboard(
                 payload or "", is_admin=is_admin, with_fantasy=with_fantasy,
-                with_reports=with_reports))
+                with_reports=with_reports, with_personal=with_personal))
             return
         except Exception as e:
             log.warning(f"нижняя клавиатура (бюджет {budget}) не ушла: {e}")
@@ -676,7 +692,7 @@ async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     решён вопрос с оплатой и согласием игроков (бэклог п.4)."""
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not chat or chat.type != "private" or not _is_admin(user):
+    if not user or not chat or chat.type != "private" or not _can_see_personal(user):
         return
     await _send_profile(update.message, user)
 
@@ -1028,6 +1044,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
         [InlineKeyboardButton("📈 Прогресс команды", callback_data="prog:list")],
+        [InlineKeyboardButton("🔑 Доступы", callback_data="admin:acc:list")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
@@ -1639,18 +1656,7 @@ async def _prog_body() -> Tuple[List[str], List[List[InlineKeyboardButton]]]:
 async def _render_prog_list(is_admin: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
     lines, rows = await _prog_body()
     if is_admin:
-        access = sheets_cache.report_access_list()
-        lines += ["", f"Доступ выдан: {len(access)}"]
-        for a in access:
-            state = "вошёл" if a["tg_user_id"] else "ещё не заходил"
-            lines.append(f"   @{a['username']} — {state}")
-        if not access:
-            lines.append("   пока никому")
-        rows.append([InlineKeyboardButton("➕ Дать доступ по @нику",
-                                          callback_data="prog:add")])
-        for a in access:
-            rows.append([InlineKeyboardButton(f"✂️ Забрать у @{a['username']}"[:64],
-                                              callback_data=f"prog:del:{a['username']}")])
+        lines += ["", "Кому открыт этот раздел — в «🔑 Доступы» главного меню."]
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -2001,12 +2007,37 @@ async def _handle_report_action(query, kind: str, period: str) -> None:
     await query.edit_message_text(text, reply_markup=menu_fn())
 
 
-# Кто сейчас вводит ник для выдачи доступа (только в памяти, как и обратная связь).
-_awaiting_coach: set = set()
+# Кто сейчас вводит ник для выдачи доступа: {user_id: вид доступа}. Только в
+# памяти, как и обратная связь: после рестарта админ просто нажмёт ещё раз.
+_awaiting_coach: Dict[int, str] = {}
 
-COACH_ASK = ("Пришли @ник того, кому открыть «Прогресс команды».\n\n"
+COACH_ASK = ("Пришли @ник того, кому открыть раздел «{title}».\n\n"
              "Доступ выдаётся по нику, но закрепится за числовым id при первом "
              "его входе — сменит ник, доступ останется.\n\nПередумал — /start.")
+
+
+def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
+    """Кому открыты закрытые разделы. Оба вида в одном месте — иначе админу
+    пришлось бы помнить, в каком экране что выдаётся."""
+    lines = ["🔑 Доступы к закрытым разделам", "",
+             "Админам открыто всё и без списка. Остальным — по выдаче: "
+             "по @нику, с закреплением за числовым id при первом входе.", ""]
+    rows: List[List[InlineKeyboardButton]] = []
+    for kind, title in sheets_cache.ACCESS_TITLES.items():
+        people = sheets_cache.access_list(kind)
+        lines.append(f"{title}: {len(people) or 'никому'}")
+        for a in people:
+            state = "вошёл" if a["tg_user_id"] else "ещё не заходил"
+            lines.append(f"   @{a['username']} — {state}")
+        lines.append("")
+        rows.append([InlineKeyboardButton(f"➕ Открыть «{title}»",
+                                          callback_data=f"admin:acc:add:{kind}")])
+        for a in people:
+            rows.append([InlineKeyboardButton(
+                f"✂️ Забрать «{title}» у @{a['username']}"[:64],
+                callback_data=f"admin:acc:del:{kind}:{a['username']}")])
+    rows.append(_back_button())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2026,14 +2057,6 @@ async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if what == "team":
             await query.edit_message_text("⏳ Считаю…")
             text, markup = await _render_prog_team(parts[2], parts[3])
-        elif what == "add" and admin:
-            _awaiting_coach.add(user.id)
-            await query.edit_message_text(COACH_ASK)
-            return
-        elif what == "del" and admin:
-            sheets_cache.revoke_report_access(username=parts[2])
-            text, markup = await _render_prog_list(is_admin=True)
-            text = f"✂️ Доступ у @{parts[2]} забран.\n\n" + text
         else:
             text, markup = await _render_prog_list(is_admin=admin)
         await query.edit_message_text(text, reply_markup=markup)
@@ -2043,20 +2066,32 @@ async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_coach_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Следующее сообщение после «Дать доступ по @нику»."""
+    """Следующее сообщение после «Открыть раздел» — @ник получателя."""
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_coach:
         return
-    _awaiting_coach.discard(user.id)
+    kind = _awaiting_coach.pop(user.id)
+    title = sheets_cache.ACCESS_TITLES.get(kind, kind)
     nick = (msg.text or "").strip().split()[0] if (msg.text or "").strip() else ""
     if not nick.lstrip("@").replace("_", "").isalnum():
         await msg.reply_text("Это не похоже на @ник. Открой экран и попробуй ещё раз.")
         raise ApplicationHandlerStop
-    sheets_cache.grant_report_access(nick, str(user.id))
+    sheets_cache.grant_access(kind, nick, str(user.id))
     await msg.reply_text(
-        f"✅ Доступ к «Прогрессу команды» открыт для {nick}.\n\n"
+        f"✅ Раздел «{title}» открыт для {nick}.\n\n"
         "Кнопка появится у него после /start. Если он уже нажимал /start — "
         "пусть нажмёт ещё раз, клавиатура обновится.")
+    raise ApplicationHandlerStop
+
+
+async def handle_mystats_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «📊 Моя статистика» — тем, кому раздел открыт."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    if not _can_see_personal(user):
+        return
+    await _send_profile(msg, user)
     raise ApplicationHandlerStop
 
 
@@ -2162,6 +2197,19 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
             await _handle_report_action(query, kind, period)
+
+        elif parts[1] == "acc":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "add":
+                kind = parts[3]
+                _awaiting_coach[user.id] = kind
+                await query.edit_message_text(
+                    COACH_ASK.format(title=sheets_cache.ACCESS_TITLES.get(kind, kind)))
+                return
+            if what == "del":
+                sheets_cache.revoke_access(parts[3], parts[4])
+            text, markup = _render_access_list()
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "link":
             what = parts[2] if len(parts) > 2 else "list"
@@ -2453,6 +2501,8 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(MessageHandler(filters.Text([PROGRESS_KEYBOARD_LABEL]),
                                    handle_progress_button))
+    app.add_handler(MessageHandler(filters.Text([MYSTATS_KEYBOARD_LABEL]),
+                                   handle_mystats_button))
     app.add_handler(MessageHandler(filters.Text([FEEDBACK_KEYBOARD_LABEL]), handle_feedback_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
     app.add_handler(CommandHandler("season", handle_season))

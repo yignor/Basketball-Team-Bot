@@ -83,15 +83,17 @@ CREATE TABLE IF NOT EXISTS player_links (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_player_links_row ON player_links(player_row);
 CREATE INDEX IF NOT EXISTS idx_players_telegram_id ON players(telegram_id);
 
--- Кому открыт «Прогресс команды». Выдаётся по @нику (админ знает людей по
--- нику, а не по числовому id), но живёт на числовом id: ник меняется и
--- переуступается, id — нет. Ник тут — окно доверия ровно на один первый вход,
--- как и у привязки игроков.
-CREATE TABLE IF NOT EXISTS report_access (
-    username    TEXT NOT NULL PRIMARY KEY,      -- без @, нижним регистром
+-- Кому что открыто: kind = 'team' (прогресс команды) или 'personal' (личная
+-- статистика). Выдаётся по @нику (админ знает людей по нику, а не по числовому
+-- id), но живёт на числовом id: ник меняется и переуступается, id — нет. Ник
+-- тут — окно доверия ровно на один первый вход, как и у привязки игроков.
+CREATE TABLE IF NOT EXISTS feature_access (
+    kind        TEXT NOT NULL,
+    username    TEXT NOT NULL,                  -- без @, нижним регистром
     tg_user_id  TEXT NOT NULL DEFAULT '',       -- заполнится при первом входе
     granted_at  TEXT NOT NULL DEFAULT '',
-    granted_by  TEXT NOT NULL DEFAULT ''
+    granted_by  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (kind, username)
 );
 
 CREATE TABLE IF NOT EXISTS attendance (
@@ -1138,73 +1140,82 @@ def free_player_rows() -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-# ─────────────── Доступ к отчётам «Прогресс команды» ────────────────────────
+# ─────────────── Доступ к закрытым разделам ─────────────────────────────────
+#
+# Два вида: 'personal' — личная статистика игрока, 'team' — прогресс команды.
+# Даются независимо: тренеру может быть нужна команда без личной, игроку —
+# наоборот. Админу оба открыты и без записи в таблице.
+
+ACCESS_TEAM = "team"
+ACCESS_PERSONAL = "personal"
+ACCESS_TITLES = {ACCESS_TEAM: "Прогресс команды", ACCESS_PERSONAL: "Личная статистика"}
+
 
 def _clean_nick(username: str) -> str:
     return (username or "").lstrip("@").strip().lower()
 
 
-def grant_report_access(username: str, granted_by: str = "") -> bool:
-    """Открывает доступ по @нику. Числовой id подтянется при первом входе."""
+def grant_access(kind: str, username: str, granted_by: str = "") -> bool:
+    """Открывает раздел по @нику. Числовой id подтянется при первом входе."""
     nick = _clean_nick(username)
-    if not nick:
+    if not nick or kind not in ACCESS_TITLES:
         return False
     init_db()
     with _connection() as conn:
         conn.execute(
-            """INSERT INTO report_access (username, tg_user_id, granted_at, granted_by)
-               VALUES (?, '', ?, ?)
-               ON CONFLICT(username) DO UPDATE SET granted_at=excluded.granted_at,
-                                                   granted_by=excluded.granted_by""",
-            (nick, _now_iso(), str(granted_by)))
+            """INSERT INTO feature_access (kind, username, tg_user_id, granted_at, granted_by)
+               VALUES (?, ?, '', ?, ?)
+               ON CONFLICT(kind, username) DO UPDATE SET granted_at=excluded.granted_at,
+                                                         granted_by=excluded.granted_by""",
+            (kind, nick, _now_iso(), str(granted_by)))
         conn.commit()
-    logger.info("Доступ к отчётам выдан @%s (кем: %s)", nick, granted_by)
+    logger.info("Доступ «%s» выдан @%s (кем: %s)", ACCESS_TITLES[kind], nick, granted_by)
     return True
 
 
-def revoke_report_access(username: str = "", tg_user_id: str = "") -> bool:
+def revoke_access(kind: str, username: str) -> bool:
     init_db()
     with _connection() as conn:
-        if username:
-            n = conn.execute("DELETE FROM report_access WHERE username = ?",
-                             (_clean_nick(username),)).rowcount
-        else:
-            n = conn.execute("DELETE FROM report_access WHERE tg_user_id = ?",
-                             (str(tg_user_id),)).rowcount
+        n = conn.execute("DELETE FROM feature_access WHERE kind = ? AND username = ?",
+                         (kind, _clean_nick(username))).rowcount
         conn.commit()
     return bool(n)
 
 
-def report_access_list() -> List[Dict[str, Any]]:
+def access_list(kind: str = "") -> List[Dict[str, Any]]:
     init_db()
     with _connection() as conn:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM report_access ORDER BY granted_at")]
+        if kind:
+            rows = conn.execute(
+                "SELECT * FROM feature_access WHERE kind = ? ORDER BY granted_at", (kind,))
+        else:
+            rows = conn.execute("SELECT * FROM feature_access ORDER BY kind, granted_at")
+        return [dict(r) for r in rows]
 
 
-def has_report_access(tg_user_id: str, username: str = "") -> bool:
-    """Есть ли доступ. При первом совпадении по нику закрепляет числовой id.
+def has_access(kind: str, tg_user_id: str, username: str = "") -> bool:
+    """Открыт ли раздел. При первом совпадении по нику закрепляет числовой id.
 
     Дальше ник не нужен: сменил @ — доступ остался; освободил @ и его занял
     посторонний — тот НЕ пройдёт, строка уже закреплена за прежним id."""
     uid, nick = str(tg_user_id), _clean_nick(username)
     init_db()
     with _connection() as conn:
-        if conn.execute("SELECT 1 FROM report_access WHERE tg_user_id = ?",
-                        (uid,)).fetchone():
+        if conn.execute("SELECT 1 FROM feature_access WHERE kind = ? AND tg_user_id = ?",
+                        (kind, uid)).fetchone():
             return True
         if not nick:
             return False
         row = conn.execute(
-            "SELECT tg_user_id FROM report_access WHERE username = ?", (nick,)).fetchone()
-        if not row:
-            return False
-        if row["tg_user_id"]:
-            return False                    # ник уже закреплён за другим id
-        conn.execute("UPDATE report_access SET tg_user_id = ? WHERE username = ?",
-                     (uid, nick))
+            "SELECT tg_user_id FROM feature_access WHERE kind = ? AND username = ?",
+            (kind, nick)).fetchone()
+        if not row or row["tg_user_id"]:
+            return False                    # нет доступа или ник занят другим id
+        conn.execute(
+            "UPDATE feature_access SET tg_user_id = ? WHERE kind = ? AND username = ?",
+            (uid, kind, nick))
         conn.commit()
-    logger.info("Доступ к отчётам: @%s закреплён за id %s", nick, uid)
+    logger.info("Доступ «%s»: @%s закреплён за id %s", ACCESS_TITLES.get(kind, kind), nick, uid)
     return True
 
 
