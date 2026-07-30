@@ -50,6 +50,14 @@ SHOOTING: Tuple[Tuple[str, str, str], ...] = (
     ("ft", "Штрафные", "ftm/fta"),
 )
 
+# Что считать НАСТОЯЩЕЙ игрой. В базе попадаются огрызки протоколов: один
+# игрок, пара бросков, ни одной передачи — это не игра, а остаток от старого
+# парсинга или технарь. В базу сравнения такие попадать не должны: они тянут
+# среднее вниз, и обычная игра начинает выглядеть выдающейся («30 передач
+# против 9.9 в среднем» — половина этого среднего была из двух пустышек).
+MIN_REAL_PLAYERS = 5
+MIN_REAL_SHOTS = 15
+
 MIN_BASE_GAMES = 3        # меньше — сравнивать не с чем
 MIN_REL = 0.25            # отклонение меньше четверти считаем шумом
 MIN_ABS = {"pts": 8, "reb": 5, "reb_off": 3, "reb_def": 4, "ast": 3,
@@ -96,6 +104,12 @@ def team_games(team_id: str, source: str, limit: int = 12) -> List[Dict[str, Any
     return out
 
 
+def is_real_game(game: Dict[str, Any]) -> bool:
+    """Похоже ли это на полноценный протокол (см. MIN_REAL_*)."""
+    return (len(game.get("players") or []) >= MIN_REAL_PLAYERS
+            and game["us"].get("fga", 0) >= MIN_REAL_SHOTS)
+
+
 def _baseline(games: List[Dict[str, Any]], side: str = "us") -> Dict[str, float]:
     """Среднее по играм БАЗЫ (без разбираемой игры)."""
     if not games:
@@ -140,12 +154,17 @@ def _deviations(game: Dict[str, Any], base: Dict[str, float]) -> List[Dict[str, 
 
 
 def _culprits(key: str, game: Dict[str, Any], base_games: List[Dict[str, Any]],
-              worse: bool, names: Dict[str, str], limit: int = 2) -> List[str]:
+              direction: int, names: Dict[str, str], limit: int = 2) -> List[str]:
     """Кто сильнее прочих отклонился от СВОЕГО среднего по этому показателю.
 
+    direction — куда двинулась команда: +1 (стало больше) или −1 (меньше).
+    Ищем тех, кто двинулся ТУДА ЖЕ, а не «кто сыграл хуже»: у потерь и фолов
+    «хуже» значит больше, у подборов — меньше, и путать это нельзя (иначе в
+    строке про лишние потери оказываются те, кто вообще не терял мяч).
+
     Сравниваем игрока с ним самим: у одного 8 подборов — провал, у другого
-    рекорд. Средний считается только по играм, где человек играл, иначе
-    пропустивший месяц выглядел бы виноватым."""
+    рекорд. Среднее считается по играм, где человек играл, иначе пропустивший
+    месяц выглядел бы виноватым."""
     per_player: Dict[str, List[float]] = {}
     for g in base_games:
         for p in g["players"]:
@@ -159,11 +178,11 @@ def _culprits(key: str, game: Dict[str, Any], base_games: List[Dict[str, Any]],
         avg = sum(hist) / len(hist)
         now = float(p.get(key) or 0)
         delta = now - avg
-        if (worse and delta >= -0.5) or (not worse and delta <= 0.5):
-            continue
+        if delta * direction <= 0.5:
+            continue                     # двинулся не туда или почти не двинулся
         name = names.get(pid) or f"№{p.get('number') or pid}"
-        out.append((delta, f"{name} {now:g} (обычно {avg:.1f})"))
-    out.sort(key=lambda x: x[0], reverse=not worse)
+        out.append((delta * direction, f"{name} {now:g} (обычно {avg:.1f})"))
+    out.sort(key=lambda x: x[0], reverse=True)
     return [text for _d, text in out[:limit]]
 
 
@@ -191,10 +210,11 @@ def _quarters(game: Dict[str, Any]) -> Optional[str]:
 def game_report(team_id: str, source: str, names: Optional[Dict[str, str]] = None,
                 base_limit: int = 8) -> Dict[str, Any]:
     """Разбор последней игры команды против её же среднего."""
-    games = team_games(team_id, source, limit=base_limit + 1)
+    games = [g for g in team_games(team_id, source, limit=(base_limit + 1) * 2)
+             if is_real_game(g)]
     if not games:
         return {"ok": False, "reason": "нет игр"}
-    game, base_games = games[0], games[1:]
+    game, base_games = games[0], games[1:base_limit + 1]
     if len(base_games) < MIN_BASE_GAMES:
         return {"ok": False, "reason": f"мало игр для сравнения ({len(base_games)})"}
 
@@ -203,7 +223,8 @@ def game_report(team_id: str, source: str, names: Optional[Dict[str, str]] = Non
     names = names or {}
     for d in devs:
         if d["kind"] == "count":
-            d["who"] = _culprits(d["key"], game, base_games, worse=not d["good"], names=names)
+            d["who"] = _culprits(d["key"], game, base_games,
+                                 direction=1 if d["diff"] > 0 else -1, names=names)
         else:
             d["who"] = []
     return {"ok": True, "date": game["date"], "source": source, "team_id": str(team_id),
