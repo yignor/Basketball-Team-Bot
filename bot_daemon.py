@@ -1008,14 +1008,24 @@ def _stats_screen() -> Tuple[str, InlineKeyboardMarkup]:
             """SELECT COUNT(*) FROM (SELECT game_id FROM game_player_stats
                WHERE source = 'slpro' GROUP BY game_id
                HAVING MAX(secs) = 0 AND MAX(ABS(plus_minus)) = 0)""").fetchone()[0]
+        # Игра без стадии не попадает в зачёт турнира — она хуже, чем просто
+        # неполная: её как будто и нет.
+        no_stage = conn.execute(
+            """SELECT COUNT(DISTINCT game_id) FROM game_player_stats
+               WHERE source = 'slpro' AND (stage_id IS NULL OR stage_id = '')"""
+        ).fetchone()[0]
     lines += ["", f"Без плюс-минуса и минут: {stale} "
                   f"{_plural(stale, 'игра', 'игры', 'игр')} SLPRO."]
+    if no_stage:
+        lines.append(f"Без стадии (не считаются в зачёт): {no_stage} "
+                     f"{_plural(no_stage, 'игра', 'игры', 'игр')}.")
     rows = []
-    if stale:
+    if stale or no_stage:
         lines.append("Пометить их — и ночной бэкфилл перекачает протоколы "
                      "порциями по 200 за ночь. Уже скачанное не трогается.")
         rows.append([InlineKeyboardButton(
-            f"♻️ Пометить к перекачке ({stale})", callback_data="admin:stats:refetch")])
+            f"♻️ Пометить к перекачке ({stale + no_stage})",
+            callback_data="admin:stats:refetch")])
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -1652,6 +1662,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "refetch":
             import stats_backfill
             marked = await asyncio.to_thread(stats_backfill.forget_games_missing_fields, "slpro")
+            marked += await asyncio.to_thread(stats_backfill.forget_games_without_stage, "slpro")
             await query.edit_message_text(
                 f"♻️ Помечено к перекачке: {marked} "
                 f"{_plural(marked, 'игра', 'игры', 'игр')}.\n\n"

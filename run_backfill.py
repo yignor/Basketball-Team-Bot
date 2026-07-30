@@ -101,9 +101,15 @@ async def main() -> int:
                   f"период {s.get('first') or '?'} … {s.get('last') or '?'}")
         return 0
 
-    if args.refetch_no_stage:
+    # Игры без стадии перекачиваем ВСЕГДА, не дожидаясь флага: такая игра
+    # скачана, лежит в базе — и молча не считается, потому что подсчёт
+    # фильтрует по турниру. Само не заживёт: is_game_fetched больше не пустит
+    # бота за этой игрой. Повторов не будет — перекачанная игра приходит уже
+    # со стадией из контекста, и множество пустых схлопывается в ноль.
+    if args.source in ("slpro", "all") or args.refetch_no_stage:
         n = stats_backfill.forget_games_without_stage("slpro")
-        print(f"Помечено к перекачке игр без стадии: {n}")
+        if n:
+            print(f"Помечено к перекачке игр без стадии: {n}")
 
     rc = 0
     if args.source in ("slpro", "all"):
