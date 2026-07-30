@@ -689,7 +689,7 @@ def short_summary(rep: Dict[str, Any], detail: Dict[str, Any]) -> str:
         lines.append(f"Сезон: {season['wins']}–{season['losses']}, "
                      f"разница {season['diff']:+.1f} за игру.")
     lines.append("")
-    lines.append("Подробный разбор — во вложении: сезон, тренды, сравнение с "
-                 "прошлым сезоном и соперником, готовый промт для ИИ.")
+    lines.append("Подробный разбор — во вложении: сезон, состав, таблица лиги, "
+                 "динамика и промт для ИИ.")
     return "\n".join(lines)
 

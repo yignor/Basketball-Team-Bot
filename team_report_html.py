@@ -169,7 +169,8 @@ def _ai_prompt(team: str, cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
         for p_ in roster:
             lines.append(
                 f"{p_['name']}; {p_['games']}; {p_['mins']}; {p_['pts']}; {p_['reb']}; "
-                f"{p_['ast']}; {p_['stl']}; {p_['tur']}; {p_['fg']}; "
+                f"{p_['ast']}; {p_['stl']}; {p_['tur']}; "
+                f"{(str(round(p_['fg'] * 100)) + '%') if p_['fg'] else '—'}; "
                 f"{p_['plus_minus']:+g}; {p_['fp']}")
     st = data.get("standings") or []
     if st:
@@ -194,7 +195,7 @@ def _roster_table(roster: List[Dict[str, Any]]) -> str:
         f'<td class="num">{p["mins"] or "—"}</td><td class="num">{p["pts"]}</td>'
         f'<td class="num">{p["reb"]}</td><td class="num">{p["ast"]}</td>'
         f'<td class="num">{p["stl"]}</td><td class="num">{p["tur"]}</td>'
-        f'<td class="num">{p["fg"]}</td>'
+        f'<td class="num">{(str(round(p["fg"] * 100)) + "%") if p["fg"] else "—"}</td>'
         f'<td class="num">{p["plus_minus"]:+g}</td>'
         f'<td class="num"><b>{p["fp"]}</b></td></tr>' for p in roster)
     return ('<table><thead><tr><th>Игрок</th><th>И</th><th>Мин</th><th>Очк</th>'
