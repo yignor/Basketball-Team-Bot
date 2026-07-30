@@ -537,6 +537,7 @@ def _mark_sync_result(conn: sqlite3.Connection, table_name: str, row_count: int,
 
 def sync_players(spreadsheet) -> None:
     init_db()
+    need_reconcile = False
     with _connection() as conn:
         try:
             ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
@@ -574,10 +575,16 @@ def sync_players(spreadsheet) -> None:
             )
             conn.commit()
             _mark_sync_result(conn, "players", len(rows), None)
+            need_reconcile = True
         except Exception as e:
             conn.rollback()
             _mark_sync_result(conn, "players", 0, str(e))
             raise
+    # Строки листа могли сдвинуться (добавили игрока, отсортировали) — именно
+    # здесь это становится видно. Сверяем привязки сразу, а не ждём, пока
+    # человек увидит в приложении чужую карточку.
+    if need_reconcile:
+        reconcile_player_links()
 
 
 # ───────────── Привязка игрока к числовому Telegram id ──────────────────────
@@ -1070,6 +1077,67 @@ def free_player_rows() -> List[Dict[str, Any]]:
                  AND row_index NOT IN (SELECT player_row FROM player_links)
                ORDER BY surname, name""").fetchall()
     return [dict(r) for r in rows]
+
+
+def reconcile_player_links() -> List[Dict[str, Any]]:
+    """Переставляет привязки на строки, где человек стоит СЕЙЧАС.
+
+    Привязка помнит номер строки листа, а номер — не ключ: тренер добавил
+    игрока, удалил или отсортировал столбец, и строка под старым номером уже
+    чужая. Молча и незаметно: человек открывает приложение и видит карточку
+    соседа по алфавиту.
+
+    Якорь — числовой id, который бот сам вписал в лист: ячейка едет вместе со
+    строкой, поэтому она всегда при своём человеке. Нет id — ищем по нику.
+    Занятую строку не отбираем, но за проход чужие привязки успевают уехать на
+    свои места, поэтому проходов несколько."""
+    init_db()
+    fixed: List[Dict[str, Any]] = []
+    with _connection() as conn:
+        names = {int(r["row_index"]): f"{r['surname']} {r['name']}".strip()
+                 for r in conn.execute("SELECT row_index, surname, name FROM players")}
+        movers = []
+        for l in conn.execute("SELECT * FROM player_links").fetchall():
+            uid = str(l["tg_user_id"])
+            row = conn.execute(
+                "SELECT row_index FROM players WHERE tg_user_id = ? LIMIT 1", (uid,)).fetchone()
+            if not row and l["username"]:
+                row = conn.execute(
+                    """SELECT row_index FROM players
+                       WHERE lower(ltrim(telegram_id, '@')) = ? LIMIT 1""",
+                    (str(l["username"]).lower(),)).fetchone()
+            if row and int(row["row_index"]) != int(l["player_row"]):
+                movers.append((uid, l["username"], int(l["player_row"]), int(row["row_index"])))
+        if not movers:
+            return []
+        # Сначала СНИМАЕМ всех переезжающих со своих строк и только потом
+        # расставляем. Иначе двое, поменявшихся местами (обычная сортировка
+        # листа), встают в клинч: каждый ждёт, пока освободится строка соседа.
+        parked = {uid: -(cur + 1) for uid, _, cur, _ in movers}
+        for uid, park in parked.items():
+            conn.execute("UPDATE player_links SET player_row = ? WHERE tg_user_id = ?",
+                         (park, uid))
+        for uid, uname, was_row, now_row in movers:
+            busy = conn.execute(
+                "SELECT tg_user_id FROM player_links WHERE player_row = ? AND tg_user_id != ?",
+                (now_row, uid)).fetchone()
+            if busy:                  # строку держит тот, кто никуда не едет
+                conn.execute("UPDATE player_links SET player_row = ? WHERE tg_user_id = ?",
+                             (was_row, uid))
+                logger.warning("Привязка @%s не переехала: строка %s занята другим id %s",
+                               uname or uid, now_row, busy["tg_user_id"])
+                continue
+            conn.execute("UPDATE player_links SET player_row = ? WHERE tg_user_id = ?",
+                         (now_row, uid))
+            fixed.append({"tg_user_id": uid, "username": uname,
+                          "was_row": was_row, "was": names.get(was_row, ""),
+                          "now_row": now_row, "now": names.get(now_row, "")})
+        conn.commit()
+    for f in fixed:
+        logger.warning("Привязка съехала: @%s был на «%s» (строка %s), вернул на «%s» (строка %s)",
+                       f["username"] or f["tg_user_id"], f["was"], f["was_row"],
+                       f["now"], f["now_row"])
+    return fixed
 
 
 def linked_players() -> List[Dict[str, Any]]:

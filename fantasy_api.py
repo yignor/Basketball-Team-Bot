@@ -1413,14 +1413,23 @@ async def handle_player(request: web.Request) -> web.Response:
 
 
 def _my_player_row(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Строка листа «Игроки», закреплённая за этим Telegram id."""
-    link = sheets_cache.get_player_link(str(user.get("id")))
+    """Строка листа «Игроки», закреплённая за этим Telegram id.
+
+    Сначала ищем строку, в которой стоит его числовой id: ячейка едет вместе
+    со строкой, поэтому она всегда при своём человеке, а запомненный номер
+    строки устаревает при любой правке листа (см. reconcile_player_links).
+    Из-за этого игрок открывал кабинет и видел карточку соседа."""
+    uid = str(user.get("id"))
+    link = sheets_cache.get_player_link(uid)
     if not link:
         return None
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
-        row = conn.execute("SELECT * FROM players WHERE row_index = ?",
-                           (int(link["player_row"]),)).fetchone()
+        row = conn.execute("SELECT * FROM players WHERE tg_user_id = ? LIMIT 1",
+                           (uid,)).fetchone()
+        if not row:
+            row = conn.execute("SELECT * FROM players WHERE row_index = ?",
+                               (int(link["player_row"]),)).fetchone()
     return dict(row) if row else None
 
 

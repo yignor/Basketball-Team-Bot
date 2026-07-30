@@ -1438,9 +1438,19 @@ def _link_candidates(person: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _render_link_list() -> Tuple[str, InlineKeyboardMarkup]:
+    # Заодно сверяем: строки листа могли сдвинуться с прошлого раза, и связка
+    # уже указывает на соседа по алфавиту.
+    drifted = sheets_cache.reconcile_player_links()
     people = sheets_cache.unlinked_bot_users()
     free = sheets_cache.free_player_rows()
     lines = ["🔗 Опознание игроков", ""]
+    if drifted:
+        lines.append(f"♻️ Строки листа сдвинулись — поправил {len(drifted)} "
+                     f"{_plural(len(drifted), 'привязку', 'привязки', 'привязок')}:")
+        for d in drifted:
+            lines.append(f"   @{d['username'] or d['tg_user_id']}: было «{d['was']}» → "
+                         f"стало «{d['now']}»")
+        lines.append("")
     if people:
         lines += [f"В боте, но не сопоставлены с листом: {len(people)}.",
                   "Нажми на человека — предложу, кому он может быть.", ""]
