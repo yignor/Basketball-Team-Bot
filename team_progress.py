@@ -361,3 +361,206 @@ def format_report(rep: Dict[str, Any], team_title: str = "") -> str:
 
     parts += ["", f"Сравнение с последними {rep['base_games']} играми этой команды."]
     return "\n".join(parts)
+
+
+# ── Данные для подробного отчёта (сезоны, соперники, тренды) ───────────────
+#
+# Тут всё считается ОДНИМ запросом на сезон, без загрузки состава: подробный
+# отчёт смотрит десятки игр, и построчный обход тормозил бы на ровном месте.
+
+SERIES_SQL = """
+    SELECT s.game_id, s.game_date, s.season_id,
+           SUM(s.pts) pts, SUM(s.reb) reb, SUM(s.reb_off) reb_off,
+           SUM(s.reb_def) reb_def, SUM(s.ast) ast, SUM(s.stl) stl, SUM(s.blk) blk,
+           SUM(s.tur) tur, SUM(s.pf) pf, SUM(s.foul_on) foul_on,
+           SUM(s.fgm) fgm, SUM(s.fga) fga, SUM(s.tpm) tpm, SUM(s.tpa) tpa,
+           SUM(s.ftm) ftm, SUM(s.fta) fta, COUNT(*) players
+    FROM game_player_stats s
+    WHERE s.team_id = ? AND s.source = ? AND s.game_date != ''
+    GROUP BY s.game_id
+"""
+
+
+def season_series(team_id: str, source: str) -> List[Dict[str, Any]]:
+    """Все игры команды: наши суммы + счёт и соперник. От старых к новым."""
+    sheets_cache.init_db()
+    out: List[Dict[str, Any]] = []
+    with sheets_cache.get_connection() as conn:
+        metas = {r["game_id"]: dict(r) for r in conn.execute(
+            "SELECT * FROM game_meta WHERE source = ?", (source,))}
+        for r in conn.execute(SERIES_SQL, (str(team_id), source)):
+            g = dict(r)
+            m = metas.get(g["game_id"], {})
+            home = str(m.get("home_team_id")) == str(team_id)
+            g.update({
+                "opp_id": str((m.get("guest_team_id") if home else m.get("home_team_id")) or ""),
+                "opp_name": (m.get("guest_name") if home else m.get("home_name")) or "",
+                "our_score": m.get("home_score") if home else m.get("guest_score"),
+                "their_score": m.get("guest_score") if home else m.get("home_score"),
+                "home": home,
+                "quarters_json": m.get("quarters_json") or "",
+            })
+            g["diff"] = (g["our_score"] or 0) - (g["their_score"] or 0)
+            g["win"] = g["diff"] > 0
+            out.append(g)
+    out.sort(key=lambda x: x["game_date"])
+    return [g for g in out if g["players"] >= MIN_REAL_PLAYERS and g["fga"] >= MIN_REAL_SHOTS]
+
+
+def seasons_of(series: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Сезоны в порядке «свежий первым»: id, период, сколько игр."""
+    by: Dict[str, List[Dict[str, Any]]] = {}
+    for g in series:
+        by.setdefault(str(g.get("season_id") or ""), []).append(g)
+    out = [{"season_id": sid, "games": len(gs),
+            "from": gs[0]["game_date"], "to": gs[-1]["game_date"], "series": gs}
+           for sid, gs in by.items()]
+    out.sort(key=lambda x: x["to"], reverse=True)
+    return out
+
+
+def summarize(series: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Средние и итоги по набору игр."""
+    if not series:
+        return {}
+    n = len(series)
+    keys = ("pts", "reb", "reb_off", "reb_def", "ast", "stl", "blk", "tur", "pf",
+            "foul_on", "fgm", "fga", "tpm", "tpa", "ftm", "fta")
+    avg = {k: round(sum(g.get(k, 0) for g in series) / n, 1) for k in keys}
+    wins = sum(1 for g in series if g["win"])
+    home = [g for g in series if g["home"]]
+    away = [g for g in series if not g["home"]]
+    return {
+        "games": n, "wins": wins, "losses": n - wins,
+        "avg": avg,
+        "for": round(sum(g["our_score"] or 0 for g in series) / n, 1),
+        "against": round(sum(g["their_score"] or 0 for g in series) / n, 1),
+        "diff": round(sum(g["diff"] for g in series) / n, 1),
+        "fg_pct": _pct(avg["fgm"], avg["fga"]),
+        "tp_pct": _pct(avg["tpm"], avg["tpa"]),
+        "ft_pct": _pct(avg["ftm"], avg["fta"]),
+        "home": {"games": len(home), "wins": sum(1 for g in home if g["win"])},
+        "away": {"games": len(away), "wins": sum(1 for g in away if g["win"])},
+        "best": max(series, key=lambda g: g["diff"]),
+        "worst": min(series, key=lambda g: g["diff"]),
+    }
+
+
+def head_to_head(series: List[Dict[str, Any]], opp_id: str) -> List[Dict[str, Any]]:
+    return [g for g in series if opp_id and g["opp_id"] == str(opp_id)]
+
+
+def insights(cur: Dict[str, Any], prev: Optional[Dict[str, Any]],
+             series: List[Dict[str, Any]]) -> List[str]:
+    """Выводы словами. Не пересказ таблицы, а то, что видно только в сравнении."""
+    out: List[str] = []
+    if not cur:
+        return out
+    out.append(f"Баланс {cur['wins']}–{cur['losses']}, разница {cur['diff']:+.1f} за игру "
+               f"({cur['for']} забиваем, {cur['against']} пропускаем).")
+    h, a = cur["home"], cur["away"]
+    if h["games"] and a["games"]:
+        hp, ap = h["wins"] / h["games"], a["wins"] / a["games"]
+        if abs(hp - ap) >= 0.25:
+            where = "дома" if hp > ap else "в гостях"
+            out.append(f"Заметно сильнее {where}: {h['wins']} из {h['games']} дома против "
+                       f"{a['wins']} из {a['games']} на выезде.")
+    if cur.get("fg_pct") is not None and cur["fg_pct"] < 0.4:
+        out.append(f"Реализация с игры {cur['fg_pct']*100:.0f}% — низкая; "
+                   f"броски есть ({cur['avg']['fga']} за игру), точности нет.")
+    if cur["avg"]["tur"] >= 15:
+        out.append(f"Потери: {cur['avg']['tur']} за игру — это отдельная тренировка.")
+    if cur["avg"]["reb_off"] and cur["avg"]["reb"]:
+        share = cur["avg"]["reb_off"] / cur["avg"]["reb"]
+        if share >= 0.35:
+            out.append(f"Активны на чужом щите: {cur['avg']['reb_off']} подборов в атаке "
+                       f"({share*100:.0f}% всех).")
+    if prev:
+        d_diff = cur["diff"] - prev["diff"]
+        if abs(d_diff) >= 3:
+            better = "лучше" if d_diff > 0 else "хуже"
+            out.append(f"Против прошлого сезона разница на {abs(d_diff):.1f} {better} "
+                       f"({prev['diff']:+.1f} → {cur['diff']:+.1f}).")
+        for key, title in (("tur", "потери"), ("reb", "подборы"), ("ast", "передачи")):
+            was, now = prev["avg"].get(key, 0), cur["avg"].get(key, 0)
+            if was and abs(now - was) / was >= 0.2:
+                sign = "выросли" if now > was else "упали"
+                out.append(f"Сезон к сезону {title} {sign}: {was} → {now} за игру.")
+    if len(series) >= 6:
+        last3 = series[-3:]
+        prev3 = series[-6:-3]
+        d = (sum(g["diff"] for g in last3) / 3) - (sum(g["diff"] for g in prev3) / 3)
+        if abs(d) >= 5:
+            out.append(f"Форма: последние три игры на {abs(d):.0f} очков "
+                       f"{'лучше' if d > 0 else 'хуже'} трёх предыдущих.")
+    return out
+
+
+def detailed_report(team_id: str, source: str, team_title: str = "",
+                    names: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Всё для подробного отчёта: сезон, прошлый сезон, соперник, выводы."""
+    from datetime import datetime
+
+    series = season_series(team_id, source)
+    if not series:
+        return {"ok": False, "reason": "нет игр"}
+    seasons = seasons_of(series)
+    cur_season = seasons[0]
+    prev_season = seasons[1] if len(seasons) > 1 else None
+    last = series[-1]
+    opp = {"team_id": last["opp_id"], "name": last["opp_name"]}
+    return {
+        "ok": True,
+        "team_title": team_title or f"{source}:{team_id}",
+        "generated": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "series": cur_season["series"],
+        "season": summarize(cur_season["series"]),
+        "prev_season": summarize(prev_season["series"]) if prev_season else None,
+        "last_game": last,
+        "opponent": opp,
+        "head_to_head": head_to_head(series, opp["team_id"]),
+        "insights": insights(summarize(cur_season["series"]),
+                             summarize(prev_season["series"]) if prev_season else None,
+                             cur_season["series"]),
+    }
+
+
+def short_summary(rep: Dict[str, Any], detail: Dict[str, Any]) -> str:
+    """Пять строк в чат: остальное — во вложении.
+
+    Сообщение читают на бегу, поэтому тут только результат, одна главная
+    просадка и одна главная сила. Всё, что требует таблицы, — в файле."""
+    if not rep.get("ok"):
+        return f"📈 Прогресс команды\n\nПока не могу разобрать: {rep.get('reason')}."
+    opp = rep.get("opponent") or {}
+    d = rep["date"]
+    head = f"📈 {detail.get('team_title', 'Команда')} · {d[8:10]}.{d[5:7]}"
+    if opp.get("our_score") is not None:
+        head += f" · {opp['our_score']}:{opp['their_score']}"
+    if opp.get("name"):
+        head += f" ({opp['name']})"
+    bad = [x for x in rep["deviations"] if not x["good"]]
+    good = [x for x in rep["deviations"] if x["good"]]
+
+    def one(x: Dict[str, Any]) -> str:
+        if x["kind"] == "pct":
+            return f"{x['title']} {x['now']*100:.0f}% (обычно {x['avg']*100:.0f}%)"
+        return f"{x['title']} {x['now']:g} против {x['avg']:g}"
+
+    lines = [head, ""]
+    if bad:
+        lines.append(f"↓ {one(bad[0])}")
+    if good:
+        lines.append(f"↑ {one(good[0])}")
+    if not bad and not good:
+        lines.append("Игра прошла ровно по нашим средним.")
+    season = detail.get("season") or {}
+    if season:
+        lines.append("")
+        lines.append(f"Сезон: {season['wins']}–{season['losses']}, "
+                     f"разница {season['diff']:+.1f} за игру.")
+    lines.append("")
+    lines.append("Подробный разбор — во вложении: сезон, тренды, сравнение с "
+                 "прошлым сезоном и соперником, готовый промт для ИИ.")
+    return "\n".join(lines)
+

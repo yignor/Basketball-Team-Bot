@@ -1661,16 +1661,38 @@ async def _render_prog_list(is_admin: bool = False) -> Tuple[str, InlineKeyboard
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-async def _render_prog_team(source: str, team_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+async def _prog_send(message, source: str, team_id: str) -> None:
+    """Короткая сводка в чат + подробный разбор файлом.
+
+    В сообщение помещается «что случилось в игре» на пять строк; сезон,
+    тренды и сравнения — это таблицы и графики, в тексте они нечитаемы."""
     import team_progress
+    import team_report_html
+
     teams = await _prog_teams()
     title = next((t["name"] for t in teams
                   if t["team_id"] == team_id and t["source"] == source), "")
     names = await _prog_names()
     rep = await asyncio.to_thread(team_progress.game_report, team_id, source, names)
-    text = team_progress.format_report(rep, title)
-    return text, InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ К командам", callback_data="prog:list")]])
+    detail = await asyncio.to_thread(team_progress.detailed_report,
+                                     team_id, source, title, names)
+    await message.reply_text(team_progress.short_summary(rep, detail),
+                             reply_markup=InlineKeyboardMarkup(
+                                 [[InlineKeyboardButton("⬅️ К командам",
+                                                        callback_data="prog:list")]]))
+    if not detail.get("ok"):
+        return
+    try:
+        page = await asyncio.to_thread(team_report_html.build, detail)
+        buf = io.BytesIO(page.encode("utf-8"))
+        buf.name = f"razbor-{team_id}-{detail['series'][-1]['game_date']}.html"
+        await message.reply_document(
+            buf, caption="Открой в браузере: вкладки по сезону, последней игре, "
+                         "прошлому сезону и сопернику. Внутри — промт для ИИ.")
+    except Exception as e:
+        log.error(f"HTML-разбор не собрался: {e}")
+        await message.reply_text("⚠️ Подробный файл собрать не вышло, "
+                                 "но сводка выше верная.")
 
 
 async def _refetch_our_games_now(query) -> None:
@@ -2055,8 +2077,9 @@ async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     admin = _is_admin(user)
     try:
         if what == "team":
-            await query.edit_message_text("⏳ Считаю…")
-            text, markup = await _render_prog_team(parts[2], parts[3])
+            await query.edit_message_text("⏳ Считаю разбор…")
+            await _prog_send(query.message, parts[2], parts[3])
+            return
         else:
             text, markup = await _render_prog_list(is_admin=admin)
         await query.edit_message_text(text, reply_markup=markup)
