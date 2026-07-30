@@ -317,16 +317,34 @@ def _is_admin(user) -> bool:
     return bool(user) and bool(ADMIN_USER_IDS) and str(user.id) in ADMIN_USER_IDS
 
 
+def _can_see_reports(user) -> bool:
+    """Кому открыт «Прогресс команды»: админам и тем, кому админ выдал доступ.
+
+    Выдаётся по @нику, но живёт на числовом id — ник меняется и переуступается
+    (см. sheets_cache.has_report_access)."""
+    if not user:
+        return False
+    if _is_admin(user):
+        return True
+    try:
+        return sheets_cache.has_report_access(str(user.id), user.username or "")
+    except Exception as e:
+        log.warning(f"Проверка доступа к отчётам не прошла: {e}")
+        return False
+
+
 # Подписи кнопок нижней клавиатуры. Она постоянная (is_persistent) и висит под
 # полем ввода независимо от того, куда пролистан чат, — команд стало много, и
 # держать их под рукой удобнее, чем искать сообщение с меню.
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
+PROGRESS_KEYBOARD_LABEL = "📈 Прогресс команды"
 FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
 FEEDBACK_KEYBOARD_LABEL = "💬 Написать админам"
 
 
 def _bottom_keyboard(payload: str = "", is_admin: bool = False,
-                     with_fantasy: bool = True) -> ReplyKeyboardMarkup:
+                     with_fantasy: bool = True,
+                     with_reports: bool = False) -> ReplyKeyboardMarkup:
     """Нижняя клавиатура: фэнтези, обратная связь и — админу — панель.
 
     Фэнтези открывается как web_app: только reply-кнопка даёт sendData, поэтому
@@ -337,6 +355,8 @@ def _bottom_keyboard(payload: str = "", is_admin: bool = False,
         url = _webapp_url() + ("#d=" + payload if payload else "")
         rows.append([KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))])
     rows.append([KeyboardButton(FEEDBACK_KEYBOARD_LABEL)])
+    if with_reports:
+        rows.append([KeyboardButton(PROGRESS_KEYBOARD_LABEL)])
     if is_admin:
         rows.append([KeyboardButton(ADMIN_KEYBOARD_LABEL)])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
@@ -356,6 +376,9 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
     с 26.07, пока payload не дорос до 26 КБ)."""
     is_admin = _is_admin(user)
     uid = str(user.id)
+    # Кнопка отчётов — тренерам, которым админ выдал доступ. Админу она не
+    # нужна: у него та же вкладка внутри админ-панели.
+    with_reports = _can_see_reports(user) and not is_admin
     # Кнопка фэнтези — только игрокам команды: остальным она бесполезна.
     with_fantasy = False
     if FANTASY_WEBAPP_URL and _webapp_url():
@@ -376,7 +399,8 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
                 continue
         try:
             await message.reply_text(text, reply_markup=_bottom_keyboard(
-                payload or "", is_admin=is_admin, with_fantasy=with_fantasy))
+                payload or "", is_admin=is_admin, with_fantasy=with_fantasy,
+                with_reports=with_reports))
             return
         except Exception as e:
             log.warning(f"нижняя клавиатура (бюджет {budget}) не ушла: {e}")
@@ -1003,7 +1027,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
-        [InlineKeyboardButton("📈 Прогресс команды", callback_data="admin:prog:list")],
+        [InlineKeyboardButton("📈 Прогресс команды", callback_data="prog:list")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
@@ -1596,7 +1620,7 @@ async def _prog_names() -> Dict[str, str]:
     return names
 
 
-async def _render_prog_list() -> Tuple[str, InlineKeyboardMarkup]:
+async def _prog_body() -> Tuple[List[str], List[List[InlineKeyboardButton]]]:
     teams = await _prog_teams()
     lines = ["📈 Прогресс команды", "",
              "Разбор последней игры: что пошло не как обычно и кто в этом "
@@ -1608,7 +1632,25 @@ async def _render_prog_list() -> Tuple[str, InlineKeyboardMarkup]:
     for t in teams:
         rows.append([InlineKeyboardButton(
             f"🏀 {t['name']}"[:64],
-            callback_data=f"admin:prog:team:{t['source']}:{t['team_id']}")])
+            callback_data=f"prog:team:{t['source']}:{t['team_id']}")])
+    return lines, rows
+
+
+async def _render_prog_list(is_admin: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
+    lines, rows = await _prog_body()
+    if is_admin:
+        access = sheets_cache.report_access_list()
+        lines += ["", f"Доступ выдан: {len(access)}"]
+        for a in access:
+            state = "вошёл" if a["tg_user_id"] else "ещё не заходил"
+            lines.append(f"   @{a['username']} — {state}")
+        if not access:
+            lines.append("   пока никому")
+        rows.append([InlineKeyboardButton("➕ Дать доступ по @нику",
+                                          callback_data="prog:add")])
+        for a in access:
+            rows.append([InlineKeyboardButton(f"✂️ Забрать у @{a['username']}"[:64],
+                                              callback_data=f"prog:del:{a['username']}")])
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -1622,7 +1664,7 @@ async def _render_prog_team(source: str, team_id: str) -> Tuple[str, InlineKeybo
     rep = await asyncio.to_thread(team_progress.game_report, team_id, source, names)
     text = team_progress.format_report(rep, title)
     return text, InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ К командам", callback_data="admin:prog:list")]])
+        [InlineKeyboardButton("⬅️ К командам", callback_data="prog:list")]])
 
 
 async def _refetch_our_games_now(query) -> None:
@@ -1959,6 +2001,77 @@ async def _handle_report_action(query, kind: str, period: str) -> None:
     await query.edit_message_text(text, reply_markup=menu_fn())
 
 
+# Кто сейчас вводит ник для выдачи доступа (только в памяти, как и обратная связь).
+_awaiting_coach: set = set()
+
+COACH_ASK = ("Пришли @ник того, кому открыть «Прогресс команды».\n\n"
+             "Доступ выдаётся по нику, но закрепится за числовым id при первом "
+             "его входе — сменит ник, доступ останется.\n\nПередумал — /start.")
+
+
+async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки «Прогресс команды». Отдельно от админских: сюда пускаем и
+    тренеров, которым админ выдал доступ."""
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not _can_see_reports(user):
+        if query:
+            await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else "list"
+    admin = _is_admin(user)
+    try:
+        if what == "team":
+            await query.edit_message_text("⏳ Считаю…")
+            text, markup = await _render_prog_team(parts[2], parts[3])
+        elif what == "add" and admin:
+            _awaiting_coach.add(user.id)
+            await query.edit_message_text(COACH_ASK)
+            return
+        elif what == "del" and admin:
+            sheets_cache.revoke_report_access(username=parts[2])
+            text, markup = await _render_prog_list(is_admin=True)
+            text = f"✂️ Доступ у @{parts[2]} забран.\n\n" + text
+        else:
+            text, markup = await _render_prog_list(is_admin=admin)
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception as e:
+        log.error(f"Экран прогресса: {e}")
+        await query.edit_message_text(f"⚠️ Не получилось: {e}")
+
+
+async def handle_coach_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Следующее сообщение после «Дать доступ по @нику»."""
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_coach:
+        return
+    _awaiting_coach.discard(user.id)
+    nick = (msg.text or "").strip().split()[0] if (msg.text or "").strip() else ""
+    if not nick.lstrip("@").replace("_", "").isalnum():
+        await msg.reply_text("Это не похоже на @ник. Открой экран и попробуй ещё раз.")
+        raise ApplicationHandlerStop
+    sheets_cache.grant_report_access(nick, str(user.id))
+    await msg.reply_text(
+        f"✅ Доступ к «Прогрессу команды» открыт для {nick}.\n\n"
+        "Кнопка появится у него после /start. Если он уже нажимал /start — "
+        "пусть нажмёт ещё раз, клавиатура обновится.")
+    raise ApplicationHandlerStop
+
+
+async def handle_progress_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «📈 Прогресс команды» на нижней клавиатуре — для тренеров."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    if not _can_see_reports(user):
+        return
+    text, markup = await _render_prog_list(is_admin=_is_admin(user))
+    await msg.reply_text(text, reply_markup=markup)
+    raise ApplicationHandlerStop
+
+
 async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
@@ -2049,15 +2162,6 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif parts[1] == "report":
             kind, period = parts[2], parts[3]
             await _handle_report_action(query, kind, period)
-
-        elif parts[1] == "prog":
-            what = parts[2] if len(parts) > 2 else "list"
-            if what == "team":
-                await query.edit_message_text("⏳ Считаю…")
-                text, markup = await _render_prog_team(parts[3], parts[4])
-            else:
-                text, markup = await _render_prog_list()
-            await query.edit_message_text(text, reply_markup=markup)
 
         elif parts[1] == "link":
             what = parts[2] if len(parts) > 2 else "list"
@@ -2347,18 +2451,32 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", handle_admin))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_fantasy_webapp_data))
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
+    app.add_handler(MessageHandler(filters.Text([PROGRESS_KEYBOARD_LABEL]),
+                                   handle_progress_button))
     app.add_handler(MessageHandler(filters.Text([FEEDBACK_KEYBOARD_LABEL]), handle_feedback_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
     app.add_handler(CommandHandler("season", handle_season))
     app.add_handler(CommandHandler("feedback", handle_feedback))
-    app.add_handler(MessageHandler(
-        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_feedback_text))
     app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file)"))
-    # Ссылку на профиль ловим последней: обработчик смотрит все тексты в личке,
-    # но отвечает, только если в сообщении действительно есть ссылка.
+
+    # Обработчики, которые смотрят ЛЮБОЙ текст в личке, — каждый в своей группе.
+    # Из одной группы python-telegram-bot выполняет ровно один подошедший
+    # обработчик («Only a max of 1 handler per group is handled»), поэтому в
+    # общей группе они затирали друг друга: приём ссылки на профиль перестал
+    # работать, как только рядом появилась обратная связь. Каждый сам решает,
+    # его ли это сообщение, а тот, кто его забрал, поднимает
+    # ApplicationHandlerStop — и до остальных дело не доходит.
     app.add_handler(MessageHandler(
-        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, handle_profile_link))
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_coach_nick), group=1)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_feedback_text), group=2)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_profile_link), group=3)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
+    app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
 
     log.info("Запуск polling...")
     app.run_polling(

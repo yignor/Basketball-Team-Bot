@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS player_links (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_player_links_row ON player_links(player_row);
 CREATE INDEX IF NOT EXISTS idx_players_telegram_id ON players(telegram_id);
 
+-- Кому открыт «Прогресс команды». Выдаётся по @нику (админ знает людей по
+-- нику, а не по числовому id), но живёт на числовом id: ник меняется и
+-- переуступается, id — нет. Ник тут — окно доверия ровно на один первый вход,
+-- как и у привязки игроков.
+CREATE TABLE IF NOT EXISTS report_access (
+    username    TEXT NOT NULL PRIMARY KEY,      -- без @, нижним регистром
+    tg_user_id  TEXT NOT NULL DEFAULT '',       -- заполнится при первом входе
+    granted_at  TEXT NOT NULL DEFAULT '',
+    granted_by  TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS attendance (
     tg_poll_id       TEXT NOT NULL,
     user_id          TEXT NOT NULL,
@@ -1121,6 +1132,76 @@ def free_player_rows() -> List[Dict[str, Any]]:
                  AND row_index NOT IN (SELECT player_row FROM player_links)
                ORDER BY surname, name""").fetchall()
     return [dict(r) for r in rows]
+
+
+# ─────────────── Доступ к отчётам «Прогресс команды» ────────────────────────
+
+def _clean_nick(username: str) -> str:
+    return (username or "").lstrip("@").strip().lower()
+
+
+def grant_report_access(username: str, granted_by: str = "") -> bool:
+    """Открывает доступ по @нику. Числовой id подтянется при первом входе."""
+    nick = _clean_nick(username)
+    if not nick:
+        return False
+    init_db()
+    with _connection() as conn:
+        conn.execute(
+            """INSERT INTO report_access (username, tg_user_id, granted_at, granted_by)
+               VALUES (?, '', ?, ?)
+               ON CONFLICT(username) DO UPDATE SET granted_at=excluded.granted_at,
+                                                   granted_by=excluded.granted_by""",
+            (nick, _now_iso(), str(granted_by)))
+        conn.commit()
+    logger.info("Доступ к отчётам выдан @%s (кем: %s)", nick, granted_by)
+    return True
+
+
+def revoke_report_access(username: str = "", tg_user_id: str = "") -> bool:
+    init_db()
+    with _connection() as conn:
+        if username:
+            n = conn.execute("DELETE FROM report_access WHERE username = ?",
+                             (_clean_nick(username),)).rowcount
+        else:
+            n = conn.execute("DELETE FROM report_access WHERE tg_user_id = ?",
+                             (str(tg_user_id),)).rowcount
+        conn.commit()
+    return bool(n)
+
+
+def report_access_list() -> List[Dict[str, Any]]:
+    init_db()
+    with _connection() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM report_access ORDER BY granted_at")]
+
+
+def has_report_access(tg_user_id: str, username: str = "") -> bool:
+    """Есть ли доступ. При первом совпадении по нику закрепляет числовой id.
+
+    Дальше ник не нужен: сменил @ — доступ остался; освободил @ и его занял
+    посторонний — тот НЕ пройдёт, строка уже закреплена за прежним id."""
+    uid, nick = str(tg_user_id), _clean_nick(username)
+    init_db()
+    with _connection() as conn:
+        if conn.execute("SELECT 1 FROM report_access WHERE tg_user_id = ?",
+                        (uid,)).fetchone():
+            return True
+        if not nick:
+            return False
+        row = conn.execute(
+            "SELECT tg_user_id FROM report_access WHERE username = ?", (nick,)).fetchone()
+        if not row:
+            return False
+        if row["tg_user_id"]:
+            return False                    # ник уже закреплён за другим id
+        conn.execute("UPDATE report_access SET tg_user_id = ? WHERE username = ?",
+                     (uid, nick))
+        conn.commit()
+    logger.info("Доступ к отчётам: @%s закреплён за id %s", nick, uid)
+    return True
 
 
 def reconcile_player_links() -> List[Dict[str, Any]]:
