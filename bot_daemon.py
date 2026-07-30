@@ -424,6 +424,18 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         log.warning(f"Не удалось записать пользователя бота: {e}")
 
+    # Опознаём игрока ПРЯМО ЗДЕСЬ: здесь бот впервые видит числовой id рядом с
+    # @ником, а больше их вместе взять негде. Раньше привязка жила только в
+    # живом API, и опознание требовало пройти всю цепочку «/start → открыл
+    # Mini App → достучался до сервера»: споткнулся на любом шаге — остался
+    # чужим навсегда, хотя ник в листе стоял. Идемпотентно, лишний раз не пишет.
+    try:
+        import fantasy_api
+        if fantasy_api.ensure_player_link(str(user.id), user.username or ""):
+            log.info(f"/start: {user.id} (@{user.username or '—'}) опознан как игрок команды")
+    except Exception as e:
+        log.warning(f"/start: привязка игрока не прошла: {e}")
+
     if _is_admin(user):
         # Синхронизация с таблицей — приятный побочный эффект /start, но если
         # Google недоступен, клавиатура всё равно должна прийти: иначе молчок.
