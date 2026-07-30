@@ -1052,6 +1052,12 @@ def _stats_screen() -> Tuple[str, InlineKeyboardMarkup]:
         lines.append(f"Без стадии (не считаются в зачёт): {no_stage} "
                      f"{_plural(no_stage, 'игра', 'игры', 'игр')}.")
     rows = []
+    if no_stage:
+        # Игры без стадии не считаются вообще, поэтому их надо чинить не ночью,
+        # а сейчас: их мало, и перекачка занимает минуту.
+        rows.append([InlineKeyboardButton(
+            f"⬇️ Перекачать без стадии сейчас ({no_stage})",
+            callback_data="admin:stats:now")])
     if stale or no_stage:
         lines.append("Пометить их — и ночной бэкфилл перекачает протоколы "
                      "порциями по 200 за ночь. Уже скачанное не трогается.")
@@ -1553,6 +1559,39 @@ def _render_unlink_confirm(uid: str) -> Tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("Отмена", callback_data="admin:link:linked:0")]])
 
 
+async def _refetch_no_stage_now(query) -> None:
+    """Перекачивает игры без стадии прямо сейчас, не дожидаясь ночного крона.
+
+    Игра без стадии не попадает в зачёт турнира: её как будто нет ни в топе,
+    ни в агрегатах. Ждать до 01:30 ради десятка игр — плохой размен, тем более
+    что чинить приходится сразу после матча."""
+    import stats_backfill
+    import slpro_client
+    try:
+        marked = await asyncio.to_thread(stats_backfill.forget_games_without_stage, "slpro")
+        teams = slpro_client.config_team_names() or slpro_client.env_team_names()
+        st = await stats_backfill.backfill_slpro(
+            slpro_client.SlproClient(), scope="all", team_names=teams,
+            limit=60, delay=1.0)
+        with sheets_cache.get_connection() as conn:
+            left = conn.execute(
+                """SELECT COUNT(DISTINCT game_id) FROM game_player_stats
+                   WHERE source = 'slpro' AND (stage_id IS NULL OR stage_id = '')"""
+            ).fetchone()[0]
+        text = (f"✅ Перекачка закончена.\n\n"
+                f"Помечено: {marked}, скачано: {st.fetched}, ошибок: {st.failed}.\n"
+                f"Осталось игр без стадии: {left}.")
+        if not left:
+            text += "\n\nТоп за последнюю игру и неделю теперь считает все игры."
+    except Exception as e:
+        log.error(f"Перекачка без стадии не прошла: {e}")
+        text = f"⚠️ Перекачка не прошла: {e}"
+    try:
+        await query.message.reply_text(text)
+    except Exception:
+        pass
+
+
 def _link_row_name(player_row: int) -> str:
     with sheets_cache.get_connection() as conn:
         r = conn.execute("SELECT surname, name FROM players WHERE row_index = ?",
@@ -1940,6 +1979,12 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 text, markup = _render_link_list()
             await query.edit_message_text(text, reply_markup=markup)
+
+        elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "now":
+            await query.edit_message_text(
+                "⏳ Перекачиваю игры без стадии — это займёт около минуты.\n"
+                "Пришлю результат отдельным сообщением.")
+            asyncio.create_task(_refetch_no_stage_now(query))
 
         elif parts[1] == "stats" and len(parts) > 2 and parts[2] == "refetch":
             import stats_backfill

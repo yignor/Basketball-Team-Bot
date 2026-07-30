@@ -1005,8 +1005,13 @@
     const bar = $('meWho');
     bar.classList.toggle('hidden', !isAdmin);
     if (!isAdmin) return;
+    // Пул отсортирован под вкладку «Состав» (по очкам, цене...) — для выбора
+    // человека это бесполезно, здесь нужен алфавит. Копируем, чтобы не сбить
+    // порядок самого пула.
+    const byName = [...pool].filter(p => !p.excluded)
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
     const opts = ['<option value="">— мой кабинет —</option>'].concat(
-      pool.filter(p => !p.excluded).map(p =>
+      byName.map(p =>
         `<option value="${esc(p.ref)}"${p.ref === meRef ? ' selected' : ''}>` +
         `${esc(p.name)}</option>`)).join('');
     bar.innerHTML = `<select id="meSelect" aria-label="Чей кабинет">${opts}</select>`;
