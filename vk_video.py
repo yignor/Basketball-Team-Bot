@@ -243,8 +243,15 @@ async def sync(limit: int = 20, bot: Any = None,
 
     Нашли новую — сразу оповещаем (если передан bot): запись тем и ценна, что
     её можно посмотреть, а не узнать о ней через неделю из отчёта."""
-    out = {"looked": 0, "found": 0, "notified": 0}
-    if not token() or not groups():
+    out = {"looked": 0, "found": 0, "notified": 0, "skipped": ""}
+    # Молчать о том, что не настроено, — плохая идея: снаружи это выглядит как
+    # «работает, но ничего не находит», и причину приходится искать вручную.
+    if not token():
+        out["skipped"] = "нет VK_TOKEN в окружении"
+    elif not groups():
+        out["skipped"] = "не заданы группы (строка ТИП=вк в «Конфиге» или VK_GROUPS)"
+    if out["skipped"]:
+        print(f"ℹ️ VK: пропускаю — {out['skipped']}")
         return out
     for g in games_without_video(limit):
         out["looked"] += 1

@@ -2847,9 +2847,14 @@ async def _sync_leagues() -> None:
         vk = await vk_video.sync(bot=_bot_of(gsm),
                                  chat_ids=_result_chat_ids(gsm),
                                  topic_id=getattr(gsm, "game_announcement_topic_id", None))
-        if vk["found"]:
+        if vk.get("skipped"):
+            log.info(f"VK: {vk['skipped']} — записи игр не ищу")
+        elif vk["found"]:
             log.info(f"VK: найдено записей игр — {vk['found']} из {vk['looked']}, "
                      f"оповещений {vk['notified']}")
+        else:
+            log.info(f"VK: групп {len(__import__('vk_video').groups())}, "
+                     f"просмотрено игр {vk['looked']}, записей не нашлось")
     except Exception as e:
         log.warning(f"Справочники лиг не обновились: {e}")
 
