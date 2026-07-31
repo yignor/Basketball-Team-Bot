@@ -82,6 +82,9 @@ INFOBASKET_TYPE_ALIASES = {"ИНФОБАСКЕТ", "INFOBASKET", "ИБ", "IB", "
 # SLPRO-строки читает slpro_client: там ИД — код дивизиона (SUMC), а «ИД
 # команды» — её название, поэтому числовой парсер к ним неприменим.
 SLPRO_TYPE_ALIASES = {"SLPRO", "СЛПРО", "SL PRO", "SL-PRO"}
+# VK-строки читает vk_video: там в «ИД» короткое имя группы, а не турнир.
+# Пропускаем их здесь явно, чтобы имя группы не попало в comp_ids.
+VK_TYPE_ALIASES = {"VK", "ВК", "ВКОНТАКТЕ", "VKONTAKTE"}
 VOTING_SECTION_END_MARKER = "--- END VOTING ---"
 VOTING_SECTION_HEADER = [
     "ID голосования",
@@ -1505,6 +1508,8 @@ class EnhancedDuplicateProtection:
 
                 # Человекочитаемый ТИП из выпадающего списка → служебный.
                 if normalized_type in SLPRO_TYPE_ALIASES:
+                    continue
+                if normalized_type in VK_TYPE_ALIASES:
                     continue
                 if normalized_type in INFOBASKET_TYPE_ALIASES:
                     normalized_type = "CONFIG_TEAM" if row_team_ids else "CONFIG_COMP"

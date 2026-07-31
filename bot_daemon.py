@@ -2798,6 +2798,30 @@ _league_sync_at: float = 0.0
 _LEAGUE_SYNC_INTERVAL = 3600.0     # раз в час: заявки меняются реже некуда
 
 
+def _game_manager():
+    """Экземпляр GameSystemManager — только ради разрешённого конфига чатов.
+    Создаём по требованию: он лезет в Sheets, и держать его постоянно незачем."""
+    from game_system_manager import GameSystemManager
+    return GameSystemManager()
+
+
+def _bot_of(gsm) -> Any:
+    return getattr(gsm, "bot", None)
+
+
+def _result_chat_ids(gsm) -> List[Any]:
+    """Чаты, куда идут результаты — туда же и запись игры."""
+    try:
+        from game_system_manager import (get_chat_ids_for_automation,
+                                         AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
+        entry = gsm._get_automation_entry(AUTOMATION_KEY_GAME_ANNOUNCEMENTS)
+        ids = get_chat_ids_for_automation(AUTOMATION_KEY_GAME_ANNOUNCEMENTS, entry)
+        return [gsm._to_int(c) or c for c in ids]
+    except Exception as e:
+        log.warning(f"Чаты для оповещения о записи не определились: {e}")
+        return []
+
+
 async def _sync_leagues() -> None:
     """Справочники лиг — единственное место демона, которое ходит в чужие API
     ради состава команд и имён. Всё остальное читает результат из базы и
@@ -2816,11 +2840,16 @@ async def _sync_leagues() -> None:
                  f"имён {player_names.stats()['count']} (+{extra} из протоколов), "
                  f"склеек {res.get('merged', 0)}, ошибок {res['failed']}")
         # Записи игр из VK — тем же фоновым заходом. Не настроено (нет токена
-        # или групп) — тихо ничего не делает.
+        # или групп) — тихо ничего не делает. Нашли новую — сразу оповещаем:
+        # запись ценна тем, что её можно посмотреть, а не узнать о ней потом.
         import vk_video
-        vk = await vk_video.sync()
+        gsm = _game_manager()
+        vk = await vk_video.sync(bot=_bot_of(gsm),
+                                 chat_ids=_result_chat_ids(gsm),
+                                 topic_id=getattr(gsm, "game_announcement_topic_id", None))
         if vk["found"]:
-            log.info(f"VK: найдено записей игр — {vk['found']} из {vk['looked']}")
+            log.info(f"VK: найдено записей игр — {vk['found']} из {vk['looked']}, "
+                     f"оповещений {vk['notified']}")
     except Exception as e:
         log.warning(f"Справочники лиг не обновились: {e}")
 

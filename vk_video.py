@@ -187,17 +187,76 @@ def games_without_video(limit: int = 20) -> List[Dict[str, Any]]:
                 ORDER BY game_date DESC LIMIT ?""", ours + ours + [limit])]
 
 
-async def sync(limit: int = 20) -> Dict[str, int]:
-    """Пройтись по играм без записи и поискать их в VK. Для фонового цикла."""
-    out = {"looked": 0, "found": 0}
+def _announce_text(game: Dict[str, Any], link: str) -> str:
+    """Текст оповещения о появившейся записи."""
+    d = str(game.get("game_date") or "")
+    when = f"{d[8:10]}.{d[5:7]}" if len(d) >= 10 else d
+    return (f"📹 Появилась запись игры\n"
+            f"🏀 {game.get('home_name')} — {game.get('guest_name')}"
+            f"{f' · {when}' if when else ''}\n\n"
+            f"<a href=\"{link}\">Смотреть</a>")
+
+
+async def announce(bot: Any, game: Dict[str, Any], link: str,
+                   chat_ids: Optional[List[Any]] = None,
+                   topic_id: Optional[int] = None) -> Dict[str, int]:
+    """Оповестить о найденной записи: чат команды и подписчики.
+
+    Три адресата, и они не пересекаются по смыслу:
+      • общий чат — всем, кто и так тут;
+      • подписка на команду — тем, кого в чате нет;
+      • подписка на игрока — тем, кто следит за конкретным человеком, и
+        только если он в ЭТОЙ игре выходил на площадку.
+    Кто попал сразу в две личные рассылки, получит одно сообщение."""
+    import subscriptions
+    text = _announce_text(game, link)
+    out = {"chat": 0, "team": 0, "players": 0}
+    for cid in (chat_ids or []):
+        try:
+            kwargs: Dict[str, Any] = {"chat_id": cid, "text": text,
+                                      "parse_mode": "HTML",
+                                      "disable_web_page_preview": False}
+            if topic_id is not None:
+                kwargs["message_thread_id"] = topic_id
+            await bot.send_message(**kwargs)
+            out["chat"] += 1
+        except Exception as e:
+            print(f"⚠️ VK: оповещение в чат {cid} не ушло — {e}")
+
+    team = subscriptions.subscribers("team")
+    watchers = subscriptions.watchers_of_game(game["source"], game["game_id"])
+    out["team"] = await subscriptions.deliver_to(bot, team, text)
+    # Тем, кто уже получил как подписчик команды, второй раз не шлём.
+    only_players = [u for u in watchers if u not in set(team)]
+    out["players"] = await subscriptions.deliver_to(bot, only_players, text)
+    return out
+
+
+async def sync(limit: int = 20, bot: Any = None,
+               chat_ids: Optional[List[Any]] = None,
+               topic_id: Optional[int] = None) -> Dict[str, int]:
+    """Пройтись по играм без записи и поискать их в VK. Для фонового цикла.
+
+    Нашли новую — сразу оповещаем (если передан bot): запись тем и ценна, что
+    её можно посмотреть, а не узнать о ней через неделю из отчёта."""
+    out = {"looked": 0, "found": 0, "notified": 0}
     if not token() or not groups():
         return out
     for g in games_without_video(limit):
         out["looked"] += 1
         link = await find_for_game(g["game_date"], g["home_name"], g["guest_name"])
-        if link and store(g["source"], g["game_id"], link):
-            out["found"] += 1
-            print(f"📹 VK: {g['home_name']} — {g['guest_name']} ({g['game_date']}): {link}")
+        if not (link and store(g["source"], g["game_id"], link)):
+            continue
+        out["found"] += 1
+        print(f"📹 VK: {g['home_name']} — {g['guest_name']} ({g['game_date']}): {link}")
+        if bot is not None:
+            try:
+                res = await announce(bot, g, link, chat_ids, topic_id)
+                out["notified"] += res["chat"] + res["team"] + res["players"]
+                print(f"   оповещено: чатов {res['chat']}, по команде {res['team']}, "
+                      f"по игрокам {res['players']}")
+            except Exception as e:
+                print(f"⚠️ VK: оповещение не ушло — {e}")
     return out
 
 

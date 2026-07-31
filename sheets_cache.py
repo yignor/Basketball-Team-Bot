@@ -477,11 +477,24 @@ CREATE TABLE IF NOT EXISTS player_jokes (
 -- числовому Telegram id — он вечный, в отличие от ника.
 CREATE TABLE IF NOT EXISTS subscriptions (
     user_id     TEXT NOT NULL,
-    kind        TEXT NOT NULL,             -- team | fantasy_open | fantasy_lock | personal
+    kind        TEXT NOT NULL,             -- team | fantasy | personal
     enabled     INTEGER NOT NULL DEFAULT 1,
     updated_at  TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (user_id, kind)
 );
+
+-- Подписка на КОНКРЕТНОГО игрока: трансляция придёт, если он есть в протоколе
+-- этой игры. Отдельной таблицей, а не видом в subscriptions: там ключ
+-- «человек + вид», а тут их много на человека.
+-- `ref` — ссылка пула (`ib:36502:123`, возможно составная через «+»), то есть
+-- идентификаторы. ФИО не храним ([[legal-data-invariant]]).
+CREATE TABLE IF NOT EXISTS player_subscriptions (
+    user_id     TEXT NOT NULL,
+    ref         TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_player_subs_ref ON player_subscriptions(ref);
 CREATE INDEX IF NOT EXISTS idx_player_jokes_target ON player_jokes(target_row, active);
 
 -- «Это один и тот же человек»: ссылка лиги -> составная ссылка пула.

@@ -114,6 +114,72 @@ def subscribers(kind: str) -> List[str]:
     return filter_subscribed(known, kind)
 
 
+# ── Подписка на конкретного игрока ──────────────────────────────────────────
+
+def player_toggle(user_id: Any, ref: str) -> bool:
+    """Подписаться/отписаться от игрока. Возвращает новое состояние."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM player_subscriptions WHERE user_id = ? AND ref = ?",
+            (str(user_id), ref)).fetchone()
+        if row:
+            conn.execute(
+                "DELETE FROM player_subscriptions WHERE user_id = ? AND ref = ?",
+                (str(user_id), ref))
+            conn.commit()
+            return False
+        conn.execute(
+            """INSERT INTO player_subscriptions (user_id, ref, created_at)
+               VALUES (?, ?, ?)""", (str(user_id), ref, sheets_cache.now_iso()))
+        conn.commit()
+    return True
+
+
+def my_players(user_id: Any) -> List[str]:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        return [r["ref"] for r in conn.execute(
+            "SELECT ref FROM player_subscriptions WHERE user_id = ?", (str(user_id),))]
+
+
+def watchers_of_game(source: str, game_id: Any) -> List[str]:
+    """Кто подписан хоть на кого-то из ВЫШЕДШИХ в этой игре.
+
+    Сверяем по протоколу, а не по заявке: подписка на игрока — это «покажи мне
+    матч, когда он играет», а не «когда его команда играет»."""
+    sheets_cache.init_db()
+    pref = "slpro" if source == "slpro" else "ib"
+    with sheets_cache.get_connection() as conn:
+        played = {f"{pref}:{r['team_id']}:{r['player_id']}" for r in conn.execute(
+            """SELECT team_id, player_id FROM game_player_stats
+               WHERE source = ? AND game_id = ?""", (source, str(game_id)))}
+        if not played:
+            return []
+        # Ссылка подписки может быть составной («ib:..+slpro:..»): человек один,
+        # а id у него два. Разворачиваем и сравниваем по частям.
+        out: List[str] = []
+        for r in conn.execute("SELECT user_id, ref FROM player_subscriptions"):
+            if set(str(r["ref"]).split("+")) & played:
+                out.append(str(r["user_id"]))
+    return sorted(set(out))
+
+
+async def deliver_to(bot: Any, user_ids: List[str], text: str,
+                     parse_mode: Optional[str] = "HTML") -> int:
+    """Разослать конкретным людям. Ошибка у одного не роняет остальных."""
+    sent = 0
+    for uid in dict.fromkeys(str(u) for u in user_ids):
+        try:
+            await bot.send_message(chat_id=int(uid), text=text,
+                                   parse_mode=parse_mode,
+                                   disable_web_page_preview=True)
+            sent += 1
+        except Exception as e:
+            print(f"⚠️ Рассылка: не доставлено {uid} — {e}")
+    return sent
+
+
 async def deliver(bot: Any, kind: str, text: str,
                   parse_mode: Optional[str] = "HTML") -> int:
     """Разослать текст подписчикам в личку. Возвращает, сколько дошло.
