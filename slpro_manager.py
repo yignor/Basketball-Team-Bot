@@ -370,7 +370,14 @@ class SlproManager:
             quarters = format_quarters(box, team_id)
             if quarters:
                 lines.append(f"📈 Четверти: {quarters}")
-            leaders = format_leaders(box, team_id, won=(our_s > opp_s))
+            try:
+                import player_jokes
+                jokes = player_jokes.Jokes(won=(our_s > opp_s), source="slpro",
+                                           game_id=box.game_id)
+            except Exception as e:
+                print(f"⚠️ SLPRO: шутки не подгрузились: {e}")
+                jokes = None
+            leaders = format_leaders(box, team_id, won=(our_s > opp_s), jokes=jokes)
             if leaders:
                 lines.append(leaders)
             if box.video_vk:

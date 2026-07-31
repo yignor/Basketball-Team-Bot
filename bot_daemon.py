@@ -623,7 +623,18 @@ JOKE_HELP = ("😄 Шутки к фамилиям\n\n"
              "Оставь фразу игроку — своему или чужому. Когда он попадёт в "
              "лучшие (или в антилидеры) в сообщении о результате, бот допишет "
              "её к строке и подпишет твоим ником.\n\n"
-             "Фраз можно несколько — бот берёт случайную.")
+             "Фраза срабатывает ОДИН РАЗ — в той игре, которую ты выберешь.")
+
+
+def _joke_games_markup() -> InlineKeyboardMarkup:
+    """Кнопки выбора игры: ближайшие матчи и «на ближайшую, где будет играть»."""
+    import player_jokes
+    rows = []
+    for i, g in enumerate(player_jokes.upcoming_games()):
+        rows.append([InlineKeyboardButton(g["label"], callback_data=f"joke:game:{i}")])
+    rows.append([InlineKeyboardButton("⏭ На ближайшую, где будет играть",
+                                      callback_data="joke:game:next")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _joke_menu(uid: int, is_admin: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
@@ -650,9 +661,9 @@ def _joke_list_screen(uid: Optional[int], title: str) -> Tuple[str, InlineKeyboa
     lines = [title, ""]
     rows = []
     for i, j in enumerate(items[:20], 1):
-        when = player_jokes.OCCASIONS.get(j["occasion"], j["occasion"])
+        when = j["game_label"] or "ближайшая игра"
         who = f" · @{j['author_nick']}" if (uid is None and j["author_nick"]) else ""
-        lines.append(f"{i}. {j['target']} ({when}){who}\n   «{j['text']}»")
+        lines.append(f"{i}. {j['target']} → {when}{who}\n   «{j['text']}»")
         rows.append([InlineKeyboardButton(f"🗑 Удалить {i}",
                                           callback_data=f"joke:del:{j['id']}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="joke:menu")])
@@ -693,24 +704,38 @@ async def handle_joke_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             "Передумал — /start.")
     elif action == "pick" and len(parts) > 2:
         draft = _joke_draft.get(user.id) or {}
-        draft.update(row=int(parts[2]), stage="occasion")
+        row = int(parts[2])
+        found = [p for p in player_jokes.find_player(draft.get("target", ""))
+                 if p["row_index"] == row]
+        if found:
+            draft["target"] = f"{found[0]['surname']} {found[0]['name']}".strip()
+        draft.update(row=row, stage="game")
         _joke_draft[user.id] = draft
         await query.edit_message_text(
-            f"Когда показывать фразу для «{draft.get('target', '')}»?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ После победы", callback_data="joke:when:win"),
-                 InlineKeyboardButton("❌ После поражения", callback_data="joke:when:loss")],
-                [InlineKeyboardButton("🤷 В любом случае", callback_data="joke:when:any")]]))
-    elif action == "when" and len(parts) > 2:
+            f"На какую игру фраза для «{draft.get('target', '')}»?",
+            reply_markup=_joke_games_markup())
+    elif action == "game" and len(parts) > 2:
         draft = _joke_draft.get(user.id) or {}
         if not draft.get("row"):
             await query.edit_message_text("Начни заново: /joke")
             return
-        draft.update(occasion=parts[2], stage="text")
+        if parts[2] == "next":
+            draft.update(game_source="", game_id="", game_label="", stage="text")
+            where = "в ближайшей игре, где он выйдет на площадку"
+        else:
+            games = player_jokes.upcoming_games()
+            idx = int(parts[2])
+            if idx >= len(games):
+                await query.edit_message_text("Эта игра уже не в списке. Начни заново: /joke")
+                return
+            g = games[idx]
+            draft.update(game_source=g["source"], game_id=g["game_id"],
+                         game_label=g["label"], stage="text")
+            where = f"в игре {g['label']}"
         _joke_draft[user.id] = draft
         await query.edit_message_text(
-            f"Пиши фразу для «{draft.get('target', '')}» "
-            f"({player_jokes.OCCASIONS[parts[2]]}).\n\n"
+            f"Пиши фразу для «{draft.get('target', '')}» — прозвучит {where}, "
+            f"один раз.\n\n"
             f"Одной строкой, до {player_jokes.MAX_LEN} символов. Её увидит весь чат "
             f"вместе с твоим ником.")
     elif action == "mine":
@@ -757,25 +782,24 @@ async def handle_joke_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await msg.reply_text("Кого именно?", reply_markup=InlineKeyboardMarkup(rows))
             raise ApplicationHandlerStop
         p = found[0]
-        draft.update(row=p["row_index"], stage="occasion",
+        draft.update(row=p["row_index"], stage="game",
                      target=f"{p['surname']} {p['name']}".strip())
         _joke_draft[user.id] = draft
-        await msg.reply_text(
-            f"Когда показывать фразу для «{draft['target']}»?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ После победы", callback_data="joke:when:win"),
-                 InlineKeyboardButton("❌ После поражения", callback_data="joke:when:loss")],
-                [InlineKeyboardButton("🤷 В любом случае", callback_data="joke:when:any")]]))
+        await msg.reply_text(f"На какую игру фраза для «{draft['target']}»?",
+                             reply_markup=_joke_games_markup())
         raise ApplicationHandlerStop
 
     if draft.get("stage") == "text":
-        ok, said = player_jokes.add(draft["row"], draft.get("occasion", "any"), text,
-                                    user.id, user.username or "")
+        ok, said = player_jokes.add(
+            draft["row"], draft.get("occasion", "any"), text,
+            user.id, user.username or "",
+            game_source=draft.get("game_source", ""),
+            game_id=draft.get("game_id", ""),
+            game_label=draft.get("game_label", ""))
         if ok:
             _joke_draft.pop(user.id, None)
-            when = player_jokes.OCCASIONS.get(draft.get("occasion", "any"), "")
             await msg.reply_text(
-                f"😄 {said}\n\n«{text}» — для «{draft.get('target', '')}» {when}, "
+                f"😄 {said}\n\n«{text}» — для «{draft.get('target', '')}», "
                 f"подпись: @{user.username or 'без ника'}.",
                 reply_markup=_joke_menu(user.id, _is_admin(user))[1])
         else:

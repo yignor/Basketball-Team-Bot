@@ -2280,7 +2280,9 @@ class GameSystemManager:
                 # протокола. Не завелось — публикуем как раньше, без них.
                 try:
                     import player_jokes
-                    jokes = player_jokes.Jokes(is_victory)
+                    jokes = player_jokes.Jokes(
+                        is_victory, source="infobasket",
+                        game_id=game_info.get('game_id') or "")
                 except Exception:
                     jokes = None
 

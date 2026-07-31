@@ -452,6 +452,11 @@ CREATE TABLE IF NOT EXISTS league_rosters (
 -- о результате. Автор пишет её сам, себе или товарищу по команде.
 -- Юр-инвариант: адресат хранится СТРОКОЙ ЛИСТА «Игроки» (row_index), а не ФИО.
 -- Ник автора храним осознанно — он публикуется в «(с) @ник», в этом и смысл.
+-- Фраза живёт РОВНО ОДНУ игру: иначе одна и та же шутка повторялась бы в
+-- каждом результате и приедалась за неделю. Игру автор выбирает сам
+-- (game_source+game_id) либо ставит «на ближайшую» (game_id пустой) — тогда
+-- фраза срабатывает на первом же матче, где этот игрок выйдет на площадку.
+-- used_at проставляется в момент публикации и закрывает шутку навсегда.
 CREATE TABLE IF NOT EXISTS player_jokes (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     target_row   INTEGER NOT NULL,          -- строка листа «Игроки»
@@ -460,7 +465,11 @@ CREATE TABLE IF NOT EXISTS player_jokes (
     author_id    TEXT NOT NULL DEFAULT '',
     author_nick  TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT '',
-    active       INTEGER NOT NULL DEFAULT 1
+    active       INTEGER NOT NULL DEFAULT 1,
+    game_source  TEXT NOT NULL DEFAULT '',  -- slpro | infobasket | '' (любая)
+    game_id      TEXT NOT NULL DEFAULT '',  -- '' = на ближайшую игру
+    game_label   TEXT NOT NULL DEFAULT '',  -- как показать автору: «02.08 · Атланты»
+    used_at      TEXT NOT NULL DEFAULT ''   -- сработала — больше не появится
 );
 CREATE INDEX IF NOT EXISTS idx_player_jokes_target ON player_jokes(target_row, active);
 
@@ -566,6 +575,11 @@ def init_db() -> None:
         _ensure_column(conn, "players", "tg_user_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_player_stats", "stage_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_player_stats", "foul_on", "INTEGER NOT NULL", "0")
+        # Привязка шутки к конкретной игре появилась позже самой таблицы.
+        _ensure_column(conn, "player_jokes", "game_source", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "player_jokes", "game_id", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "player_jokes", "game_label", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "player_jokes", "used_at", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:

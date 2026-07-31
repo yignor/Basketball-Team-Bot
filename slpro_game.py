@@ -213,45 +213,71 @@ def format_quarters(box: BoxScore, our_team_id: int) -> str:
     return " · ".join(parts)
 
 
-def format_leaders(box: BoxScore, our_team_id: int, top_scorers: int = 3,
-                   won: Optional[bool] = None) -> str:
-    """Короткий блок лидеров нашей команды для сообщения о результате.
-    Имена берём транзитно (display_name) — в хранилище это не идёт.
+def format_leaders(box: BoxScore, our_team_id: int,
+                   won: Optional[bool] = None,
+                   jokes: Any = None) -> str:
+    """Блок игроков для сообщения о результате — как у Инфобаскета.
 
-    `won` включает шутки от своих: к строке MVP дописывается фраза, которую
-    кто-то из команды заранее оставил этому игроку (player_jokes)."""
-    ours = [p for p in box.team_players(our_team_id) if p.pts or p.reb or p.ast]
+    Логика та же и намеренно вывернутая: **выиграли — показываем, что нужно
+    улучшить; проиграли — кто всё-таки вытащил**. Хвалить после победы незачем,
+    а после поражения важно, чтобы люди не расходились с одним чувством вины.
+
+    По одному игроку на показатель: список из трёх фамилий никто не читает.
+    Имена транзитные (display_name), в хранилище не идут. `jokes` — реестр
+    шуток от своих (player_jokes.Jokes), дописывает фразу к строке игрока."""
+    ours = [p for p in box.team_players(our_team_id) if p.pts or p.reb or p.ast or p.pf]
     if not ours:
         return ""
-    try:
-        import player_jokes
-        jokes = player_jokes.Jokes(won)
-    except Exception:
-        jokes = None                 # без шуток, но со счётом — так надёжнее
-    lines = []
-    mvp = box.mvp(our_team_id)
-    if mvp:
-        name = mvp.display_name or f"№{mvp.number}"
-        joke = jokes.for_name(name) if jokes and mvp.display_name else ""
-        lines.append(f"⭐️ MVP: {name} — {mvp.pts} очк, {mvp.reb} подб, "
-                     f"{mvp.ast} пас (КПИ {mvp.efficiency}){joke}")
-    top = sorted(ours, key=lambda p: p.pts, reverse=True)[:top_scorers]
-    scorers = ", ".join(f"{(p.display_name or ('№'+p.number))} {p.pts}" for p in top)
-    if scorers:
-        lines.append(f"🏀 Очки: {scorers}")
-    top_reb = max(ours, key=lambda p: p.reb, default=None)
-    top_ast = max(ours, key=lambda p: p.ast, default=None)
-    extra = []
-    if top_reb and top_reb.reb:
-        extra.append(f"подборы — {(top_reb.display_name or ('№'+top_reb.number))} ({top_reb.reb})")
-    if top_ast and top_ast.ast:
-        extra.append(f"передачи — {(top_ast.display_name or ('№'+top_ast.number))} ({top_ast.ast})")
-    if extra:
-        lines.append("📊 " + "; ".join(extra))
-    # Вторая фраза — лучшему по подборам: так шутки достаются не только
-    # бомбардиру, у которого и так вся слава.
-    if jokes and top_reb and top_reb.display_name and top_reb.reb:
-        joke = jokes.for_name(top_reb.display_name)
-        if joke:
-            lines.append(f"😄{joke}")
-    return "\n".join(lines)
+
+    def nm(p: Any) -> str:
+        return p.display_name or f"№{p.number}"
+
+    def joke(p: Any) -> str:
+        return jokes.for_name(p.display_name) if (jokes and p.display_name) else ""
+
+    def pct(made: int, att: int) -> int:
+        return round(made / att * 100) if att else 0
+
+    lines: List[str] = []
+    if won:
+        lines.append("😅 ЧТО НУЖНО УЛУЧШИТЬ:")
+        # Проценты считаем только тем, кто реально бросал: 0% с одной попытки
+        # — не показатель, а случайность.
+        ft = [p for p in ours if p.fta >= 2]
+        if ft:
+            w = min(ft, key=lambda p: pct(p.ftm, p.fta))
+            lines.append(f"🏀 Штрафные: {nm(w)} — {pct(w.ftm, w.fta)}% "
+                         f"({w.ftm}/{w.fta}){joke(w)}")
+        two = [p for p in ours if p.fg2a >= 3]
+        if two:
+            w = min(two, key=lambda p: pct(p.fg2m, p.fg2a))
+            lines.append(f"🎯 Двухочковые: {nm(w)} — {pct(w.fg2m, w.fg2a)}% "
+                         f"({w.fg2m}/{w.fg2a}){joke(w)}")
+        three = [p for p in ours if p.fg3a >= 3]
+        if three:
+            w = min(three, key=lambda p: pct(p.fg3m, p.fg3a))
+            lines.append(f"🎯 Трёхочковые: {nm(w)} — {pct(w.fg3m, w.fg3a)}% "
+                         f"({w.fg3m}/{w.fg3a}){joke(w)}")
+        w = max(ours, key=lambda p: p.tur)
+        if w.tur:
+            lines.append(f"💥 Потери: {nm(w)} — {w.tur}{joke(w)}")
+        w = max(ours, key=lambda p: p.pf)
+        if w.pf:
+            lines.append(f"⚠️ Фолы: {nm(w)} — {w.pf}{joke(w)}")
+    else:
+        lines.append("🏆 ЛУЧШИЕ ИГРОКИ:")
+        w = max(ours, key=lambda p: p.pts)
+        if w.pts:
+            lines.append(f"🥇 Очки: {nm(w)} — {w.pts}{joke(w)}")
+        w = max(ours, key=lambda p: p.reb)
+        if w.reb:
+            lines.append(f"🏀 Подборы: {nm(w)} — {w.reb}{joke(w)}")
+        w = max(ours, key=lambda p: p.ast)
+        if w.ast:
+            lines.append(f"🎯 Передачи: {nm(w)} — {w.ast}{joke(w)}")
+        w = max(ours, key=lambda p: p.stl)
+        if w.stl:
+            lines.append(f"🥷 Перехваты: {nm(w)} — {w.stl}{joke(w)}")
+        w = max(ours, key=lambda p: p.efficiency)
+        lines.append(f"📈 КПИ: {nm(w)} — {w.efficiency}{joke(w)}")
+    return "\n".join(lines) if len(lines) > 1 else ""

@@ -77,9 +77,85 @@ def validate(text: str) -> Optional[str]:
     return None
 
 
+POLL_TYPES = ("ОПРОС_ИГРА", "ОПРОС_ИГРА_SLPRO", "АНОНС_ИГРА", "АНОНС_ИГРА_SLPRO")
+
+
+def _iso(date_str: str) -> str:
+    """«27.06.2026» и «2026-06-27» — к одному виду. В служебных записях
+    встречаются оба: инфобаскетовские идут в русском формате, SLPRO в ISO."""
+    s = (date_str or "").strip()
+    if len(s) == 10 and s[2] == "." and s[5] == ".":
+        return f"{s[6:]}-{s[3:5]}-{s[:2]}"
+    return s
+
+
+def upcoming_games(limit: int = 5) -> List[Dict[str, Any]]:
+    """Ближайшие игры из локальных служебных записей — без сети.
+
+    Берём то, по чему уже создан опрос или анонс: раз бот о матче объявил,
+    значит матч наш и состоится. Расписание целиком мы не зеркалим, а для
+    выбора «на какую игру шутка» этого хватает."""
+    from datetime import date
+    sheets_cache.init_db()
+    today = date.today().isoformat()
+    marks = ",".join("?" * len(POLL_TYPES))
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            f"""SELECT data_type, game_id, game_date, game_time, additional_data,
+                       team_a_id, team_b_id, alt_name
+                FROM service_records
+                WHERE data_type IN ({marks}) AND game_date != ''""", POLL_TYPES)]
+        teams = {str(r["team_id"]): r["name"] for r in conn.execute(
+            "SELECT team_id, name FROM league_teams WHERE name != ''")}
+        for r in conn.execute("""SELECT home_team_id, home_name, guest_team_id, guest_name
+                                 FROM game_meta WHERE home_name != '' OR guest_name != ''"""):
+            teams.setdefault(str(r["home_team_id"]), r["home_name"])
+            teams.setdefault(str(r["guest_team_id"]), r["guest_name"])
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        iso = _iso(r["game_date"])
+        if iso < today:
+            continue
+        slpro = r["data_type"].endswith("_SLPRO")
+        source = "slpro" if slpro else "infobasket"
+        gid = str(r["game_id"] or "").replace("slpro-", "")
+        if not gid:
+            continue
+        # Соперник — тот из двух id, что не наш. Название берём из справочника,
+        # а если его нет — вытаскиваем из текста опроса («X против Y»).
+        ours = str(r["team_a_id"] or ""), str(r["team_b_id"] or "")
+        opp = ""
+        head = (r["additional_data"] or "").split("\n")[0]
+        m = re.search(r"против\s+(.+?)(?:\s*\(|$)", head)
+        if m:
+            opp = m.group(1).strip()
+        if not opp:
+            for tid in ours:
+                nm = teams.get(tid, "")
+                if nm and nm != (r["alt_name"] or ""):
+                    opp = nm
+                    break
+        key = f"{source}:{gid}"
+        out.setdefault(key, {
+            "source": source, "game_id": gid, "date": iso,
+            "time": r["game_time"] or "", "opponent": opp or "соперник",
+            "league": "SLPRO" if slpro else "Инфобаскет",
+        })
+    games = sorted(out.values(), key=lambda g: (g["date"], g["time"]))
+    for g in games:
+        d = g["date"]
+        g["label"] = f"{d[8:10]}.{d[5:7]} · {g['opponent']} · {g['league']}"
+    return games[:limit]
+
+
 def add(target_row: int, occasion: str, text: str,
-        author_id: Any, author_nick: str = "") -> Tuple[bool, str]:
-    """Добавляет фразу. (получилось, что сказать человеку)."""
+        author_id: Any, author_nick: str = "",
+        game_source: str = "", game_id: str = "",
+        game_label: str = "") -> Tuple[bool, str]:
+    """Добавляет фразу. (получилось, что сказать человеку).
+
+    game_id пустой — «на ближайшую игру этого человека»."""
     err = validate(text)
     if err:
         return False, err
@@ -102,12 +178,15 @@ def add(target_row: int, occasion: str, text: str,
             return False, "Такая фраза для этого игрока уже есть."
         conn.execute(
             """INSERT INTO player_jokes
-               (target_row, occasion, text, author_id, author_nick, created_at, active)
-               VALUES (?, ?, ?, ?, ?, ?, 1)""",
+               (target_row, occasion, text, author_id, author_nick, created_at,
+                active, game_source, game_id, game_label)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
             (int(target_row), occasion, text.strip(), str(author_id),
-             (author_nick or "").lstrip("@"), sheets_cache.now_iso()))
+             (author_nick or "").lstrip("@"), sheets_cache.now_iso(),
+             game_source, str(game_id or ""), game_label))
         conn.commit()
-    return True, "Готово. Фраза появится в сообщении о результате."
+    where = f"в игре {game_label}" if game_label else "в ближайшей его игре"
+    return True, f"Готово. Фраза сработает {where} — один раз."
 
 
 def remove(joke_id: int, author_id: Optional[Any] = None) -> bool:
@@ -131,7 +210,7 @@ def listing(author_id: Optional[Any] = None) -> List[Dict[str, Any]]:
     sheets_cache.init_db()
     sql = ("""SELECT j.*, p.surname, p.name FROM player_jokes j
               LEFT JOIN players p ON p.row_index = j.target_row
-              WHERE j.active = 1""")
+              WHERE j.active = 1 AND j.used_at = ''""")
     args: List[Any] = []
     if author_id is not None:
         sql += " AND j.author_id = ?"
@@ -151,11 +230,19 @@ class Jokes:
     Живёт на время сборки сообщения: помнит, сколько шуток уже вставила и кому,
     чтобы результат не превратился в ленту юмора. Одному игроку — одна фраза,
     на сообщение — не больше MAX_PER_MESSAGE.
+
+    Берём только те фразы, что назначены ЭТОЙ игре, плюс «на ближайшую»
+    (game_id пустой). Сработавшую сразу гасим: смысл в том, чтобы шутка
+    прозвучала один раз и не превратилась в подпись навсегда.
     """
 
-    def __init__(self, won: Optional[bool], limit: int = MAX_PER_MESSAGE):
+    def __init__(self, won: Optional[bool], source: str = "", game_id: Any = "",
+                 limit: int = MAX_PER_MESSAGE):
         self.occasions = ("any",) if won is None else \
             (("win", "any") if won else ("loss", "any"))
+        self.source = "slpro" if source == "slpro" else \
+            ("infobasket" if source else "")
+        self.game_id = str(game_id or "")
         self.limit = limit
         self.used = 0
         self.seen: set = set()
@@ -169,11 +256,22 @@ class Jokes:
             marks = ",".join("?" * len(self.occasions))
             with sheets_cache.get_connection() as conn:
                 for r in conn.execute(
-                        f"""SELECT j.id, j.target_row, j.text, j.author_nick
+                        f"""SELECT j.id, j.target_row, j.text, j.author_nick,
+                                   j.game_id, j.game_source
                             FROM player_jokes j
-                            WHERE j.active = 1 AND j.occasion IN ({marks})""",
+                            WHERE j.active = 1 AND j.used_at = ''
+                              AND j.occasion IN ({marks})""",
                         list(self.occasions)):
-                    self._by_row.setdefault(int(r["target_row"]), []).append(dict(r))
+                    row = dict(r)
+                    # «На эту игру» — точное совпадение источника и id.
+                    # «На ближайшую» — пустой game_id, подходит к любой.
+                    if row["game_id"]:
+                        if not self.game_id or row["game_id"] != self.game_id:
+                            continue
+                        if row["game_source"] and self.source and \
+                                row["game_source"] != self.source:
+                            continue
+                    self._by_row.setdefault(int(row["target_row"]), []).append(row)
                 if self._by_row:
                     for r in conn.execute(
                             "SELECT row_index, surname, name FROM players"):
@@ -185,6 +283,18 @@ class Jokes:
             # Шутки — украшение. Любая беда с базой не должна помешать команде
             # узнать счёт, поэтому молча остаёмся без них.
             self._by_row, self._names = {}, {}
+
+    def _burn(self, joke_id: int) -> None:
+        """Гасим сработавшую фразу. Делаем это в момент выбора, а не после
+        отправки: если сообщение не уйдёт, потеряется одна шутка — это дешевле,
+        чем риск отправить её дважды."""
+        try:
+            with sheets_cache.get_connection() as conn:
+                conn.execute("UPDATE player_jokes SET used_at = ? WHERE id = ?",
+                             (sheets_cache.now_iso(), int(joke_id)))
+                conn.commit()
+        except Exception:
+            pass
 
     def for_name(self, name: str) -> str:
         """« · фраза (с) @ник» для игрока или пустая строка."""
@@ -203,6 +313,7 @@ class Jokes:
         pick = random.choice(pool)
         self.seen.add(row)
         self.used += 1
+        self._burn(pick["id"])
         # Оба сообщения о результате уходят с parse_mode='HTML'. Человек мог
         # написать «<3» или «Гиря & Ко» — без экранирования Telegram отверг бы
         # ВСЁ сообщение, и команда осталась бы без счёта из-за одной шутки.
