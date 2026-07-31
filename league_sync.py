@@ -32,6 +32,11 @@ import sheets_cache
 
 log = logging.getLogger(__name__)
 
+# Заявки последнего прохода вместе с датами рождения: {source:team_id -> [люди]}.
+# Живут только в памяти — даты рождения на диск не идут ([[legal-data-invariant]]).
+# Нужны, чтобы искать пары «старый id из протокола ↔ действующий из заявки».
+_roster_cache: Dict[str, List[Dict[str, Any]]] = {}
+
 
 # ── Команды: кого вообще считаем «нашими» ───────────────────────────────────
 
@@ -141,11 +146,10 @@ async def _fetch_roster(team: Dict[str, Any]) -> List[Dict[str, Any]]:
         rows = await SlproClient().get_roster(int(tid))
         return [{"player_id": str(p.get("player_id")), "number": str(p.get("number") or ""),
                  "name": f"{p.get('surname', '')} {p.get('name', '')}".strip(),
-                 # Как называется дата рождения у SLPRO — не задокументировано,
-                 # поэтому пробуем несколько написаний; нет её — склейка по
-                 # дате просто не сработает, и это не повод падать.
-                 "birth": str(p.get("birthday") or p.get("birth_date")
-                              or p.get("date_of_birth") or ""),
+                 # У SLPRO поле называется birth_day («2001-09-22»), у
+                 # Инфобаскета PersonBirth («22.09.2001»). Формат не важен:
+                 # сравниваем строки на равенство внутри одной лиги.
+                 "birth": str(p.get("birth_day") or p.get("birthday") or ""),
                  "active": True}
                 for p in rows if p.get("player_id") is not None]
     import stats_backfill
@@ -219,6 +223,7 @@ async def refresh(teams_only: bool = False) -> Dict[str, Any]:
         out["rosters"] += _store_roster(team, players)
         out["names"] += player_names.put_many(
             team["source"], ((p["player_id"], p["name"]) for p in players))
+        _roster_cache[f"{team['source']}:{team['team_id']}"] = players
         out["merged"] += _store_pairs(
             detect_same_person(players, team["source"], team["team_id"]))
     return out
@@ -333,22 +338,45 @@ async def fill_missing_names(limit: int = 40) -> int:
                 if f"{t['source']}:{pid}" not in known:
                     todo.append((t["source"], pid))
     got = 0
+    # Заодно собираем дату рождения: старые id живут только в протоколах, и
+    # именно там прячутся дубли — человека завели заново, а прежняя карточка
+    # осталась. По заявке их не найти, она знает только действующих.
+    extra: Dict[str, List[Dict[str, Any]]] = {}
     for source, pid in todo[:limit]:
-        name = ""
+        name, birth = "", ""
         try:
             if source == "slpro":
                 from slpro_client import SlproClient
                 info = await SlproClient().get_player_info(pid)
                 if info:
                     name = f"{info.get('surname', '')} {info.get('name', '')}".strip()
+                    birth = str(info.get("birth_day") or info.get("birthday") or "")
             else:
                 import stats_backfill
-                name = await stats_backfill.fetch_infobasket_person(pid)
+                one = await stats_backfill.fetch_infobasket_person_info(pid)
+                name, birth = one["name"], one["birth"]
         except Exception as e:
             log.warning(f"качалка: имя {source}:{pid} — {e}")
         if name:
             player_names.put(source, pid, name)
             got += 1
+        if name and birth:
+            extra.setdefault(source, []).append(
+                {"player_id": pid, "name": name, "birth": birth})
+
+    # Ищем дубли по ВСЕМ, кого знаем про команду: заявка (даты запомнила
+    # refresh) плюс те, кто остался только в протоколах. Пара «старый id из
+    # протокола ↔ действующий из заявки» — самый частый случай, и увидеть её
+    # можно только в общем списке.
+    merged = 0
+    for t in teams:
+        people = list(_roster_cache.get(f"{t['source']}:{t['team_id']}") or [])
+        people += extra.get(t["source"], [])
+        pairs = detect_same_person([p for p in people if p.get("birth")],
+                                   t["source"], t["team_id"])
+        merged += _store_pairs(pairs)
+    if merged:
+        log.info(f"качалка: склеено пар «это один человек»: {merged}")
     return got
 
 

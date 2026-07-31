@@ -330,23 +330,33 @@ async def fetch_infobasket_roster(team_id: Any, comp_id: Any) -> List[Dict[str, 
     return (await fetch_infobasket_team(team_id, comp_id))["players"]
 
 
-async def fetch_infobasket_person(person_id: Any) -> str:
-    """ФИО игрока Инфобаскета по его id — транзитно, в наших таблицах не храним.
+async def fetch_infobasket_person_info(person_id: Any) -> Dict[str, str]:
+    """{name, birth} игрока Инфобаскета — транзитно, в таблицах не храним.
+
     Нужно тем, кто есть в протоколах, но выпал из заявки: иначе у него вместо
-    имени остаётся только номер."""
+    имени остаётся только номер. Дата рождения — чтобы понять, не тот ли это
+    человек, что уже есть под другим id (league_sync.detect_same_person)."""
     url = f"{IB_API}/Widget/PlayerPage/{person_id}?format=json&lang=ru"
     try:
         async with _ib_session() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
                 if r.status != 200:
-                    return ""
+                    return {"name": "", "birth": ""}
                 data = await r.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError):
-        return ""
+        return {"name": "", "birth": ""}
     if not isinstance(data, dict):
-        return ""
-    return " ".join(x for x in (data.get("PersonLastNameRu"),
-                                data.get("PersonFirstNameRu")) if x).strip()
+        return {"name": "", "birth": ""}
+    return {
+        "name": " ".join(x for x in (data.get("PersonLastNameRu"),
+                                     data.get("PersonFirstNameRu")) if x).strip(),
+        "birth": str(data.get("PersonBirth") or ""),
+    }
+
+
+async def fetch_infobasket_person(person_id: Any) -> str:
+    """Только ФИО — обёртка над fetch_infobasket_person_info."""
+    return (await fetch_infobasket_person_info(person_id))["name"]
 
 
 async def fetch_infobasket_team(team_id: Any, comp_id: Any) -> Dict[str, Any]:
