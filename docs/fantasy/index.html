@@ -1429,6 +1429,21 @@
           `<button class="chip" onclick='recalcPrices(${s.id}, true)'>👀 Показать пересчёт</button> ` +
           `<button class="chip" onclick='recalcPrices(${s.id}, false)'>💰 Пересчитать цены</button>` +
         `</div>` +
+        // Точка отсчёта: игры до неё в движение цены не идут. Ставится, когда
+        // тренер закончил проставлять цены руками — иначе первый же пересчёт
+        // двинет людей по старой истории, которую цена уже учитывает.
+        `<div class="pstat">Считать игры с: ` +
+          `<b>${(s.prices || {}).since || 'всей истории'}</b>` +
+          ((s.prices || {}).since
+            ? ` — до полного окна (${(s.prices || {}).up_games || 5} игр) цены держатся`
+            : '') + `</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip" onclick='adminDo({action:"prices_since",season_id:${s.id}})'>` +
+            `🔒 Цены выставлены — считать с сегодня</button> ` +
+          (((s.prices || {}).since)
+            ? `<button class="chip" onclick='adminDo({action:"prices_since",season_id:${s.id},value:false})'>` +
+              `↺ Считать всю историю</button>` : '') +
+        `</div>` +
         `<div class="pstat">Чьи игроки в пуле${s.manual_pool ? '' : ' (по умолчанию — наши)'}:</div>` +
         `<div class="bar" style="padding-left:0">${teams || '<span class="pstat">команд не найдено</span>'}</div>` +
         `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +

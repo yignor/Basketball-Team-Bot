@@ -73,7 +73,11 @@ def settings(season: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     return {"up_games": num("rank_up_games", DEFAULT_UP_GAMES, 1, 20),
             "down_games": num("rank_down_games", DEFAULT_DOWN_GAMES, 1, 20),
-            "step": num("price_step", DEFAULT_STEP, 1, 25)}
+            "step": num("price_step", DEFAULT_STEP, 1, 25),
+            # Дата, с которой считаем игры для движения цены. Пусто — считаем
+            # всю историю (как было). Ставится кнопкой в админке в тот момент,
+            # когда тренер закончил проставлять цены руками.
+            "since": str(s.get("price_since") or "")}
 
 
 def rank_of(price: Any) -> str:
@@ -99,22 +103,32 @@ def neighbour(rank: str, up: bool) -> Optional[str]:
     return RANK_ORDER[j] if 0 <= j < len(RANK_ORDER) else None
 
 
-def form_fp(refs: List[str], games: int) -> Tuple[float, int]:
+def form_fp(refs: List[str], games: int, since: str = "") -> Tuple[float, int]:
     """(среднее фэнтези-очков за игру по последним N играм, сколько игр нашли).
 
     Игрок может числиться в двух лигах — берём его игры из обеих и сортируем
-    по дате: форма про человека, а не про турнир."""
+    по дате: форма про человека, а не про турнир.
+
+    `since` — точка отсчёта: игры раньше неё не считаются вовсе. Нужна, когда
+    тренер выставил цены руками и хочет, чтобы они держались, пока человек не
+    отыграет полное окно ЗАНОВО. Без неё первый же пересчёт двинул бы игрока
+    по старым играм, которых цена и так уже учитывает."""
     import fantasy_stats
     import sheets_cache
     sheets_cache.init_db()
     rows: List[Dict[str, Any]] = []
+    where = "AND game_date >= ?" if since else ""
     with sheets_cache.get_connection() as conn:
         for one in fantasy_stats.expand_refs(refs):
             src, pid = fantasy_stats.parse_ref(one)
+            args: List[Any] = [src, str(pid)]
+            if since:
+                args.append(since)
+            args.append(games)
             rows.extend(dict(r) for r in conn.execute(
-                """SELECT * FROM game_player_stats
-                   WHERE source = ? AND player_id = ? AND game_date != ''
-                   ORDER BY game_date DESC LIMIT ?""", (src, str(pid), games)))
+                f"""SELECT * FROM game_player_stats
+                    WHERE source = ? AND player_id = ? AND game_date != '' {where}
+                    ORDER BY game_date DESC LIMIT ?""", args))
     if not rows:
         return 0.0, 0
     rows.sort(key=lambda r: r.get("game_date") or "", reverse=True)
@@ -140,8 +154,8 @@ def next_price(price: Any, refs: List[str],
         return {"price": 0, "rank": "", "moved": 0, "reason": "нет цены"}
 
     band = RANKS[rank]
-    up_fp, up_n = form_fp(refs, cfg["up_games"])
-    down_fp, down_n = form_fp(refs, cfg["down_games"])
+    up_fp, up_n = form_fp(refs, cfg["up_games"], cfg.get("since", ""))
+    down_fp, down_n = form_fp(refs, cfg["down_games"], cfg.get("since", ""))
 
     # Подъём: форма держит потолок ранга на всём окне.
     if band["up"] is not None and up_n >= cfg["up_games"] and up_fp >= band["up"]:
@@ -164,6 +178,16 @@ def next_price(price: Any, refs: List[str],
     # пересчётов просто потому, что о нём ничего не известно.
     if not up_n and not down_n:
         return {"price": cur, "rank": rank, "moved": 0, "reason": "нет игр"}
+
+    # Окно ещё не набралось — цена не двигается ВООБЩЕ, даже внутри ранга.
+    # Договорённость с тренером: он проставил цены руками, и они держатся,
+    # пока человек не отыграет полное окно заново. Одна яркая игра не должна
+    # никого ни поднимать, ни ронять.
+    need = max(cfg["up_games"], cfg["down_games"])
+    have = max(up_n, down_n)
+    if have < need:
+        return {"price": cur, "rank": rank, "moved": 0,
+                "reason": f"игр после старта {have} из {need} — цена держится"}
 
     # Ранг тот же: цена подтягивается к форме внутри полосы.
     target = _price_for_fp(up_fp if up_n else down_fp)
@@ -195,7 +219,7 @@ def describe(season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     cfg = settings(season)
     return {
         "up_games": cfg["up_games"], "down_games": cfg["down_games"],
-        "step": cfg["step"],
+        "step": cfg["step"], "since": cfg.get("since", ""),
         "ranks": [{"rank": r, "low": RANKS[r]["low"], "high": RANKS[r]["high"],
                    "up": RANKS[r]["up"], "down": RANKS[r]["down"]} for r in reversed(RANK_ORDER)],
     }
@@ -336,8 +360,8 @@ def progress(price: Any, refs: List[str],
     games = [{"date": r.get("game_date", ""),
               "fp": fantasy_stats.fantasy_points(r, weights)} for r in rows[:window]]
 
-    up_fp, up_n = form_fp(refs, cfg["up_games"])
-    down_fp, down_n = form_fp(refs, cfg["down_games"])
+    up_fp, up_n = form_fp(refs, cfg["up_games"], cfg.get("since", ""))
+    down_fp, down_n = form_fp(refs, cfg["down_games"], cfg.get("since", ""))
     higher, lower = neighbour(rank, up=True), neighbour(rank, up=False)
 
     def need_next(threshold: Optional[float], games_n: int) -> Optional[float]:

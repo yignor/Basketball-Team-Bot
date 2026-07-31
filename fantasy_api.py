@@ -1074,6 +1074,15 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         payload = json.loads(out.body.decode())
         payload["recalc"] = res
         return web.json_response(payload)
+    elif action == "prices_since":
+        # «Цены проставлены, считай с этого дня». Игры до этой даты в движение
+        # цены не идут вовсе: тренер их уже учёл, выставляя цену руками, и
+        # первый же пересчёт иначе двинул бы человека по старой истории.
+        # Пустое значение снимает точку отсчёта (считаем всю историю).
+        from datetime import date
+        value = body.get("value")
+        since = "" if value is False else (str(value) if value else date.today().isoformat())
+        fantasy._update_settings(fantasy._get_season(sid), price_since=since)
     elif action in ("rank_up_games", "rank_down_games", "price_step"):
         try:
             fantasy._update_settings(fantasy._get_season(sid), **{action: int(body.get("value"))})
