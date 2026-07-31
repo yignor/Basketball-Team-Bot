@@ -803,7 +803,7 @@ async def _send_month_file(query, uid: Any) -> None:
     year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
     try:
         html_doc = await asyncio.to_thread(
-            monthly_report.build_combined, profiles, year, month)
+            monthly_report.build_combined, profiles, year, month, None, uid)
     except Exception as e:
         log.warning(f"месячный файл для {uid}: {e}")
         html_doc = None
@@ -811,7 +811,8 @@ async def _send_month_file(query, uid: Any) -> None:
         # Прошлый месяц пуст — пробуем текущий, иначе человек получит пустоту.
         try:
             html_doc = await asyncio.to_thread(
-                monthly_report.build_combined, profiles, today.year, today.month)
+                monthly_report.build_combined, profiles, today.year, today.month,
+                None, uid)
             year, month = today.year, today.month
         except Exception:
             html_doc = None
@@ -2518,9 +2519,17 @@ async def _warm_fantasy_pool(force: bool = False) -> None:
         # единственное место, где точно известен свежий пул, поэтому здесь же
         # приводим сохранённые составы к новому виду: иначе у человека внезапно
         # «состав не из пула», хотя он ничего не трогал.
-        moved = fantasy.migrate_refs({p["ref"] for p in pool})
-        if moved:
-            log.info(f"Составы фэнтези переведены на новые ссылки: {moved}")
+        # Переезд составов на новые ссылки — только когда пул собран с именами.
+        # На холодном реестре человек в пуле раздваивается (склейка по ФИО не
+        # срабатывает), и такой «переезд» переписал бы всем сохранённые составы
+        # на половинчатые ссылки.
+        import player_names
+        if player_names.is_cold():
+            log.info("Пул собран без имён — составы не трогаю до прогрева реестра")
+        else:
+            moved = fantasy.migrate_refs({p["ref"] for p in pool})
+            if moved:
+                log.info(f"Составы фэнтези переведены на новые ссылки: {moved}")
     except Exception as e:
         log.warning(f"Не удалось прогреть пул фэнтези: {e}")
 

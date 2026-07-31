@@ -35,6 +35,89 @@ METRIC_TITLES = (
 )
 
 
+# Оформление страницы вынесено сюда: тем же стилем печатается личный
+# месячный отчёт (monthly_report), и два разных вида одного и того же
+# бота выглядели бы небрежностью.
+PAGE_CSS = """:root { --bg:#fff; --fg:#111; --muted:#6b7280; --line:#e5e7eb; --card:#f6f7f9;
+         --pos:#16a34a; --neg:#dc2626; --acc:#2563eb; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#0f1216; --fg:#e8eaed; --muted:#9aa0a6; --line:#262b31; --card:#171b20;
+           --pos:#4ade80; --neg:#f87171; --acc:#60a5fa; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,
+        BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:16px; }
+h1 { font-size:20px; margin:0 0 2px; }
+.sub { color:var(--muted); font-size:13px; margin-bottom:14px; }
+/* Одна страница без скриптов: встроенный браузер Telegram не выполняет JS и
+   не даёт переходов, поэтому вкладки и якорные ссылки там мертвы. Разделы
+   идут подряд, ориентир — крупные заголовки с номерами. */
+h2 { font-size:17px; margin:26px 0 10px; padding-top:16px;
+      border-top:2px solid var(--line); }
+h2 .no { color:var(--acc); }
+h2 small { display:block; font-size:12px; font-weight:400; color:var(--muted);
+            margin-top:2px; }
+.toc { background:var(--card); border-radius:12px; padding:10px 12px;
+        margin:0 0 6px; font-size:13px; color:var(--muted); }
+.toc b { color:var(--acc); font-weight:700; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px;
+         margin:12px 0 18px; }
+.kpi { background:var(--card); border-radius:12px; padding:12px; }
+.kv { font-size:24px; font-weight:700; }
+.kt { color:var(--muted); font-size:12px; } .kn { color:var(--muted); font-size:12px; }
+.chart { background:var(--card); border-radius:12px; padding:12px; margin:0 0 16px; }
+.ct { font-weight:600; margin-bottom:8px; }
+svg { width:100%; height:auto; }
+.ln { fill:none; stroke:var(--acc); stroke-width:2; }
+.zero { stroke:var(--line); stroke-width:1; stroke-dasharray:4 4; }
+circle.pos { fill:var(--pos); } circle.neg { fill:var(--neg); }
+.xl { fill:var(--muted); font-size:10px; text-anchor:middle; }
+.legend { color:var(--muted); font-size:12px; margin-bottom:8px; }
+.legend span { display:inline-block; width:10px; height:10px; border-radius:2px;
+                margin:0 6px 0 12px; }
+.legend span:first-child { margin-left:0; }
+.k1 { background:var(--acc); } .k2 { background:var(--muted); }
+.bar { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; }
+.bl { width:36%; color:var(--muted); }
+.bw { flex:1; } .bv { width:22%; text-align:right; font-variant-numeric:tabular-nums; }
+.b1 { height:8px; background:var(--acc); border-radius:4px; margin-bottom:3px; }
+.b2 { height:8px; background:var(--muted); border-radius:4px; opacity:.6; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { padding:7px 6px; border-bottom:1px solid var(--line); text-align:left; }
+th { color:var(--muted); font-weight:600; }
+td.num { text-align:right; font-variant-numeric:tabular-nums; }
+td.num.pos { color:var(--pos); } td.num.neg { color:var(--neg); }
+thead th[colspan] { text-align:center; }
+/* Граница между «мы» и «они»: без неё две пары колонок сливаются в кашу. */
+.lead td:nth-child(4), .lead th:nth-child(3) { border-left:1px solid var(--line);
+                                                padding-left:12px; }
+.lead td.num { width:64px; }
+tr.w td:first-child { box-shadow:inset 3px 0 var(--pos); }
+tr.l td:first-child { box-shadow:inset 3px 0 var(--neg); }
+tr.me { background:color-mix(in srgb, var(--acc) 18%, transparent); font-weight:600; }
+ul.ins { padding-left:18px; } ul.ins li { margin:6px 0; }
+.empty { color:var(--muted); padding:12px 0; }
+pre { background:var(--card); border-radius:12px; padding:12px; white-space:pre-wrap;
+       word-break:break-word; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+       user-select:all; -webkit-user-select:all; }
+.tablewrap { overflow-x:auto; }
+/* Состав — дюжина колонок, на телефон целиком не влезает даже ужатым. Резать
+   колонки не стали (тренеру нужны все), поэтому прямо говорим про прокрутку:
+   молча обрезанная таблица читается как «данных нет». */
+.swipe { display:none; color:var(--muted); font-size:12px; margin-top:6px; }
+/* Телефон: состав — это дюжина колонок, и лучше ужать шрифт, чем заставлять
+   тянуть таблицу вбок пальцем (во встроенном просмотрщике это не всегда
+   работает). Горизонтальная прокрутка остаётся запасным путём. */
+@media (max-width: 460px) {
+  body { padding:10px; }
+  table { font-size:11px; }
+  th, td { padding:5px 2px; }
+  th:first-child, td:first-child { padding-left:0; }
+  .lead td.num { width:44px; }
+  .swipe { display:block; }
+}
+"""
+
+
 def _e(text: Any) -> str:
     return html.escape(str(text if text is not None else ""))
 
@@ -454,84 +537,7 @@ def build(data: Dict[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_e(team)} — разбор</title>
 <style>
-:root {{ --bg:#fff; --fg:#111; --muted:#6b7280; --line:#e5e7eb; --card:#f6f7f9;
-         --pos:#16a34a; --neg:#dc2626; --acc:#2563eb; }}
-@media (prefers-color-scheme: dark) {{
-  :root {{ --bg:#0f1216; --fg:#e8eaed; --muted:#9aa0a6; --line:#262b31; --card:#171b20;
-           --pos:#4ade80; --neg:#f87171; --acc:#60a5fa; }} }}
-* {{ box-sizing:border-box; }}
-body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,
-        BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:16px; }}
-h1 {{ font-size:20px; margin:0 0 2px; }}
-.sub {{ color:var(--muted); font-size:13px; margin-bottom:14px; }}
-/* Одна страница без скриптов: встроенный браузер Telegram не выполняет JS и
-   не даёт переходов, поэтому вкладки и якорные ссылки там мертвы. Разделы
-   идут подряд, ориентир — крупные заголовки с номерами. */
-h2 {{ font-size:17px; margin:26px 0 10px; padding-top:16px;
-      border-top:2px solid var(--line); }}
-h2 .no {{ color:var(--acc); }}
-h2 small {{ display:block; font-size:12px; font-weight:400; color:var(--muted);
-            margin-top:2px; }}
-.toc {{ background:var(--card); border-radius:12px; padding:10px 12px;
-        margin:0 0 6px; font-size:13px; color:var(--muted); }}
-.toc b {{ color:var(--acc); font-weight:700; }}
-.kpis {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px;
-         margin:12px 0 18px; }}
-.kpi {{ background:var(--card); border-radius:12px; padding:12px; }}
-.kv {{ font-size:24px; font-weight:700; }}
-.kt {{ color:var(--muted); font-size:12px; }} .kn {{ color:var(--muted); font-size:12px; }}
-.chart {{ background:var(--card); border-radius:12px; padding:12px; margin:0 0 16px; }}
-.ct {{ font-weight:600; margin-bottom:8px; }}
-svg {{ width:100%; height:auto; }}
-.ln {{ fill:none; stroke:var(--acc); stroke-width:2; }}
-.zero {{ stroke:var(--line); stroke-width:1; stroke-dasharray:4 4; }}
-circle.pos {{ fill:var(--pos); }} circle.neg {{ fill:var(--neg); }}
-.xl {{ fill:var(--muted); font-size:10px; text-anchor:middle; }}
-.legend {{ color:var(--muted); font-size:12px; margin-bottom:8px; }}
-.legend span {{ display:inline-block; width:10px; height:10px; border-radius:2px;
-                margin:0 6px 0 12px; }}
-.legend span:first-child {{ margin-left:0; }}
-.k1 {{ background:var(--acc); }} .k2 {{ background:var(--muted); }}
-.bar {{ display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; }}
-.bl {{ width:36%; color:var(--muted); }}
-.bw {{ flex:1; }} .bv {{ width:22%; text-align:right; font-variant-numeric:tabular-nums; }}
-.b1 {{ height:8px; background:var(--acc); border-radius:4px; margin-bottom:3px; }}
-.b2 {{ height:8px; background:var(--muted); border-radius:4px; opacity:.6; }}
-table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-th,td {{ padding:7px 6px; border-bottom:1px solid var(--line); text-align:left; }}
-th {{ color:var(--muted); font-weight:600; }}
-td.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
-td.num.pos {{ color:var(--pos); }} td.num.neg {{ color:var(--neg); }}
-thead th[colspan] {{ text-align:center; }}
-/* Граница между «мы» и «они»: без неё две пары колонок сливаются в кашу. */
-.lead td:nth-child(4), .lead th:nth-child(3) {{ border-left:1px solid var(--line);
-                                                padding-left:12px; }}
-.lead td.num {{ width:64px; }}
-tr.w td:first-child {{ box-shadow:inset 3px 0 var(--pos); }}
-tr.l td:first-child {{ box-shadow:inset 3px 0 var(--neg); }}
-tr.me {{ background:color-mix(in srgb, var(--acc) 18%, transparent); font-weight:600; }}
-ul.ins {{ padding-left:18px; }} ul.ins li {{ margin:6px 0; }}
-.empty {{ color:var(--muted); padding:12px 0; }}
-pre {{ background:var(--card); border-radius:12px; padding:12px; white-space:pre-wrap;
-       word-break:break-word; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
-       user-select:all; -webkit-user-select:all; }}
-.tablewrap {{ overflow-x:auto; }}
-/* Состав — дюжина колонок, на телефон целиком не влезает даже ужатым. Резать
-   колонки не стали (тренеру нужны все), поэтому прямо говорим про прокрутку:
-   молча обрезанная таблица читается как «данных нет». */
-.swipe {{ display:none; color:var(--muted); font-size:12px; margin-top:6px; }}
-/* Телефон: состав — это дюжина колонок, и лучше ужать шрифт, чем заставлять
-   тянуть таблицу вбок пальцем (во встроенном просмотрщике это не всегда
-   работает). Горизонтальная прокрутка остаётся запасным путём. */
-@media (max-width: 460px) {{
-  body {{ padding:10px; }}
-  table {{ font-size:11px; }}
-  th, td {{ padding:5px 2px; }}
-  th:first-child, td:first-child {{ padding-left:0; }}
-  .lead td.num {{ width:44px; }}
-  .swipe {{ display:block; }}
-}}
-</style></head><body>
+{PAGE_CSS}</style></head><body>
 <h1>{_e(team)}</h1>
 <div class="sub">Разбор собран ботом · {_e(data.get('generated', ''))}</div>
 

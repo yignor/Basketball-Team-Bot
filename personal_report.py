@@ -386,18 +386,21 @@ def team_role(source: str, player_id: str, last_n: int = 5) -> Dict[str, Any]:
     with sheets_cache.get_connection() as conn:
         for r in rows[-last_n:]:
             tot = conn.execute(
-                """SELECT SUM(pts) AS pts, SUM(reb) AS reb FROM game_player_stats
+                """SELECT SUM(pts) AS pts, SUM(reb) AS reb, SUM(ast) AS ast
+                   FROM game_player_stats
                    WHERE source = ? AND game_id = ? AND team_id = ?""",
                 (source, str(r["game_id"]), str(r.get("team_id")))).fetchone()
-            tp, tr = int(tot["pts"] or 0), int(tot["reb"] or 0)
-            if tp or tr:
+            tp, tr, ta = int(tot["pts"] or 0), int(tot["reb"] or 0), int(tot["ast"] or 0)
+            if tp or tr or ta:
                 shares.append((int(r.get("pts") or 0) / tp * 100 if tp else 0,
-                               int(r.get("reb") or 0) / tr * 100 if tr else 0))
+                               int(r.get("reb") or 0) / tr * 100 if tr else 0,
+                               int(r.get("ast") or 0) / ta * 100 if ta else 0))
     if not shares:
         return {}
     return {"games": len(shares),
             "pts_share": round(sum(s[0] for s in shares) / len(shares)),
-            "reb_share": round(sum(s[1] for s in shares) / len(shares))}
+            "reb_share": round(sum(s[1] for s in shares) / len(shares)),
+            "ast_share": round(sum(s[2] for s in shares) / len(shares))}
 
 
 def shooting(source: str, player_id: str, last_n: int = 5) -> Dict[str, Any]:

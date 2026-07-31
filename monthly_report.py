@@ -3,8 +3,13 @@
 Развёрнутый месячный отчёт игрока — один самодостаточный HTML-файл в личку.
 
 Почему файл, а не сообщение: здесь помещается то, что в чат не влезает —
-разбор каждой игры, сравнение с соперниками, броски. Разделы свёрнуты
-(<details>), поэтому сверху виден итог, а подробности открываются по нажатию.
+разбор каждой игры, динамика, сравнение с прошлым месяцем, броски, роль в
+команде и фэнтези-лига.
+
+Одна лента без скриптов и без свёрнутых блоков. Раньше разделы прятались в
+<details>, но встроенный браузер Telegram не выполняет JS и раскрывал их через
+раз — человек видел первый экран и считал, что отчёт пустой. Теперь всё идёт
+подряд, оформление общее с командным разбором (team_report_html.PAGE_CSS).
 
 Внизу — блок «Отдать ИИ»: готовый промпт и те же данные в компактном виде.
 Файл можно скинуть в любой чат-бот и получить разбор глубже нашего: мы честно
@@ -20,11 +25,12 @@
 import html
 import json
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import sheets_cache
 import fantasy_stats
 import personal_report
+import team_report_html as T      # общие SVG-графики, KPI-плитки и оформление
 
 
 def _month_games(source: str, player_id: str, year: int, month: int) -> List[Dict[str, Any]]:
@@ -61,11 +67,48 @@ def _game_context(source: str, game_id: str, my_team: str, me: str) -> Dict[str,
     return ctx
 
 
+def _prev_month(year: int, month: int) -> Tuple[int, int]:
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def _avg(rows: List[Dict[str, Any]], key: str) -> float:
+    if not rows:
+        return 0.0
+    return round(sum(float(r.get(key) or 0) for r in rows) / len(rows), 1)
+
+
+def _totals(rows: List[Dict[str, Any]], key: str) -> int:
+    return int(sum(int(r.get(key) or 0) for r in rows))
+
+
 def observations(source: str, player_id: str, games: List[Dict[str, Any]]) -> List[str]:
     """Наблюдения с цифрами — без указаний, что делать."""
     out: List[str] = []
     if not games:
         return out
+
+    # Дабл-даблы: их считают в любой лиге, и это понятная человеку веха.
+    dd = 0
+    for g in games:
+        big = [k for k in ("pts", "reb", "ast", "stl", "blk")
+               if int(g.get(k) or 0) >= 10]
+        if len(big) >= 2:
+            dd += 1
+    if dd:
+        out.append(f"Дабл-даблов за месяц: {dd} из {len(games)} игр.")
+
+    secs = _totals(games, "secs")
+    if secs:
+        out.append(f"На площадке в среднем {round(secs / len(games) / 60, 1)} минут "
+                   f"за игру ({round(secs / 60)} всего).")
+    fo = _totals(games, "foul_on")
+    if fo:
+        out.append(f"Заработано фолов: {fo} — на тебе фолили "
+                   f"{round(fo / len(games), 1)} раза за игру.")
+    pm = [int(g.get("plus_minus") or 0) for g in games]
+    if any(pm):
+        out.append(f"Плюс-минус: {sum(pm):+d} за месяц, "
+                   f"{round(sum(pm) / len(pm), 1):+g} за игру.")
 
     sh = personal_report.shooting(source, player_id, last_n=len(games))
     two, three = sh.get("2-очковые"), sh.get("3-очковые")
@@ -111,129 +154,293 @@ def ai_prompt(payload: Dict[str, Any]) -> str:
     )
 
 
+MONTHS_RU = {1: "январь", 2: "февраль", 3: "март", 4: "апрель", 5: "май",
+             6: "июнь", 7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь",
+             11: "ноябрь", 12: "декабрь"}
+
+# Что сравниваем с прошлым месяцем. Проценты попадания сюда не берём — их
+# нельзя усреднять по играм, они считаются отдельно из попыток и попаданий.
+COMPARE_KEYS = (("pts", "Очки"), ("reb", "Подборы"), ("ast", "Передачи"),
+                ("stl", "Перехваты"), ("blk", "Блок-шоты"), ("tur", "Потери"),
+                ("foul_on", "Заработано фолов"))
+
+
+def _shot_rows(games: List[Dict[str, Any]]) -> List[Tuple[str, int, int]]:
+    """(подпись, попал, бросил) по видам бросков за набор игр."""
+    two_m = _totals(games, "fgm") - _totals(games, "tpm")
+    two_a = _totals(games, "fga") - _totals(games, "tpa")
+    return [("2-очковые", max(0, two_m), max(0, two_a)),
+            ("3-очковые", _totals(games, "tpm"), _totals(games, "tpa")),
+            ("Штрафные", _totals(games, "ftm"), _totals(games, "fta")),
+            ("Все с игры", _totals(games, "fgm"), _totals(games, "fga"))]
+
+
+def _fantasy_html(fan: Dict[str, Any]) -> str:
+    """Раздел «Фэнтези-лига»: как оценивают тебя и как играешь ты сам."""
+    if not fan:
+        return ""
+    out = []
+    a = fan.get("asset") or {}
+    if a:
+        kpi = [("Брали в состав", str(a["picked_times"]),
+                f"в {a['games_picked']} играх из {a['games_total']}"),
+               ("Менеджеров", str(a["managers"]), "поставили тебя хоть раз"),
+               ("Заработал бы им", f"{a['brought']:g}", f"{a['per_game']:g} за игру")]
+        if a.get("popularity_place"):
+            kpi.append(("По популярности", f"{a['popularity_place']}-й",
+                        f"из {a['pool_size']} в пуле"))
+        pr = a.get("price") or {}
+        if pr.get("found"):
+            kpi.append(("Твоя цена", str(pr.get("price", "—")),
+                        f"ранг {pr.get('rank_title') or pr.get('rank') or '—'}"))
+        head = ('Тебя выбирали' if a["picked_times"]
+                else 'Тебя пока не выбирали')
+        out.append(f'<div class="ct">{head}</div>' + T._kpi(kpi))
+        if not a["picked_times"]:
+            out.append('<div class="legend">В этом месяце тебя не поставил ни один '
+                       'участник. «Заработал бы им» — сколько очков ты принёс бы '
+                       'тому, кто взял бы тебя во все игры месяца.</div>')
+        if pr.get("found") and pr.get("need_up_next") is not None:
+            out.append(f'<div class="legend">До следующего ранга: набрать '
+                       f'{pr["need_up_next"]:g} фэнтези-очков в ближайшей игре.</div>')
+        if len(a.get("by_game") or []) >= 2:
+            out.append(T._line_chart([(T._dmy(d), v) for d, v in a["by_game"]],
+                                     "Сколько ты приносил по играм", zero_line=False))
+        if a.get("best"):
+            out.append(f'<div class="legend">Лучшая игра месяца по фэнтези-очкам: '
+                       f'{T._dmy(a["best"][0])} — {a["best"][1]:g}.</div>')
+    m = fan.get("manager") or {}
+    if m:
+        kpi = [("Твои очки", f"{m['points']:g}", f"{m['per_game']:g} за игру"),
+               ("Место", f"{m['place']}-е" if m.get("place") else "—",
+                f"из {m['of']} участников"),
+               ("Лучший тур", f"{m['best_game']['points']:g}",
+                T._dmy(m["best_game"]["date"]))]
+        if m.get("leader") is not None:
+            kpi.append(("У лидера", f"{m['leader']:g}",
+                        f"отрыв {round(m['leader'] - m['points'], 1):g}"))
+        out.append('<div class="ct" style="margin-top:14px">Ты выбирал</div>'
+                   + T._kpi(kpi))
+        if m.get("mode"):
+            out.append(f'<div class="legend">Режим: {T._e(m["mode"])}.</div>')
+    return f'<div class="chart">{"".join(out)}</div>' if out else ""
+
+
 def build_html(source_title: str, source: str, player_id: str,
                year: int, month: int,
-               team_names: Optional[Dict[str, str]] = None) -> Optional[str]:
-    """Самодостаточный HTML месячного отчёта. None — если игр в месяце не было."""
+               team_names: Optional[Dict[str, str]] = None,
+               tg_user_id: Optional[Any] = None,
+               name: str = "") -> Optional[str]:
+    """Самодостаточный HTML месячного отчёта. None — если игр в месяце не было.
+
+    Одна лента без скриптов и без свёрнутых блоков: встроенный браузер Telegram
+    не выполняет JS и не даёт переходов, а раскрывающиеся <details> там
+    открывались через раз. Всё, что раньше пряталось за кликом, теперь просто
+    идёт подряд."""
     games = _month_games(source, player_id, year, month)
     if not games:
         return None
     team_names = team_names or {}
-    title_month = {
-        1: "январь", 2: "февраль", 3: "март", 4: "апрель", 5: "май", 6: "июнь",
-        7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь", 11: "ноябрь",
-        12: "декабрь"}[month]
+    title_month = MONTHS_RU[month]
+    prev_y, prev_m = _prev_month(year, month)
+    prev_games = _month_games(source, player_id, prev_y, prev_m)
 
+    # ── Итог месяца ─────────────────────────────────────────────────────────
+    fps = [fantasy_stats.fantasy_points(g) for g in games]
+    secs = _totals(games, "secs")
+    kpi_items = [
+        ("Игр за месяц", str(len(games)),
+         f"{_d(games[0]['game_date'])} – {_d(games[-1]['game_date'])}"),
+        ("Очки", f"{_avg(games, 'pts'):g}", f"{_totals(games, 'pts')} всего"),
+        ("Подборы", f"{_avg(games, 'reb'):g}",
+         f"в атаке {_avg(games, 'reb_off'):g}"),
+        ("Передачи", f"{_avg(games, 'ast'):g}", f"потери {_avg(games, 'tur'):g}"),
+        ("Фэнтези-очки", f"{round(sum(fps) / len(fps), 1):g}", "за игру"),
+    ]
+    if secs:
+        kpi_items.append(("Минуты", f"{round(secs / len(games) / 60, 1):g}", "за игру"))
+    kpi = T._kpi(kpi_items)
+
+    obs = observations(source, player_id, games)
+    obs_html = "".join(f"<li>{html.escape(o)}</li>" for o in obs) \
+        or "<li>Данных за месяц мало.</li>"
+
+    # ── Динамика ────────────────────────────────────────────────────────────
+    fp_chart = T._line_chart([(_d(g["game_date"]), round(f, 1))
+                              for g, f in zip(games, fps)],
+                             "Фэнтези-очки по играм", zero_line=False)
+    pts_chart = T._line_chart([(_d(g["game_date"]), int(g.get("pts") or 0))
+                               for g in games], "Очки по играм", zero_line=False)
+
+    # ── Против прошлого месяца ──────────────────────────────────────────────
+    if prev_games:
+        rows = [(t, _avg(games, k), _avg(prev_games, k)) for k, t in COMPARE_KEYS]
+        prev_html = (f'<div class="legend">{MONTHS_RU[prev_m]}: игр '
+                     f'{len(prev_games)}. Всё — в среднем за игру.</div>'
+                     + T._bars(rows, "", "этот месяц", MONTHS_RU[prev_m]))
+    else:
+        prev_html = (f'<div class="empty">За {MONTHS_RU[prev_m]} игр в базе нет — '
+                     f'сравнивать не с чем.</div>')
+
+    # ── Броски ──────────────────────────────────────────────────────────────
+    shot_now, shot_prev = _shot_rows(games), _shot_rows(prev_games)
+    prev_by = {t: (m, a) for t, m, a in shot_prev}
+    shot_rows = []
+    for title, made, att in shot_now:
+        pm, pa = prev_by.get(title, (0, 0))
+        was = f"{pm / pa * 100:.0f}%" if pa else "—"
+        shot_rows.append(
+            f'<tr><td>{title}</td><td class="num">{made}/{att}</td>'
+            f'<td class="num">{T._pct(made, att)}</td>'
+            f'<td class="num">{round(att / len(games), 1):g}</td>'
+            f'<td class="num">{was}</td></tr>')
+    shots_html = (
+        '<div class="tablewrap"><table><thead><tr><th>Бросок</th>'
+        '<th>Попал/бросил</th><th>%</th><th>Попыток за игру</th>'
+        f'<th>{MONTHS_RU[prev_m]}</th></tr></thead>'
+        f'<tbody>{"".join(shot_rows)}</tbody></table></div>')
+
+    # ── Роль в команде ──────────────────────────────────────────────────────
+    role = personal_report.team_role(source, player_id, last_n=len(games))
+    role_html = ""
+    if role:
+        role_html = T._kpi([
+            ("Очки команды", f"{role['pts_share']}%", "приходятся на тебя"),
+            ("Подборы команды", f"{role['reb_share']}%", "твои"),
+            ("Передачи команды", f"{role.get('ast_share', 0)}%", "твои"),
+        ])
+
+    # ── Фэнтези ─────────────────────────────────────────────────────────────
+    fan = {}
+    try:
+        import personal_fantasy
+        fan = personal_fantasy.month(tg_user_id, source, player_id, year, month, name)
+    except Exception as e:      # фэнтези — приятное дополнение, не причина падать
+        print(f"⚠️  Фэнтези-раздел не собрался: {e}")
+    fan_html = _fantasy_html(fan)
+
+    # ── Против соперников ───────────────────────────────────────────────────
+    vs = personal_report.vs_opponents(source, player_id, limit=5)
+    vs_items = []
+    for v in vs:
+        opp_id = str(v["opponent"])
+        nm = html.escape(team_names.get(opp_id) or f"соперник №{opp_id}")
+        vs_items.append(
+            f"<li>{nm}: встреч {v['meetings']}, побед {v['wins']}; "
+            f"было {v['prev']['pts']} очк ({_d(v['prev_date'])}) → "
+            f"стало {v['last']['pts']} очк ({_d(v['last_date'])}); "
+            f"состав команды совпал на {v['roster_overlap']}%</li>")
+
+    # ── Игры месяца ─────────────────────────────────────────────────────────
     rows_html: List[str] = []
     payload_games: List[Dict[str, Any]] = []
-    for g in games:
+    for g, fp in zip(games, fps):
         ctx = _game_context(source, g["game_id"], g.get("team_id"), player_id)
         opp = ctx.get("opponent", "")
-        opp_name = team_names.get(str(opp)) or (f"соперник №{opp}" if opp else "соперник неизвестен")
-        score = (f"{ctx['ours']}:{ctx['theirs']}" if "ours" in ctx else "—")
+        opp_name = team_names.get(str(opp)) or (f"№{opp}" if opp else "—")
+        score = f"{ctx['ours']}:{ctx['theirs']}" if "ours" in ctx else "—"
         won = ctx.get("ours", 0) > ctx.get("theirs", 0) if "ours" in ctx else None
-        fp = fantasy_stats.fantasy_points(g)
         share = (round(int(g.get("pts") or 0) / ctx["team_pts"] * 100)
                  if ctx.get("team_pts") else None)
-
         payload_games.append({
             "дата": g["game_date"], "соперник": opp_name, "счёт": score,
             "дома": ctx.get("at_home"), "победа": won,
+            "минуты": round(int(g.get("secs") or 0) / 60, 1),
             "очки": int(g.get("pts") or 0), "подборы": int(g.get("reb") or 0),
             "передачи": int(g.get("ast") or 0), "перехваты": int(g.get("stl") or 0),
             "блоки": int(g.get("blk") or 0), "потери": int(g.get("tur") or 0),
             "фолы": int(g.get("pf") or 0),
-            "броски_2": f"{g.get('fgm', 0)}/{g.get('fga', 0)}",
+            "заработано_фолов": int(g.get("foul_on") or 0),
+            "броски_с_игры": f"{g.get('fgm', 0)}/{g.get('fga', 0)}",
             "броски_3": f"{g.get('tpm', 0)}/{g.get('tpa', 0)}",
             "штрафные": f"{g.get('ftm', 0)}/{g.get('fta', 0)}",
+            "фэнтези_очки": round(fp, 1),
             "доля_очков_команды_%": share,
         })
-
-        rows_html.append(f"""
-    <details>
-      <summary><b>{html.escape(_d(g['game_date']))}</b> · {html.escape(opp_name)}
-        · {html.escape(score)} {'✅' if won else ('❌' if won is False else '')}
-        <span class="fp">{int(g.get('pts') or 0)} очк</span></summary>
-      <table>
-        <tr><td>Очки</td><td>{int(g.get('pts') or 0)}</td>
-            <td>Подборы</td><td>{int(g.get('reb') or 0)}
-              (в атаке {int(g.get('reb_off') or 0)} / в защите {int(g.get('reb_def') or 0)})</td></tr>
-        <tr><td>Передачи</td><td>{int(g.get('ast') or 0)}</td>
-            <td>Потери</td><td>{int(g.get('tur') or 0)}</td></tr>
-        <tr><td>Перехваты</td><td>{int(g.get('stl') or 0)}</td>
-            <td>Блок-шоты</td><td>{int(g.get('blk') or 0)}</td></tr>
-        <tr><td>Фолы</td><td>{int(g.get('pf') or 0)}</td>
-            <td>Фэнтези-очки</td><td>{fp:g}</td></tr>
-        <tr><td>2-очковые</td><td>{int(g.get('fgm') or 0)}/{int(g.get('fga') or 0)}</td>
-            <td>3-очковые</td><td>{int(g.get('tpm') or 0)}/{int(g.get('tpa') or 0)}</td></tr>
-        <tr><td>Штрафные</td><td>{int(g.get('ftm') or 0)}/{int(g.get('fta') or 0)}</td>
-            <td>Доля очков команды</td><td>{f'{share}%' if share is not None else '—'}</td></tr>
-      </table>
-    </details>""")
-
-    obs = observations(source, player_id, games)
-    vs = personal_report.vs_opponents(source, player_id, limit=5)
-    vs_items: List[str] = []
-    for v in vs:
-        opp_id = str(v["opponent"])
-        name = html.escape(team_names.get(opp_id) or f"соперник №{opp_id}")
-        vs_items.append(
-            f"<li>{name}: встреч {v['meetings']}, побед {v['wins']}; "
-            f"было {v['prev']['pts']} очк ({_d(v['prev_date'])}) → "
-            f"стало {v['last']['pts']} очк ({_d(v['last_date'])}); "
-            f"состав команды совпал на {v['roster_overlap']}%</li>")
-    vs_html = "".join(vs_items)
+        mark = "✅" if won else ("❌" if won is False else "")
+        rows_html.append(
+            f'<tr class="{"w" if won else ("l" if won is False else "")}">'
+            f'<td>{html.escape(_d(g["game_date"]))}</td>'
+            f'<td>{html.escape(opp_name)} {mark}</td>'
+            f'<td class="num">{html.escape(score)}</td>'
+            f'<td class="num">{int(g.get("pts") or 0)}</td>'
+            f'<td class="num">{int(g.get("reb") or 0)}</td>'
+            f'<td class="num">{int(g.get("ast") or 0)}</td>'
+            f'<td class="num">{int(g.get("stl") or 0)}</td>'
+            f'<td class="num">{int(g.get("tur") or 0)}</td>'
+            f'<td class="num">{int(g.get("fgm") or 0)}/{int(g.get("fga") or 0)}</td>'
+            f'<td class="num">{int(g.get("tpm") or 0)}/{int(g.get("tpa") or 0)}</td>'
+            f'<td class="num">{int(g.get("ftm") or 0)}/{int(g.get("fta") or 0)}</td>'
+            f'<td class="num">{f"{share}%" if share is not None else "—"}</td>'
+            f'<td class="num"><b>{fp:g}</b></td></tr>')
 
     payload = {
         "лига": source_title, "месяц": f"{title_month} {year}",
         "игр_в_месяце": len(games), "игры": payload_games,
         "наблюдения": obs,
+        "броски_за_месяц": {t: f"{m}/{a}" for t, m, a in shot_now},
+        "прошлый_месяц": ({"месяц": MONTHS_RU[prev_m], "игр": len(prev_games),
+                           **{t: _avg(prev_games, k) for k, t in COMPARE_KEYS}}
+                          if prev_games else None),
+        "фэнтези": fan or None,
     }
     prompt = ai_prompt(payload)
 
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Отчёт · {html.escape(title_month)} {year}</title>
+<title>Личный отчёт · {html.escape(title_month)} {year}</title>
 <style>
- :root {{ color-scheme: light dark; }}
- body {{ font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;
-        padding: 16px; font-size: 16px; line-height: 1.45; }}
- h1 {{ font-size: 20px; margin: 0 0 4px; }}
- .sub {{ opacity: .7; font-size: 14px; margin-bottom: 18px; }}
- h2 {{ font-size: 16px; margin: 22px 0 8px; }}
- details {{ border: 1px solid rgba(128,128,128,.35); border-radius: 10px;
-            padding: 10px 12px; margin: 8px 0; }}
- summary {{ cursor: pointer; }}
- .fp {{ float: right; opacity: .75; }}
- table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 15px; }}
- td {{ padding: 4px 6px; border-top: 1px solid rgba(128,128,128,.2); }}
- td:nth-child(odd) {{ opacity: .7; }}
- ul {{ padding-left: 20px; }}
- textarea {{ width: 100%; min-height: 160px; font-family: ui-monospace, monospace;
-             font-size: 12px; padding: 8px; border-radius: 8px;
-             border: 1px solid rgba(128,128,128,.35); background: transparent;
-             color: inherit; }}
- .note {{ opacity: .7; font-size: 14px; }}
+{T.PAGE_CSS}
 </style></head><body>
 <h1>Личный отчёт · {html.escape(title_month)} {year}</h1>
 <div class="sub">{html.escape(source_title)} · игр за месяц: {len(games)}</div>
 
-<h2>Что видно по цифрам</h2>
-<ul>{''.join(f'<li>{html.escape(o)}</li>' for o in obs) or '<li>Данных за месяц мало.</li>'}</ul>
-<div class="note">Это наблюдения, а не указания: протокол не знает ни установки
-тренера, ни качества броска — выводы делаешь ты.</div>
+<div class="toc">Всё одной страницей, просто листай вниз:<br>
+<b>1</b> Итог месяца · <b>2</b> Динамика · <b>3</b> Против прошлого месяца ·
+<b>4</b> Броски · <b>5</b> Роль в команде{' · <b>6</b> Фэнтези' if fan_html else ''} ·
+<b>{6 + bool(fan_html)}</b> Против соперников ·
+<b>{7 + bool(fan_html)}</b> Игры месяца ·
+<b>{8 + bool(fan_html)}</b> Промт для ИИ</div>
 
-<h2>Игры месяца</h2>
-<div class="note">Нажми на игру, чтобы раскрыть полный протокол.</div>
-{''.join(rows_html)}
+<h2><span class="no">1.</span> Итог месяца</h2>
+{kpi}
+<div class="chart"><div class="ct">Что видно по цифрам</div>
+  <ul class="ins">{obs_html}</ul>
+  <div class="legend">Это наблюдения, а не указания: протокол не знает ни
+    установки тренера, ни качества броска — выводы делаешь ты.</div></div>
 
-{f'<h2>Против соперников</h2><ul>{vs_html}</ul>' if vs_html else ''}
+<h2><span class="no">2.</span> Динамика</h2>
+{fp_chart}
+{pts_chart}
 
-<h2>Отдать ИИ</h2>
-<div class="note">Скопируй всё поле ниже и вставь в любой чат-бот — там уже
-готовый запрос вместе с данными. Или пришли ему этот файл целиком.</div>
-<textarea readonly onclick="this.select()">{html.escape(prompt)}</textarea>
+<h2><span class="no">3.</span> Против прошлого месяца</h2>
+{prev_html}
+
+<h2><span class="no">4.</span> Броски</h2>
+{shots_html}
+
+<h2><span class="no">5.</span> Роль в команде<small>какая доля командных
+  показателей приходится на тебя в этих играх</small></h2>
+{role_html or '<div class="empty">Не хватает данных по командам этих игр.</div>'}
+
+{f'<h2><span class="no">6.</span> Фэнтези-лига<small>{html.escape(str(fan.get("season", "")))}</small></h2>{fan_html}' if fan_html else ''}
+
+<h2><span class="no">{6 + bool(fan_html)}.</span> Против соперников</h2>
+{f'<ul class="ins">{"".join(vs_items)}</ul>' if vs_items
+ else '<div class="empty">Повторных встреч пока не было.</div>'}
+
+<h2><span class="no">{7 + bool(fan_html)}.</span> Игры месяца</h2>
+<div class="tablewrap"><table><thead><tr><th>Дата</th><th>Соперник</th>
+<th>Счёт</th><th>Очк</th><th>Подб</th><th>Пас</th><th>Пх</th><th>Пот</th>
+<th>Игра</th><th>3-оч</th><th>Штр</th><th>Доля</th><th>ФО</th></tr></thead>
+<tbody>{''.join(rows_html)}</tbody></table></div>
+<div class="swipe">Таблица шире экрана — тяни её вбок пальцем.</div>
+
+<h2><span class="no">{8 + bool(fan_html)}.</span> Промт для ИИ<small>Долгое
+  нажатие по тексту — выделить и скопировать, дальше вставить в любого
+  чат-бота.</small></h2>
+<pre>{html.escape(prompt)}</pre>
 </body></html>"""
 
 
@@ -248,40 +455,46 @@ def _d(iso: str) -> str:
 # ─────────────────────────── Запуск и отправка ───────────────────────────────
 
 def _slpro_team_names() -> Dict[str, str]:
-    """Названия команд SLPRO — чтобы в отчёте был «Кирпичный Завод», а не №999.
-    Не вышло (сеть, смена сезона) — покажем идентификаторы, это не повод падать."""
-    try:
-        import asyncio
-        from slpro_client import SlproClient
+    """Названия команд — ИЗ ЛОКАЛЬНОЙ БАЗЫ, чтобы в отчёте был «Кирпичный
+    Завод», а не №999.
 
-        async def go():
-            import slpro_client
-            c = SlproClient()
-            rows = []
-            for ctx in await slpro_client.team_contexts():
-                rows.extend(await c.get_standings(ctx))
-            return rows
-
-        rows = asyncio.run(go()) or []
-        return {str(r.get("team_id")): str(r.get("name") or r.get("team_name") or "")
-                for r in rows if r.get("team_id")}
-    except Exception as e:
-        print(f"⚠️  Названия команд SLPRO не получены: {e}")
-        return {}
+    Раньше тут был живой запрос в лигу. Отчёт собирается в ответ на нажатие
+    кнопки, а недоступная лига стоила минуту ожидания — теперь имена берём из
+    протоколов, которые и так скачаны: `game_meta` хранит названия обеих
+    команд каждой игры."""
+    sheets_cache.init_db()
+    names: Dict[str, str] = {}
+    with sheets_cache.get_connection() as conn:
+        for r in conn.execute(
+                """SELECT home_team_id, home_name, guest_team_id, guest_name
+                   FROM game_meta WHERE home_name != '' OR guest_name != ''"""):
+            if r["home_name"]:
+                names[str(r["home_team_id"])] = r["home_name"]
+            if r["guest_name"]:
+                names[str(r["guest_team_id"])] = r["guest_name"]
+        for r in conn.execute("SELECT team_id, name FROM league_teams WHERE name != ''"):
+            names.setdefault(str(r["team_id"]), r["name"])
+    return names
 
 
 def build_combined(profiles: List[tuple], year: int, month: int,
-                   team_names: Optional[Dict[str, str]] = None) -> Optional[str]:
+                   team_names: Optional[Dict[str, str]] = None,
+                   tg_user_id: Optional[Any] = None) -> Optional[str]:
     """ОДИН файл по всем лигам игрока.
 
     Человек играет в двух лигах и хочет видеть себя целиком, а не два отдельных
     отчёта: сравнивать «там прибавил, тут просел» удобнее в одном месте."""
     import player_identity
+    import player_names
     parts, any_games = [], False
+    names = team_names if team_names is not None else _slpro_team_names()
     for src, pid in profiles:
         title = player_identity.SOURCE_TITLES.get(src, src)
-        htm = build_html(title, src, pid, year, month,
-                         team_names=(team_names or {}) if src == "slpro" else {})
+        # Имя нужно ровно для поиска цены в листе «Игроки» — транзитно, из
+        # реестра в памяти. Нет его — фэнтези-раздел просто будет без цены.
+        htm = build_html(title, src, pid, year, month, team_names=names,
+                         tg_user_id=tg_user_id,
+                         name=player_names.get(src, pid))
         if not htm:
             continue
         any_games = True
@@ -345,7 +558,7 @@ async def send_all(year: int, month: int, dry_run: bool = False) -> int:
             continue
         profiles = [(r["source"], r["player_id"])
                     for r in player_identity.get_identities(uid)]
-        html_doc = build_combined(profiles, year, month)
+        html_doc = build_combined(profiles, year, month, tg_user_id=uid)
         if not html_doc:
             empty += 1
             continue

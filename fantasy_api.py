@@ -615,11 +615,45 @@ def _consolidate_similar(merged: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return result
 
 
+def _load_merges() -> Dict[str, str]:
+    """{одиночная ссылка -> составная}. Склейка, посчитанная тогда, когда имена
+    были на руках."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        return {r["ref"]: r["canonical"] for r in
+                conn.execute("SELECT ref, canonical FROM player_merges")}
+
+
+def _save_merges(merged: List[Dict[str, Any]]) -> None:
+    """Запоминаем склейку. Только пары идентификаторов, ФИО тут нет."""
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        for m in merged:
+            parts = str(m["ref"]).split("+")
+            if len(parts) < 2:
+                continue          # одиночную ссылку помнить незачем
+            for one in parts:
+                conn.execute(
+                    """INSERT INTO player_merges (ref, canonical, fetched_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(ref) DO UPDATE SET
+                         canonical = excluded.canonical,
+                         fetched_at = excluded.fetched_at""", (one, m["ref"], now))
+        conn.commit()
+
+
 def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Склейка по ФИО работает, только пока имена есть. Они живут в памяти и
+    # после перезапуска демона пусты — а собранный в этот момент пул показывал
+    # бы одного человека дважды и рвал бы сохранённые составы. Поэтому сначала
+    # применяем склейку, посчитанную раньше и записанную в базу.
+    known = _load_merges()
     by_name: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
     for p in pool:
         key = _norm_name(p["name"])
+        if (not key or key.startswith(("№", "id "))) and p["ref"] in known:
+            key = known[p["ref"]]          # имени нет — берём вчерашнюю склейку
         # Склеиваем по ФИО — в том числе выбывших из заявки: их имя мы теперь
         # спрашиваем у лиги, и это единственный способ увидеть, что «выпавший»
         # игрок — тот же человек, что уже есть в списке. Имя не достали (осталось
@@ -650,7 +684,15 @@ def _merge_pool_by_name(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         merged.append({"ref": "+".join(sorted(e["refs"])), "number": e["number"],
                        "name": e["name"], "team": " · ".join(e["leagues"]),
                        "leagues": e["leagues"], "off_roster": e["off_roster"]})
-    return _consolidate_similar(merged)
+    out = _consolidate_similar(merged)
+    # Запоминаем склейку — но только когда имена были: собранная на номерах,
+    # она закрепила бы ошибку.
+    try:
+        if not player_names.is_cold():
+            _save_merges(out)
+    except Exception as e:
+        log.warning(f"склейка пула не записана: {e}")
+    return out
 
 
 # ─────────────────────────── Хендлеры ────────────────────────────────────────
