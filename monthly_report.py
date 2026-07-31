@@ -157,6 +157,10 @@ def ai_prompt(payload: Dict[str, Any]) -> str:
 MONTHS_RU = {1: "январь", 2: "февраль", 3: "март", 4: "апрель", 5: "май",
              6: "июнь", 7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь",
              11: "ноябрь", 12: "декабрь"}
+# «в июлЕ», а не «в июль»: отчёт читает человек, а не парсер.
+MONTHS_IN = {1: "январе", 2: "феврале", 3: "марте", 4: "апреле", 5: "мае",
+             6: "июне", 7: "июле", 8: "августе", 9: "сентябре", 10: "октябре",
+             11: "ноябре", 12: "декабре"}
 
 # Что сравниваем с прошлым месяцем. Проценты попадания сюда не берём — их
 # нельзя усреднять по играм, они считаются отдельно из попыток и попаданий.
@@ -393,8 +397,8 @@ def build_html(source_title: str, source: str, player_id: str,
 <style>
 {T.PAGE_CSS}
 </style></head><body>
-<h1>Личный отчёт · {html.escape(title_month)} {year}</h1>
-<div class="sub">{html.escape(source_title)} · игр за месяц: {len(games)}</div>
+<h1>{html.escape(source_title) or 'Личный отчёт'} · {html.escape(title_month)} {year}</h1>
+<div class="sub">игр за месяц: {len(games)}</div>
 
 <div class="toc">Всё одной страницей, просто листай вниз:<br>
 <b>1</b> Итог месяца · <b>2</b> Динамика · <b>3</b> Против прошлого месяца ·
@@ -477,6 +481,30 @@ def _slpro_team_names() -> Dict[str, str]:
     return names
 
 
+def _league_gap(source: str, player_id: str, title: str,
+                year: int, month: int) -> str:
+    """Блок «в этой лиге в этом месяце игр не было».
+
+    Молча пропускать лигу нельзя: у человека привязаны два профиля, он ждёт две
+    лиги в файле — и, не найдя одну, решает, что отчёт сломан. Пустой месяц в
+    лиге — это тоже факт, и его надо назвать, добавив, когда была последняя
+    игра и сколько их всего."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) n, MAX(game_date) last FROM game_player_stats
+               WHERE source = ? AND player_id = ? AND game_date != ''""",
+            (source, str(player_id))).fetchone()
+    total, last = int(row["n"] or 0), row["last"] or ""
+    when = f"{_d(last)}.{last[:4]}" if len(last) >= 10 else last
+    tail = (f"Последняя игра — {when}, всего в базе {total}."
+            if total else "Игр этого профиля в базе пока нет вовсе.")
+    return (f'<h1>{html.escape(title)}</h1>'
+            f'<div class="sub">за {MONTHS_RU[month]} {year} игр нет</div>'
+            f'<div class="empty">В этой лиге в {MONTHS_IN[month]} ты не играл. '
+            f'{html.escape(tail)}</div>')
+
+
 def build_combined(profiles: List[tuple], year: int, month: int,
                    team_names: Optional[Dict[str, str]] = None,
                    tg_user_id: Optional[Any] = None) -> Optional[str]:
@@ -496,19 +524,22 @@ def build_combined(profiles: List[tuple], year: int, month: int,
                          tg_user_id=tg_user_id,
                          name=player_names.get(src, pid))
         if not htm:
+            parts.append(_league_gap(src, pid, title, year, month))
             continue
         any_games = True
         # Вырезаем тело каждого отчёта и склеиваем под общей шапкой.
         body = htm.split("<body>", 1)[1].rsplit("</body>", 1)[0]
         parts.append(body)
     if not any_games:
-        return None
-    if len(parts) == 1:
-        head = build_html("", profiles[0][0], profiles[0][1], year, month)  # ради стилей
-        return head.split("<body>")[0] + "<body>" + parts[0] + "</body></html>"
-    shell = build_html("", profiles[0][0], profiles[0][1], year, month) or ""
+        return None            # ни в одной лиге не играл — файл не нужен вовсе
+    # Шапку с оформлением берём у той лиги, где игры ЕСТЬ: у пустой build_html
+    # вернёт None, и страница осталась бы без стилей.
+    shell = next((build_html("", s, p, year, month)
+                  for s, p in profiles if _month_games(s, p, year, month)), "")
     head = shell.split("<body>")[0]
-    return head + "<body>" + "<hr style='margin:28px 0;opacity:.3'>".join(parts) + "</body></html>"
+    return (head + "<body>"
+            + "<hr style='margin:28px 0;opacity:.3'>".join(parts)
+            + "</body></html>")
 
 
 def build_for(tg_user_id: Optional[str], source: Optional[str], player_id: Optional[str],
