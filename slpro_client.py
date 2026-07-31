@@ -15,6 +15,7 @@
 
 import asyncio
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -22,6 +23,41 @@ import aiohttp
 API_BASE = "https://api.basketstat.su/v1"
 ORIGIN = "https://slpro.basketstat.ru"
 DEFAULT_TOURNAMENT = "slpro"
+
+# ── Предохранитель на недоступный API ────────────────────────────────────────
+#
+# Один неудачный запрос стоит 20с × 3 попытки + паузы ≈ 66 секунд. Пока API
+# отвечал, это была разумная страховка от сетевых судорог. Когда он перестаёт
+# отвечать совсем (упал сайт, маршрут увёл трафик не туда), каждая мелочь
+# начинает стоить минуту: игрок жмёт /start, а бот в это время трижды ждёт
+# ответа от мёртвого хоста. За минуту таких «мелочей» набирается на пять.
+#
+# Поэтому: первая же серия неудач переводит клиент в режим «лига недоступна»
+# на COOLDOWN секунд — все запросы отвечают None мгновенно. Первый запрос
+# после паузы идёт по-настоящему и, если API ожил, снимает предохранитель.
+_DOWN_COOLDOWN = 300.0
+_down_until: float = 0.0
+_down_reason: str = ""
+
+
+def api_down() -> Optional[str]:
+    """Причина, по которой API считается недоступным (или None)."""
+    return _down_reason if time.time() < _down_until else None
+
+
+def _mark_down(reason: str) -> None:
+    global _down_until, _down_reason
+    _down_until = time.time() + _DOWN_COOLDOWN
+    _down_reason = reason
+    print(f"⚠️ SLPRO: API не отвечает ({reason}). Пропускаю обращения "
+          f"{int(_DOWN_COOLDOWN / 60)} минут, чтобы бот не ждал таймаутов.")
+
+
+def _mark_up() -> None:
+    global _down_until, _down_reason
+    if _down_reason:
+        print("✅ SLPRO: API снова отвечает.")
+    _down_until, _down_reason = 0.0, ""
 
 
 def _normalize_name(name: Optional[str]) -> str:
@@ -48,7 +84,12 @@ class SlproClient:
         payload.update(params)
         headers = {"Origin": ORIGIN, "Content-Type": "application/json"}
 
+        down = api_down()
+        if down:
+            return None                      # предохранитель: не ждём таймаутов
+
         last_error: Optional[str] = None
+        network_failed = False
         for attempt in range(retries):
             try:
                 async with aiohttp.ClientSession(timeout=self.timeout) as session:
@@ -61,13 +102,21 @@ class SlproClient:
                             if isinstance(data, dict) and data.get("error"):
                                 last_error = f"API error: {data['error']}"
                             else:
+                                _mark_up()
                                 return data
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 last_error = f"{type(e).__name__}: {e}"
+                network_failed = True
             if attempt < retries - 1:
                 await asyncio.sleep(base_delay * (2 ** attempt))
 
         print(f"⚠️ SLPRO {route}: не удалось получить данные ({last_error})")
+        # Сеть молчит — это про хост целиком, а не про конкретный запрос:
+        # остальным обращениям ждать того же таймаута незачем. Ответ самого
+        # API об ошибке (HTTP 4xx/5xx с телом) предохранителем не считаем —
+        # хост жив, а значит следующий запрос может и получиться.
+        if network_failed:
+            _mark_down(last_error or "нет ответа")
         return None
 
     # ── Справочники ──────────────────────────────────────────────────────────

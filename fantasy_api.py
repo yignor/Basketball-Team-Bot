@@ -451,6 +451,19 @@ async def _resolve_pool_teams(season: Optional[Dict[str, Any]] = None) -> List[D
     return explicit if explicit else await derive_pool_teams()
 
 
+def pool_is_warm(season: Optional[Dict[str, Any]] = None) -> bool:
+    """Готов ли пул прямо сейчас, без похода в лиги.
+
+    Нужно тем, кто отвечает человеку: собрать пул — это сходить в API двух лиг,
+    и если одна из них молчит, ожидание измеряется минутами. Такой ценой
+    запасные данные в кнопке не нужны — лучше отдать её пустой и согреть пул
+    фоном."""
+    if season is None:
+        season = fantasy.get_active_season()
+    entry = _pool_cache.get(str((season or {}).get("id") or "-"))
+    return bool(entry and (time.time() - entry["at"]) < _POOL_TTL)
+
+
 async def build_pool(force: bool = False,
                      season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Пул драфта: игроки команд из fantasy.pool_teams (SLPRO + Инфобаскет).

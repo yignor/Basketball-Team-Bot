@@ -264,9 +264,9 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not poll_answer:
         return
 
-    _refresh_poll_cache()
-    _refresh_db_cache()
-    _periodic_push_local_changes()
+    await asyncio.to_thread(_refresh_poll_cache)
+    await asyncio.to_thread(_refresh_db_cache)
+    await asyncio.to_thread(_periodic_push_local_changes)
 
     tg_poll_id = str(poll_answer.poll_id)
     is_training = tg_poll_id in _poll_cache
@@ -384,6 +384,10 @@ def _bottom_keyboard(payload: str = "", is_admin: bool = False,
 # клавиатура появилась).
 PAYLOAD_BUDGETS = (8000, 4000, None)      # None — кнопка вообще без данных
 
+# Фоновые задачи, запущенные из обработчиков (прогрев пула). Держим ссылки:
+# задачу без владельца сборщик мусора вправе выкинуть на полпути.
+_side_tasks: set = set()
+
 
 async def send_bottom_keyboard(message, user, text: str) -> None:
     """Показывает нижнюю клавиатуру, ужимая данные фэнтези, пока Telegram не
@@ -403,9 +407,25 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
         except Exception as e:
             log.warning(f"проверка состава для клавиатуры: {e}")
 
+    # Запасные данные в кнопке собираются из пула, а пул — это поход в API двух
+    # лиг. Человек ждать этого не должен: пул греет фоновый цикл, и если он
+    # тёплый — берём готовое, если нет — отдаём клавиатуру без данных и греем
+    # в фоне. Иначе одна недоступная лига превращала /start в пятиминутное
+    # ожидание, потому что клиент честно вырабатывал все таймауты.
+    if with_fantasy and not fantasy_api.pool_is_warm():
+        log.info("клавиатура: пул фэнтези холодный — отдаю без запасных данных, грею в фоне")
+        # Ссылку держим: задачу без владельца сборщик мусора вправе выкинуть
+        # на полпути, и прогрев молча не случится.
+        task = asyncio.create_task(_warm_fantasy_pool(force=True))
+        _side_tasks.add(task)
+        task.add_done_callback(_side_tasks.discard)
+        with_fantasy_payload = False
+    else:
+        with_fantasy_payload = with_fantasy
+
     payload: Optional[str] = None
     for budget in PAYLOAD_BUDGETS:
-        if not with_fantasy or budget is None:
+        if not with_fantasy_payload or budget is None:
             payload = ""
         elif payload is None:
             try:
@@ -460,7 +480,11 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
     try:
-        sheets_cache.record_bot_user(_get_spreadsheet(), str(user.id), user.username or "", user.first_name or "")
+        # В поток: запись идёт в Google Sheets, а синхронный поход в сеть прямо
+        # из обработчика держит весь демон, пока Google отвечает.
+        await asyncio.to_thread(
+            sheets_cache.record_bot_user, _get_spreadsheet(), str(user.id),
+            user.username or "", user.first_name or "")
     except Exception as e:
         log.warning(f"Не удалось записать пользователя бота: {e}")
 
@@ -480,8 +504,8 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Синхронизация с таблицей — приятный побочный эффект /start, но если
         # Google недоступен, клавиатура всё равно должна прийти: иначе молчок.
         try:
-            _refresh_db_cache()
-            _periodic_push_local_changes()
+            await asyncio.to_thread(_refresh_db_cache)
+            await asyncio.to_thread(_periodic_push_local_changes)
         except Exception as e:
             log.warning(f"/start: синхронизация не прошла: {e}")
     await send_bottom_keyboard(update.message, user, PLAYER_MENU_TEXT)
@@ -2428,12 +2452,15 @@ async def _keep_funnel_warm() -> None:
     await fantasy_api.keep_funnel_warm()
 
 
-async def _warm_fantasy_pool() -> None:
+async def _warm_fantasy_pool(force: bool = False) -> None:
     global _pool_warm_at
     if not (FANTASY_API_ENABLED and BOT_TOKEN):
         return
     now = time.time()
-    if now - _pool_warm_at < _POOL_WARM_INTERVAL:
+    # force — прогрев по требованию (клавиатура застала пул холодным). Интервал
+    # всё равно уважаем: если только что грелись и не вышло, лига лежит, и
+    # долбить её на каждый /start незачем.
+    if now - _pool_warm_at < (60.0 if force else _POOL_WARM_INTERVAL):
         return
     _pool_warm_at = now
     import fantasy
@@ -2462,9 +2489,13 @@ async def _background_loop(app: Application) -> None:
     while True:
         try:
             await asyncio.sleep(BACKGROUND_TICK_SECONDS)
-            _refresh_poll_cache()
-            _refresh_db_cache()
-            _periodic_push_local_changes()
+            # В отдельном потоке: это синхронные походы в Google Sheets, а
+            # прямо в цикле событий они замораживают ВЕСЬ демон — и приём
+            # сообщений, и фэнтези-API. Раз в пять минут по несколько секунд
+            # — ровно те паузы, которые человек в чате принимает за «бот завис».
+            await asyncio.to_thread(_refresh_poll_cache)
+            await asyncio.to_thread(_refresh_db_cache)
+            await asyncio.to_thread(_periodic_push_local_changes)
             await _warm_fantasy_pool()
             await _keep_funnel_warm()
             # Адрес Cloudflare-туннеля меняется при его рестарте (независимо от
@@ -2571,6 +2602,10 @@ def main() -> None:
         .read_timeout(20)
         .write_timeout(20)
         .pool_timeout(20)
+        # Обновления обрабатываем параллельно. По умолчанию PTB берёт их строго
+        # по одному: один медленный обработчик (сходил в API лиги, а тот молчит)
+        # держал очередь, и ждали ВСЕ, кто написал боту после него.
+        .concurrent_updates(True)
         .post_init(on_startup)
         .post_shutdown(on_shutdown)
         .build()
