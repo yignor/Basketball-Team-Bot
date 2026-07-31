@@ -25,7 +25,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import player_names
 import sheets_cache
@@ -130,19 +130,29 @@ def our_teams(source: Optional[str] = None) -> List[Dict[str, Any]]:
 # ── Заявки: id и номера на диск, ФИО в память ───────────────────────────────
 
 async def _fetch_roster(team: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """[{player_id, number, name, active}] из заявки лиги."""
+    """[{player_id, number, name, birth, active}] из заявки лиги.
+
+    `birth` — транзитно, только чтобы понять «это один и тот же человек»
+    (detect_same_person). На диск не попадает: в league_rosters такой колонки
+    нет и не будет."""
     src, tid = team["source"], team["team_id"]
     if src == "slpro":
         from slpro_client import SlproClient
         rows = await SlproClient().get_roster(int(tid))
         return [{"player_id": str(p.get("player_id")), "number": str(p.get("number") or ""),
                  "name": f"{p.get('surname', '')} {p.get('name', '')}".strip(),
+                 # Как называется дата рождения у SLPRO — не задокументировано,
+                 # поэтому пробуем несколько написаний; нет её — склейка по
+                 # дате просто не сработает, и это не повод падать.
+                 "birth": str(p.get("birthday") or p.get("birth_date")
+                              or p.get("date_of_birth") or ""),
                  "active": True}
                 for p in rows if p.get("player_id") is not None]
     import stats_backfill
     rows = await stats_backfill.fetch_infobasket_roster(tid, team.get("comp_id"))
     return [{"player_id": str(p["player_id"]), "number": str(p.get("number") or ""),
-             "name": p.get("name") or "", "active": bool(p.get("active", True))}
+             "name": p.get("name") or "", "birth": p.get("birth") or "",
+             "active": bool(p.get("active", True))}
             for p in rows if p.get("player_id") is not None]
 
 
@@ -193,7 +203,7 @@ async def refresh(teams_only: bool = False) -> Dict[str, Any]:
     sheets_cache.init_db()
     teams = await _slpro_teams() + await _infobasket_teams()
     stored_teams = _store_teams(teams)
-    out = {"teams": stored_teams, "rosters": 0, "names": 0, "failed": 0}
+    out = {"teams": stored_teams, "rosters": 0, "names": 0, "merged": 0, "failed": 0}
     if teams_only:
         return out
 
@@ -209,7 +219,99 @@ async def refresh(teams_only: bool = False) -> Dict[str, Any]:
         out["rosters"] += _store_roster(team, players)
         out["names"] += player_names.put_many(
             team["source"], ((p["player_id"], p["name"]) for p in players))
+        out["merged"] += _store_pairs(
+            detect_same_person(players, team["source"], team["team_id"]))
     return out
+
+
+# ── «Это один и тот же человек»: склейка дублей внутри лиги ─────────────────
+
+def _lev1(a: str, b: str) -> bool:
+    """Расстояние Левенштейна не больше 1. Одна опечатка — всё ещё тот же
+    человек; две — уже гадание, и на этом лучше остановиться."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) <= 1
+    if la > lb:
+        a, b, la, lb = b, a, lb, la
+    i = j = diff = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        else:
+            diff += 1
+            if diff > 1:
+                return False
+            j += 1
+    return True
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").lower().replace("ё", "е").split())
+
+
+def detect_same_person(people: List[Dict[str, Any]], source: str,
+                       team_id: str) -> List[Tuple[str, str]]:
+    """Пары id, за которыми стоит один человек.
+
+    Правило (сформулировано пользователем 31.07.2026): **одна дата рождения
+    плюс расхождение в имени или фамилии не больше чем на символ — это один
+    человек**. Лига заводит людей заново каждый сезон и иногда с опечаткой, и
+    тогда в отчёте по команде один игрок идёт двумя строками.
+
+    Дата рождения сюда приходит транзитно и никуда не сохраняется: наружу
+    отдаём только пары идентификаторов."""
+    by_birth: Dict[str, List[Dict[str, Any]]] = {}
+    for p in people:
+        birth = (p.get("birth") or "").strip()
+        if birth and p.get("name"):
+            by_birth.setdefault(birth, []).append(p)
+    pairs: List[Tuple[str, str]] = []
+    pref = "slpro" if source == "slpro" else "ib"
+    for birth, group in by_birth.items():
+        if len(group) < 2:
+            continue
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                if str(a["player_id"]) == str(b["player_id"]):
+                    continue
+                na, nb = _norm(a["name"]).split(), _norm(b["name"]).split()
+                if not na or not nb:
+                    continue
+                # Совпала фамилия и почти совпало имя — или наоборот.
+                same = ((na[0] == nb[0] and _lev1(" ".join(na[1:]), " ".join(nb[1:])))
+                        or (na[1:] == nb[1:] and _lev1(na[0], nb[0])))
+                if same:
+                    pairs.append((f"{pref}:{team_id}:{a['player_id']}",
+                                  f"{pref}:{team_id}:{b['player_id']}"))
+                    log.info(f"качалка: {a['name']} и {b['name']} ({birth}) — "
+                             f"один человек, склеиваю")
+    return pairs
+
+
+def _store_pairs(pairs: List[Tuple[str, str]]) -> int:
+    """Пары в player_merges: обе ссылки указывают на общую составную."""
+    if not pairs:
+        return 0
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        for a, b in pairs:
+            canonical = "+".join(sorted({a, b}))
+            for one in (a, b):
+                conn.execute(
+                    """INSERT INTO player_merges (ref, canonical, fetched_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(ref) DO UPDATE SET
+                         canonical = excluded.canonical,
+                         fetched_at = excluded.fetched_at""", (one, canonical, now))
+        conn.commit()
+    return len(pairs)
 
 
 async def fill_missing_names(limit: int = 40) -> int:

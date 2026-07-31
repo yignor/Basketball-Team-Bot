@@ -2695,7 +2695,7 @@ async def _sync_leagues() -> None:
         extra = await league_sync.fill_missing_names()
         log.info(f"Справочники лиг: команд {res['teams']}, в заявках {res['rosters']}, "
                  f"имён {player_names.stats()['count']} (+{extra} из протоколов), "
-                 f"ошибок {res['failed']}")
+                 f"склеек {res.get('merged', 0)}, ошибок {res['failed']}")
     except Exception as e:
         log.warning(f"Справочники лиг не обновились: {e}")
 

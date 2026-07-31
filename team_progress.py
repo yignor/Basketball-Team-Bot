@@ -430,6 +430,42 @@ def opponents_series(team_id: str, source: str,
     return {r["game_id"]: dict(r) for r in rows}
 
 
+def _collapse_merged(rows: List[Dict[str, Any]], source: str,
+                     team_id: str) -> List[Dict[str, Any]]:
+    """Схлопывает строки, за которыми стоит один человек.
+
+    Лига заводит игрока заново каждый сезон, иногда с опечаткой в фамилии, — и
+    в составе он идёт двумя строками с половиной статистики в каждой. Пары
+    «это один человек» считает качалка (league_sync.detect_same_person: одна
+    дата рождения + расхождение в имени не больше символа) и кладёт в
+    `player_merges`. Здесь просто складываем их суммы."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        merges = {r["ref"]: r["canonical"] for r in
+                  conn.execute("SELECT ref, canonical FROM player_merges")}
+    if not merges:
+        return rows
+    pref = "slpro" if source == "slpro" else "ib"
+    groups: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        ref = f"{pref}:{team_id}:{r['player_id']}"
+        key = merges.get(ref, ref)
+        cur = groups.get(key)
+        if cur is None:
+            groups[key] = dict(r)
+            continue
+        # Складываем всё числовое; номер и id оставляем от той строки, где
+        # игр больше — это «основная» карточка человека.
+        for k, v in r.items():
+            if k in ("player_id", "number"):
+                continue
+            if isinstance(v, (int, float)) and isinstance(cur.get(k), (int, float)):
+                cur[k] = cur[k] + v
+        if (r.get("games") or 0) > (groups[key].get("games") or 0) - (r.get("games") or 0):
+            groups[key]["number"] = r.get("number") or groups[key].get("number")
+    return list(groups.values())
+
+
 def roster_stats(team_id: str, source: str, series: List[Dict[str, Any]],
                  names: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
     """Разбор по составу: кто сколько играл и что принёс.
@@ -454,6 +490,7 @@ def roster_stats(team_id: str, source: str, series: List[Dict[str, Any]],
             WHERE source = ? AND team_id = ? AND game_id IN ({marks})
             GROUP BY player_id""", [source, str(team_id)] + ids)]
     names = names or {}
+    rows = _collapse_merged(rows, source, team_id)
     out = []
     for r in rows:
         n = r["games"] or 1

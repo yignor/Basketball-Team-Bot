@@ -375,6 +375,10 @@ async def fetch_infobasket_team(team_id: Any, comp_id: Any) -> Dict[str, Any]:
             "player_id": pid,
             "number": str(p.get("DisplayNumber", "") or ""),
             "name": name,                    # транзитно
+            # Дата рождения — тоже ТРАНЗИТНО, на диск не идёт: по ней склеиваем
+            # два id одного человека, когда лига завела его дважды с опечаткой
+            # в фамилии (league_sync.detect_same_person).
+            "birth": str(pi.get("PersonBirth") or p.get("PersonBirth") or ""),
             "active": bool(p.get("IsActive")),
         })
     # TeamName у Инфобаскета — объект, а не строка: имя лежит внутри.
