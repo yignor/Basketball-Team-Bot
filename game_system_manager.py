@@ -2274,6 +2274,20 @@ class GameSystemManager:
                 message += date_line
             else:
                 message += date_line
+
+            # Запись игры, если её уже нашли в VK (ищет vk_video фоном; в базе
+            # она лежит в том же столбце, куда SLPRO пишет свою ссылку).
+            try:
+                import sheets_cache
+                with sheets_cache.get_connection() as conn:
+                    row = conn.execute(
+                        """SELECT video_vk FROM game_meta
+                           WHERE source = 'infobasket' AND game_id = ?""",
+                        (str(game_info.get('game_id') or ''),)).fetchone()
+                if row and row["video_vk"]:
+                    message += f"📹 <a href=\"{row['video_vk']}\">Запись игры</a>\n"
+            except Exception as e:
+                print(f"⚠️ Ссылка на запись игры не подставилась: {e}")
             
             if our_team_leaders:
                 our_score_val = game_info.get('our_score', '?')

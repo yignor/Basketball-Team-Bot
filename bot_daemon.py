@@ -2815,6 +2815,12 @@ async def _sync_leagues() -> None:
         log.info(f"Справочники лиг: команд {res['teams']}, в заявках {res['rosters']}, "
                  f"имён {player_names.stats()['count']} (+{extra} из протоколов), "
                  f"склеек {res.get('merged', 0)}, ошибок {res['failed']}")
+        # Записи игр из VK — тем же фоновым заходом. Не настроено (нет токена
+        # или групп) — тихо ничего не делает.
+        import vk_video
+        vk = await vk_video.sync()
+        if vk["found"]:
+            log.info(f"VK: найдено записей игр — {vk['found']} из {vk['looked']}")
     except Exception as e:
         log.warning(f"Справочники лиг не обновились: {e}")
 
