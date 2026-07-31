@@ -370,6 +370,21 @@ class SlproManager:
             quarters = format_quarters(box, team_id)
             if quarters:
                 lines.append(f"📈 Четверти: {quarters}")
+
+        # Порядок как у Инфобаскета — он у нас за образец: шапка, счёт,
+        # четверти, ссылка и дата, и только потом, отдельным абзацем, блок
+        # игроков. Так сообщение читается сверху вниз: сначала «что случилось»,
+        # затем «кто это сделал», а не наоборот.
+        gid = game.get("game_id")
+        if gid is not None:
+            lines.append(f'🔗 <a href="https://slpro.basketstat.ru/game/{gid}">Протокол</a>')
+        time_hhmm = self._time_hhmm(game.get("game_time", ""))
+        lines.append(f"📅 {date_ddmm}" + (f" в {time_hhmm}" if time_hhmm else ""))
+        lines.append(f"🏀 SLPRO · {ctx.get('division_name', '')}")
+        if box and box.video_vk:
+            lines.append(f"📹 Видео: {box.video_vk}")
+
+        if box:
             try:
                 import player_jokes
                 jokes = player_jokes.Jokes(won=(our_s > opp_s), source="slpro",
@@ -380,16 +395,8 @@ class SlproManager:
                 jokes = None
             leaders = format_leaders(box, team_id, won=(our_s > opp_s), jokes=jokes)
             if leaders:
+                lines.append("")
                 lines.append(leaders)
-            if box.video_vk:
-                lines.append(f"📹 Видео: {box.video_vk}")
-
-        # Ссылка на протокол игры — как в Infobasket. Публичная страница SLPRO.
-        gid = game.get("game_id")
-        if gid is not None:
-            lines.append(f'🔗 <a href="https://slpro.basketstat.ru/game/{gid}">Протокол</a>')
-        lines.append(f"📅 {date_ddmm}")
-        lines.append(f"🏀 SLPRO · {ctx.get('division_name', '')}")
         # Напоминание про блокировку состава (не чаще раза в неделю).
         try:
             import fantasy
