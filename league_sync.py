@@ -349,14 +349,51 @@ def detect_across_leagues(by_team: Dict[str, List[Dict[str, Any]]]) -> List[Tupl
 
 
 def _store_pairs(pairs: List[Tuple[str, str]]) -> int:
-    """Пары в player_merges: обе ссылки указывают на общую составную."""
+    """Пары в player_merges — ГРУППАМИ, а не по две.
+
+    Наивная запись «пара за парой» разъезжается, как только у человека три
+    ссылки: пара A–B пишет «A+B», пара B–C пишет «B+C», и A с C оказываются
+    разными людьми. Поэтому сначала собираем связные группы (включая уже
+    записанные ранее), и только потом пишем всем участникам одну общую ссылку.
+    Пока у наших игроков по две ссылки, но третья появится в первый же день,
+    когда лига заведёт кому-нибудь новый id."""
     if not pairs:
         return 0
-    now = sheets_cache.now_iso()
+    sheets_cache.init_db()
+    parent: Dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
     with sheets_cache.get_connection() as conn:
+        # Уже известные группы тоже в расчёт: иначе новая пара разорвала бы
+        # вчерашнюю склейку.
+        for r in conn.execute("SELECT ref, canonical FROM player_merges"):
+            refs = str(r["canonical"]).split("+") or [r["ref"]]
+            for one in refs:
+                union(refs[0], one)
+            union(refs[0], r["ref"])
         for a, b in pairs:
-            canonical = "+".join(sorted({a, b}))
-            for one in (a, b):
+            union(a, b)
+
+        groups: Dict[str, set] = {}
+        for ref in list(parent):
+            groups.setdefault(find(ref), set()).add(ref)
+        now = sheets_cache.now_iso()
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            canonical = "+".join(sorted(members))
+            for one in members:
                 conn.execute(
                     """INSERT INTO player_merges (ref, canonical, fetched_at)
                        VALUES (?, ?, ?)
