@@ -1643,10 +1643,10 @@ def _render_unlink_confirm(uid: str) -> Tuple[str, InlineKeyboardMarkup]:
 # ─── прогресс команды (для тренера) ─────────────────────────────────────────
 
 async def _prog_teams() -> List[Dict[str, Any]]:
-    """Наши команды с названиями — из пула фэнтези (там они уже разрешены)."""
+    """Наши команды с названиями — из локального справочника лиг."""
     import fantasy_api
     try:
-        teams = await fantasy_api._resolve_pool_teams()
+        teams = await asyncio.to_thread(fantasy_api._resolve_pool_teams_local)
     except Exception as e:
         log.warning(f"Прогресс: не удалось получить команды: {e}")
         teams = []
@@ -1660,17 +1660,13 @@ async def _prog_teams() -> List[Dict[str, Any]]:
 
 
 async def _prog_names() -> Dict[str, str]:
-    """id игрока -> ФИО, транзитно из ростеров лиг (у себя ФИО не храним)."""
-    import fantasy_api
-    import fantasy_stats
-    names: Dict[str, str] = {}
-    try:
-        for p in await fantasy_api.build_pool():
-            for one in fantasy_stats.expand_refs([p["ref"]]):
-                _src, pid = fantasy_stats.parse_ref(one)
-                names[str(pid)] = p["name"]
-    except Exception as e:
-        log.warning(f"Прогресс: имена не подтянулись: {e}")
+    """id игрока -> ФИО из реестра в памяти. ФИО на диск не пишем, в сеть за
+    ними тут не ходим: наполняет реестр качалка (league_sync), фоном."""
+    import player_names
+    names = player_names.by_player_id()
+    if not names:
+        log.info("Прогресс: реестр имён пуст (качалка ещё не отработала) — "
+                 "в отчёте будут номера")
     return names
 
 
@@ -1720,33 +1716,46 @@ async def _prog_standings(source: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
 
 
 async def _prog_opp_names(source: str, opp_id: str, comp_id: str = "") -> Dict[str, str]:
-    """ФИО игроков СОПЕРНИКА — транзитно из заявки лиги.
+    """ФИО игроков СОПЕРНИКА — из реестра в памяти, если качалка их принесла.
 
-    Без этого их лидеры в отчёте остаются номерами: у себя мы ФИО не храним
-    (юр-инвариант), а в протоколах лежат только id и номер."""
+    Сначала смотрим память. Пусто — один раз сходим в заявку лиги: соперник
+    меняется от игры к игре, держать заявки всех команд лиги незачем. Запрос
+    прикрыт предохранителем клиента, поэтому недоступная лига стоит отчёту
+    миллисекунды, а не минуту."""
     if not opp_id:
         return {}
+    import player_names
+    src_db = "slpro" if source == "slpro" else "infobasket"
     try:
         if source == "slpro":
             import slpro_client
             roster = await slpro_client.SlproClient().get_roster(int(opp_id))
-            return {str(p.get("player_id")):
-                    f"{p.get('surname', '')} {p.get('name', '')}".strip()
-                    for p in roster if p.get("player_id") is not None}
-        import stats_backfill
-        import run_backfill
-        # У Инфобаскета заявка живёт внутри соревнования; comp_id их игр лежит
-        # у нас в season_id, остальные берём из Конфига — заявка бывает и в
-        # соседнем турнире.
-        comps = ([comp_id] if comp_id else []) + [
-            str(c) for c in run_backfill._ib_comps() if str(c) != comp_id]
-        for c in comps:
-            roster = await stats_backfill.fetch_infobasket_roster(opp_id, c)
-            if roster:
-                return {str(p["player_id"]): p["name"] for p in roster if p.get("name")}
+            names = {str(p.get("player_id")):
+                     f"{p.get('surname', '')} {p.get('name', '')}".strip()
+                     for p in roster if p.get("player_id") is not None}
+        else:
+            import stats_backfill
+            import run_backfill
+            # У Инфобаскета заявка живёт внутри соревнования; comp_id их игр
+            # лежит у нас в season_id, остальные берём из Конфига — заявка
+            # бывает и в соседнем турнире.
+            comps = ([comp_id] if comp_id else []) + [
+                str(c) for c in run_backfill._ib_comps() if str(c) != comp_id]
+            names = {}
+            for c in comps:
+                roster = await stats_backfill.fetch_infobasket_roster(opp_id, c)
+                if roster:
+                    names = {str(p["player_id"]): p["name"]
+                             for p in roster if p.get("name")}
+                    break
+        if names:
+            player_names.put_many(src_db, names.items())
+            return names
     except Exception as e:
         log.warning(f"Заявка соперника {source}:{opp_id} недоступна: {e}")
-    return {}
+    # Лига молчит — отдаём то, что уже знаем про этих игроков.
+    known = player_names.get_all()
+    return {k.split(":", 1)[1]: v for k, v in known.items() if k.startswith(f"{src_db}:")}
 
 
 async def _prog_send(message, source: str, team_id: str) -> None:
@@ -2465,6 +2474,31 @@ async def _keep_funnel_warm() -> None:
     await fantasy_api.keep_funnel_warm()
 
 
+_league_sync_at: float = 0.0
+_LEAGUE_SYNC_INTERVAL = 3600.0     # раз в час: заявки меняются реже некуда
+
+
+async def _sync_leagues() -> None:
+    """Справочники лиг — единственное место демона, которое ходит в чужие API
+    ради состава команд и имён. Всё остальное читает результат из базы и
+    памяти, поэтому недоступная лига больше не задевает игрока."""
+    global _league_sync_at
+    now = time.time()
+    if now - _league_sync_at < _LEAGUE_SYNC_INTERVAL:
+        return
+    _league_sync_at = now
+    try:
+        import league_sync
+        import player_names
+        res = await league_sync.refresh()
+        extra = await league_sync.fill_missing_names()
+        log.info(f"Справочники лиг: команд {res['teams']}, в заявках {res['rosters']}, "
+                 f"имён {player_names.stats()['count']} (+{extra} из протоколов), "
+                 f"ошибок {res['failed']}")
+    except Exception as e:
+        log.warning(f"Справочники лиг не обновились: {e}")
+
+
 async def _warm_fantasy_pool(force: bool = False) -> None:
     global _pool_warm_at
     if not (FANTASY_API_ENABLED and BOT_TOKEN):
@@ -2509,6 +2543,7 @@ async def _background_loop(app: Application) -> None:
             await asyncio.to_thread(_refresh_poll_cache)
             await asyncio.to_thread(_refresh_db_cache)
             await asyncio.to_thread(_periodic_push_local_changes)
+            await _sync_leagues()
             await _warm_fantasy_pool()
             await _keep_funnel_warm()
             # Адрес Cloudflare-туннеля меняется при его рестарте (независимо от
@@ -2564,10 +2599,15 @@ async def on_startup(app: Application) -> None:
     global _background_task
     _background_task = asyncio.create_task(_background_loop(app))
 
-    # Пул греем сразу, а не через полминуты первого тика: перезапуск демона —
-    # обычное дело, и ровно в это окно приходят первые /start. Холодный пул в
-    # этот момент означал бы кнопку без запасных данных на ровном месте.
-    _warm = asyncio.create_task(_warm_fantasy_pool(force=True))
+    # Справочники и пул греем сразу, а не через полминуты первого тика:
+    # перезапуск демона — обычное дело, и ровно в это окно приходят первые
+    # /start. Реестр имён живёт в памяти и после рестарта пуст, поэтому
+    # качалку зовём первой — иначе пул соберётся на номерах.
+    async def _boot_warm() -> None:
+        await _sync_leagues()
+        await _warm_fantasy_pool(force=True)
+
+    _warm = asyncio.create_task(_boot_warm())
     _side_tasks.add(_warm)
     _warm.add_done_callback(_side_tasks.discard)
 

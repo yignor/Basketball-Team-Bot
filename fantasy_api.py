@@ -33,6 +33,8 @@ import fantasy
 import fantasy_modes
 import fantasy_prices
 import fantasy_stats
+import league_sync
+import player_names
 
 log = logging.getLogger(__name__)
 
@@ -389,35 +391,6 @@ async def _ib_team_name(team_id: Any, comp_id: Any) -> str:
     return _ib_names[key]
 
 
-_person_names: Dict[str, str] = {}
-
-
-async def _person_name(source: str, player_id: Any) -> str:
-    """ФИО игрока по id ИЗ ЛИГИ — транзитно, в наших таблицах не храним.
-    Нужно тем, кто есть в протоколах, но выпал из заявки: без имени в пуле
-    висит «№10», и не понять ни кто это, ни не тот ли это человек, что уже
-    есть в списке под другим написанием.
-
-    Кеш на процесс: имя меняется раз в жизнь, а пул пересобирается по часам."""
-    key = f"{source}:{player_id}"
-    if key in _person_names:
-        return _person_names[key]
-    name = ""
-    try:
-        if source == "slpro":
-            from slpro_client import SlproClient
-            info = await SlproClient().get_player_info(player_id)
-            if info:
-                name = f"{info.get('surname', '')} {info.get('name', '')}".strip()
-        else:
-            import stats_backfill
-            name = await stats_backfill.fetch_infobasket_person(player_id)
-    except Exception as e:
-        log.warning(f"имя игрока {key}: {e}")
-    _person_names[key] = name
-    return name
-
-
 def _protocol_players(source: str, team_id: Any) -> List[Dict[str, Any]]:
     """Кто РЕАЛЬНО играл за команду — из наших протоколов (локальная база).
     Заявка бывает неполной: игрок мог сыграть и уже выбыть из списка. ФИО не
@@ -442,13 +415,31 @@ async def _current_pool_teams(season: Optional[Dict[str, Any]]) -> List[Dict[str
     return explicit if explicit else await derive_pool_teams()
 
 
-async def _resolve_pool_teams(season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Команды пула сезона: явный выбор админа (fantasy.pool_teams) или
-    дефолт — все кандидаты из настроек поиска игр."""
+def _resolve_pool_teams_local(season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Команды пула — из локального справочника, без сети.
+
+    Явный выбор админа (fantasy.pool_teams) хранится в сезоне; если админ
+    ничего не выбирал, берём наши команды, которые записала качалка."""
     if season is None:
         season = fantasy.get_active_season()
     explicit = fantasy.pool_teams(season) if season else []
-    return explicit if explicit else await derive_pool_teams()
+    if explicit:
+        return explicit
+    return [{"source": t["source"], "team_id": t["team_id"], "comp_id": t["comp_id"],
+             "name": t["name"], "league": t["league"]} for t in league_sync.our_teams()]
+
+
+async def _resolve_pool_teams(season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Команды пула сезона: явный выбор админа (fantasy.pool_teams) или
+    дефолт — кандидаты из справочника. Живой вариант остался для админки:
+    там уместно спросить лигу, когда команду только настраивают."""
+    if season is None:
+        season = fantasy.get_active_season()
+    explicit = fantasy.pool_teams(season) if season else []
+    if explicit:
+        return explicit
+    local = _resolve_pool_teams_local(season)
+    return local if local else await derive_pool_teams()
 
 
 def pool_is_warm(season: Optional[Dict[str, Any]] = None) -> bool:
@@ -466,13 +457,21 @@ def pool_is_warm(season: Optional[Dict[str, Any]] = None) -> bool:
 
 async def build_pool(force: bool = False,
                      season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Пул драфта: игроки команд из fantasy.pool_teams (SLPRO + Инфобаскет).
-    Ref = source:team_id:player_id. Имя — транзитно из публичного ростера,
-    в наших таблицах не хранится.
+    """Пул драфта — ЦЕЛИКОМ ИЗ ЛОКАЛЬНОЙ БАЗЫ, без единого запроса в лиги.
 
-    Кеш в памяти на час и ОТДЕЛЬНО НА СЕЗОН: параллельные лиги набираются из
-    разных команд (в этом и смысл «фэнтези для чужой команды»), общий кеш
-    показывал бы всем пул той лиги, которая обновилась последней."""
+    Ref = source:team_id:player_id. Состав берём из зеркала заявок
+    (`league_rosters`) и своих протоколов, имена — из памяти (player_names),
+    цены — из зеркала листа «Игроки». Наполняет всё это league_sync, фоном.
+
+    Так сделано после 31.07.2026: раньше пул собирался походом в API двух лиг,
+    и когда одна из них замолчала, каждое действие игрока стало стоить минуту
+    таймаутов. В ответе человеку живых запросов быть не должно — лига
+    недоступна, значит работаем на скачанном вчера.
+
+    Функция осталась async: её зовут из обработчиков, и менять полсотни мест
+    ради синхронности незачем. Кеш в памяти на час и ОТДЕЛЬНО НА СЕЗОН:
+    параллельные лиги набираются из разных команд, общий кеш показывал бы всем
+    пул той лиги, которая обновилась последней."""
     if season is None:
         season = fantasy.get_active_season()
     key = str((season or {}).get("id") or "-")
@@ -481,45 +480,45 @@ async def build_pool(force: bool = False,
     if not force and entry and (now - entry["at"]) < _POOL_TTL:
         return entry["data"]
 
+    teams = _resolve_pool_teams_local(season)
+    if not teams:
+        # Справочник ещё пуст — так бывает ровно один раз, до первого прохода
+        # качалки. Тут поход в лигу оправдан: пустой пул означал бы приложение
+        # без единого игрока, а это хуже секундного ожидания.
+        log.info("пул: локальный справочник команд пуст — спрашиваю лигу разово")
+        teams = await derive_pool_teams()
+
     pool: List[Dict[str, Any]] = []
     seen = set()
-    for team in await _resolve_pool_teams(season):
+    for team in teams:
         src = team.get("source")
         tid = team.get("team_id")
         if tid is None:
             continue
-        try:
-            if src == "slpro":
-                from slpro_client import SlproClient
-                roster = await SlproClient().get_roster(tid)
-                players = [{"pid": p.get("player_id"), "number": p.get("number", ""),
-                            "name": f"{p.get('surname', '')} {p.get('name', '')}".strip()}
-                           for p in roster]
-            else:  # infobasket
-                import stats_backfill
-                roster = await stats_backfill.fetch_infobasket_roster(tid, team.get("comp_id"))
-                players = [{"pid": p["player_id"], "number": p["number"], "name": p["name"]}
-                           for p in roster if p.get("active", True)]
-        except Exception as e:
-            log.warning(f"пул: ростер {src}:{tid} — {e}")
-            players = []          # заявка недоступна — опираемся на протоколы
         src_db = "slpro" if src == "slpro" else "infobasket"
         pref = "slpro" if src == "slpro" else "ib"
-        by_pid = {str(p["pid"]): p for p in players if p.get("pid") is not None}
 
-        # Пул = заявка ∪ протоколы. Заявка даёт ФИО и новичков, ещё не игравших;
+        # Пул = заявка ∪ протоколы. Заявка даёт новичков, ещё не игравших;
         # протоколы — тех, кто реально играл, но из заявки уже выпал.
+        by_pid: Dict[str, Dict[str, Any]] = {}
+        for r in league_sync.roster_of(src_db, tid):
+            if not r.get("active", 1):
+                continue
+            by_pid[str(r["player_id"])] = {"pid": str(r["player_id"]),
+                                           "number": r.get("number") or ""}
         for pp in _protocol_players(src_db, tid):
             pid = str(pp["pid"])
             if pid in by_pid:
                 if not by_pid[pid].get("number"):
                     by_pid[pid]["number"] = pp["number"]   # номер из протокола
                 continue
-            by_pid[pid] = {"pid": pid, "number": pp["number"],
-                           # ФИО не храним — для выбывших из заявки имени нет
-                           "name": (await _person_name(src_db, pid)
-                                    or (f"№{pp['number']}" if pp["number"] else f"ID {pid}")),
-                           "off_roster": True}
+            by_pid[pid] = {"pid": pid, "number": pp["number"], "off_roster": True}
+
+        # Имя — из памяти. Нет его (демон только поднялся, качалка ещё не
+        # отработала) — показываем номер: ждать лигу тут нельзя.
+        for p in by_pid.values():
+            p["name"] = (player_names.get(src_db, p["pid"])
+                         or (f"№{p['number']}" if p["number"] else f"ID {p['pid']}"))
 
         for p in by_pid.values():
             ref = f"{pref}:{tid}:{p['pid']}"

@@ -430,6 +430,40 @@ CREATE TABLE IF NOT EXISTS fantasy_notify_prefs (
     notify_lock  INTEGER NOT NULL DEFAULT 1,
     updated_at   TEXT NOT NULL DEFAULT ''
 );
+
+-- Зеркало заявок лиг: КТО числится в команде. Нужно, чтобы пул фэнтези
+-- собирался из локальной базы, а не походом в чужой API на каждое действие
+-- игрока (один недоступный сайт превращал /start в минуты ожидания).
+-- Юр-инвариант: тут только идентификаторы и номер. ФИО на диск не попадает
+-- никогда — имена живут в оперативной памяти (player_names.py) и после
+-- перезапуска подтягиваются заново.
+CREATE TABLE IF NOT EXISTS league_rosters (
+    source      TEXT NOT NULL,             -- slpro | infobasket
+    team_id     TEXT NOT NULL,
+    player_id   TEXT NOT NULL,
+    number      TEXT NOT NULL DEFAULT '',
+    comp_id     TEXT NOT NULL DEFAULT '',  -- соревнование (Инфобаскет)
+    active      INTEGER NOT NULL DEFAULT 1,
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (source, team_id, player_id)
+);
+
+-- Зеркало справочника команд/турниров лиги: id, название, стадия. Название
+-- команды — не персональные данные, его храним. Сюда же складываем то, что
+-- раньше резолвилось живым запросом на каждый показ (team_contexts).
+CREATE TABLE IF NOT EXISTS league_teams (
+    source      TEXT NOT NULL,
+    team_id     TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    league      TEXT NOT NULL DEFAULT '',  -- как названо у нас в «Конфиге»
+    comp_id     TEXT NOT NULL DEFAULT '',
+    season_id   TEXT NOT NULL DEFAULT '',
+    stage_id    TEXT NOT NULL DEFAULT '',
+    ours        INTEGER NOT NULL DEFAULT 0, -- наша команда (кандидат в пул)
+    ctx_json    TEXT NOT NULL DEFAULT '',   -- полный контекст стадии (SLPRO)
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (source, team_id)
+);
 """
 
 # Порядок колонок в листе "Сервисный" — должен совпадать с SERVICE_HEADER
