@@ -448,6 +448,22 @@ CREATE TABLE IF NOT EXISTS league_rosters (
     PRIMARY KEY (source, team_id, player_id)
 );
 
+-- Шутки к фамилиям: фраза, которую бот дописывает к строке игрока в сообщении
+-- о результате. Автор пишет её сам, себе или товарищу по команде.
+-- Юр-инвариант: адресат хранится СТРОКОЙ ЛИСТА «Игроки» (row_index), а не ФИО.
+-- Ник автора храним осознанно — он публикуется в «(с) @ник», в этом и смысл.
+CREATE TABLE IF NOT EXISTS player_jokes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_row   INTEGER NOT NULL,          -- строка листа «Игроки»
+    occasion     TEXT NOT NULL DEFAULT 'any',   -- win | loss | any
+    text         TEXT NOT NULL,
+    author_id    TEXT NOT NULL DEFAULT '',
+    author_nick  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT '',
+    active       INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_player_jokes_target ON player_jokes(target_row, active);
+
 -- «Это один и тот же человек»: ссылка лиги -> составная ссылка пула.
 -- Один игрок выступает и в SLPRO, и в Инфобаскете под разными id; склейка
 -- делается по ФИО, но ФИО живут в памяти и после перезапуска демона исчезают.

@@ -213,17 +213,28 @@ def format_quarters(box: BoxScore, our_team_id: int) -> str:
     return " · ".join(parts)
 
 
-def format_leaders(box: BoxScore, our_team_id: int, top_scorers: int = 3) -> str:
+def format_leaders(box: BoxScore, our_team_id: int, top_scorers: int = 3,
+                   won: Optional[bool] = None) -> str:
     """Короткий блок лидеров нашей команды для сообщения о результате.
-    Имена берём транзитно (display_name) — в хранилище это не идёт."""
+    Имена берём транзитно (display_name) — в хранилище это не идёт.
+
+    `won` включает шутки от своих: к строке MVP дописывается фраза, которую
+    кто-то из команды заранее оставил этому игроку (player_jokes)."""
     ours = [p for p in box.team_players(our_team_id) if p.pts or p.reb or p.ast]
     if not ours:
         return ""
+    try:
+        import player_jokes
+        jokes = player_jokes.Jokes(won)
+    except Exception:
+        jokes = None                 # без шуток, но со счётом — так надёжнее
     lines = []
     mvp = box.mvp(our_team_id)
     if mvp:
         name = mvp.display_name or f"№{mvp.number}"
-        lines.append(f"⭐️ MVP: {name} — {mvp.pts} очк, {mvp.reb} подб, {mvp.ast} пас (КПИ {mvp.efficiency})")
+        joke = jokes.for_name(name) if jokes and mvp.display_name else ""
+        lines.append(f"⭐️ MVP: {name} — {mvp.pts} очк, {mvp.reb} подб, "
+                     f"{mvp.ast} пас (КПИ {mvp.efficiency}){joke}")
     top = sorted(ours, key=lambda p: p.pts, reverse=True)[:top_scorers]
     scorers = ", ".join(f"{(p.display_name or ('№'+p.number))} {p.pts}" for p in top)
     if scorers:
@@ -237,4 +248,10 @@ def format_leaders(box: BoxScore, our_team_id: int, top_scorers: int = 3) -> str
         extra.append(f"передачи — {(top_ast.display_name or ('№'+top_ast.number))} ({top_ast.ast})")
     if extra:
         lines.append("📊 " + "; ".join(extra))
+    # Вторая фраза — лучшему по подборам: так шутки достаются не только
+    # бомбардиру, у которого и так вся слава.
+    if jokes and top_reb and top_reb.display_name and top_reb.reb:
+        joke = jokes.for_name(top_reb.display_name)
+        if joke:
+            lines.append(f"😄{joke}")
     return "\n".join(lines)

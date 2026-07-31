@@ -370,7 +370,7 @@ class SlproManager:
             quarters = format_quarters(box, team_id)
             if quarters:
                 lines.append(f"📈 Четверти: {quarters}")
-            leaders = format_leaders(box, team_id)
+            leaders = format_leaders(box, team_id, won=(our_s > opp_s))
             if leaders:
                 lines.append(leaders)
             if box.video_vk:

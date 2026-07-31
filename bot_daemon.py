@@ -612,6 +612,177 @@ async def handle_feedback_text(update: Update, context: ContextTypes.DEFAULT_TYP
     raise ApplicationHandlerStop
 
 
+# ─── шутки к фамилиям ───────────────────────────────────────────────────────
+#
+# Диалог короткий и живёт только в памяти: фамилия -> случай -> фраза. После
+# перезапуска человек просто начнёт заново, терять тут нечего.
+# {tg_id: {"stage": "name"|"text", "row": int, "target": str, "occasion": str}}
+_joke_draft: Dict[int, Dict[str, Any]] = {}
+
+JOKE_HELP = ("😄 Шутки к фамилиям\n\n"
+             "Оставь фразу игроку — своему или чужому. Когда он попадёт в "
+             "лучшие (или в антилидеры) в сообщении о результате, бот допишет "
+             "её к строке и подпишет твоим ником.\n\n"
+             "Фраз можно несколько — бот берёт случайную.")
+
+
+def _joke_menu(uid: int, is_admin: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_jokes
+    mine = player_jokes.listing(uid)
+    lines = [JOKE_HELP, ""]
+    if mine:
+        lines.append(f"Твоих фраз: {len(mine)} из {player_jokes.MAX_PER_AUTHOR}.")
+    rows = [[InlineKeyboardButton("➕ Добавить фразу", callback_data="joke:add")]]
+    if mine:
+        rows.append([InlineKeyboardButton("📋 Мои фразы", callback_data="joke:mine")])
+    if is_admin:
+        rows.append([InlineKeyboardButton("👀 Все фразы команды", callback_data="joke:all")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _joke_list_screen(uid: Optional[int], title: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Список фраз с кнопками удаления. uid=None — админский вид (все)."""
+    import player_jokes
+    items = player_jokes.listing(uid)
+    if not items:
+        return "Пока пусто.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="joke:menu")]])
+    lines = [title, ""]
+    rows = []
+    for i, j in enumerate(items[:20], 1):
+        when = player_jokes.OCCASIONS.get(j["occasion"], j["occasion"])
+        who = f" · @{j['author_nick']}" if (uid is None and j["author_nick"]) else ""
+        lines.append(f"{i}. {j['target']} ({when}){who}\n   «{j['text']}»")
+        rows.append([InlineKeyboardButton(f"🗑 Удалить {i}",
+                                          callback_data=f"joke:del:{j['id']}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="joke:menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def handle_joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/joke — экран шуток. Только игрокам команды: чужие шутки про нашу
+    команду в общий чат не летят."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    if not (_is_admin(user) or fantasy_api._is_team_member(str(user.id), user.username or "")):
+        await msg.reply_text("Эта штука для игроков команды. Нажми /start — "
+                             "если ты в списке, я тебя узнаю.")
+        return
+    text, markup = _joke_menu(user.id, _is_admin(user))
+    await msg.reply_text(text, reply_markup=markup)
+
+
+async def handle_joke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import player_jokes
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user:
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "menu":
+        text, markup = _joke_menu(user.id, _is_admin(user))
+        await query.edit_message_text(text, reply_markup=markup)
+    elif action == "add":
+        _joke_draft[user.id] = {"stage": "name"}
+        await query.edit_message_text(
+            "Чью фамилию подписываем? Напиши одну фамилию — например, «Дроздов».\n\n"
+            "Передумал — /start.")
+    elif action == "pick" and len(parts) > 2:
+        draft = _joke_draft.get(user.id) or {}
+        draft.update(row=int(parts[2]), stage="occasion")
+        _joke_draft[user.id] = draft
+        await query.edit_message_text(
+            f"Когда показывать фразу для «{draft.get('target', '')}»?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ После победы", callback_data="joke:when:win"),
+                 InlineKeyboardButton("❌ После поражения", callback_data="joke:when:loss")],
+                [InlineKeyboardButton("🤷 В любом случае", callback_data="joke:when:any")]]))
+    elif action == "when" and len(parts) > 2:
+        draft = _joke_draft.get(user.id) or {}
+        if not draft.get("row"):
+            await query.edit_message_text("Начни заново: /joke")
+            return
+        draft.update(occasion=parts[2], stage="text")
+        _joke_draft[user.id] = draft
+        await query.edit_message_text(
+            f"Пиши фразу для «{draft.get('target', '')}» "
+            f"({player_jokes.OCCASIONS[parts[2]]}).\n\n"
+            f"Одной строкой, до {player_jokes.MAX_LEN} символов. Её увидит весь чат "
+            f"вместе с твоим ником.")
+    elif action == "mine":
+        text, markup = _joke_list_screen(user.id, "📋 Твои фразы")
+        await query.edit_message_text(text, reply_markup=markup)
+    elif action == "all" and _is_admin(user):
+        text, markup = _joke_list_screen(None, "👀 Все фразы команды")
+        await query.edit_message_text(text, reply_markup=markup)
+    elif action == "del" and len(parts) > 2:
+        # Свою — любой автор, чужую — только админ.
+        ok = player_jokes.remove(int(parts[2]),
+                                 None if _is_admin(user) else user.id)
+        text, markup = _joke_list_screen(
+            None if _is_admin(user) else user.id,
+            "👀 Все фразы команды" if _is_admin(user) else "📋 Твои фразы")
+        await query.edit_message_text(("Удалил.\n\n" if ok else "Не нашёл.\n\n") + text,
+                                      reply_markup=markup)
+
+
+async def handle_joke_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фамилия и сама фраза. Висит на любом тексте в личке, поэтому первым
+    делом проверяет, ждём ли мы что-то от этого человека."""
+    import player_jokes
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    draft = _joke_draft.get(user.id)
+    if not draft:
+        return
+    text = (msg.text or "").strip()
+
+    if draft.get("stage") == "name":
+        found = player_jokes.find_player(text)
+        if not found:
+            await msg.reply_text("Не нашёл такого в списке игроков. Проверь "
+                                 "фамилию или напиши её полностью.")
+            raise ApplicationHandlerStop
+        if len(found) > 1:
+            draft["target"] = text
+            _joke_draft[user.id] = draft
+            rows = [[InlineKeyboardButton(f"{p['surname']} {p['name']}".strip(),
+                                          callback_data=f"joke:pick:{p['row_index']}")]
+                    for p in found[:8]]
+            await msg.reply_text("Кого именно?", reply_markup=InlineKeyboardMarkup(rows))
+            raise ApplicationHandlerStop
+        p = found[0]
+        draft.update(row=p["row_index"], stage="occasion",
+                     target=f"{p['surname']} {p['name']}".strip())
+        _joke_draft[user.id] = draft
+        await msg.reply_text(
+            f"Когда показывать фразу для «{draft['target']}»?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ После победы", callback_data="joke:when:win"),
+                 InlineKeyboardButton("❌ После поражения", callback_data="joke:when:loss")],
+                [InlineKeyboardButton("🤷 В любом случае", callback_data="joke:when:any")]]))
+        raise ApplicationHandlerStop
+
+    if draft.get("stage") == "text":
+        ok, said = player_jokes.add(draft["row"], draft.get("occasion", "any"), text,
+                                    user.id, user.username or "")
+        if ok:
+            _joke_draft.pop(user.id, None)
+            when = player_jokes.OCCASIONS.get(draft.get("occasion", "any"), "")
+            await msg.reply_text(
+                f"😄 {said}\n\n«{text}» — для «{draft.get('target', '')}» {when}, "
+                f"подпись: @{user.username or 'без ника'}.",
+                reply_markup=_joke_menu(user.id, _is_admin(user))[1])
+        else:
+            await msg.reply_text(f"{said}\n\nПопробуй ещё раз или /start.")
+        raise ApplicationHandlerStop
+
+
 async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Личное сообщение со ссылкой на профиль в лиге -> привязка id к человеку.
 
@@ -2592,6 +2763,7 @@ async def on_startup(app: Application) -> None:
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Меню бота"),
+            BotCommand("joke", "Шутка к фамилии игрока"),
             BotCommand("feedback", "Написать админам: идея или проблема"),
         ], scope=BotCommandScopeDefault())
         for admin_id in ADMIN_USER_IDS:
@@ -2601,6 +2773,7 @@ async def on_startup(app: Application) -> None:
                     BotCommand("admin", "Админ-панель"),
                     BotCommand("profile", "Мой прогресс (скрытое)"),
                     BotCommand("season", "Создать сезон фэнтези"),
+                    BotCommand("joke", "Шутка к фамилии игрока"),
                     BotCommand("feedback", "Написать админам: идея или проблема"),
                 ], scope=BotCommandScopeChat(chat_id=int(admin_id)))
             except Exception as e:
@@ -2698,6 +2871,7 @@ def main() -> None:
     app.add_handler(CommandHandler("profile", handle_my_profile))
     app.add_handler(CommandHandler("season", handle_season))
     app.add_handler(CommandHandler("feedback", handle_feedback))
+    app.add_handler(CommandHandler("joke", handle_joke_command))
     app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file)"))
 
     # Обработчики, которые смотрят ЛЮБОЙ текст в личке, — каждый в своей группе.
@@ -2712,12 +2886,16 @@ def main() -> None:
         handle_coach_nick), group=1)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_joke_text), group=4)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_feedback_text), group=2)
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_profile_link), group=3)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
+    app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
 
     log.info("Запуск polling...")
     app.run_polling(

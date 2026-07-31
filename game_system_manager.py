@@ -2274,23 +2274,35 @@ class GameSystemManager:
                     is_victory = int(our_score_val) > int(opponent_score_val)
                 except (TypeError, ValueError):
                     is_victory = False
-                
+
+                # Шутки от своих: фраза, заранее оставленная этому игроку кем-то
+                # из команды. Сообщение о результате перестаёт быть выгрузкой из
+                # протокола. Не завелось — публикуем как раньше, без них.
+                try:
+                    import player_jokes
+                    jokes = player_jokes.Jokes(is_victory)
+                except Exception:
+                    jokes = None
+
+                def _joke(data: Dict) -> str:
+                    return jokes.for_name(data.get('name', '')) if jokes else ''
+
                 if is_victory:
                     message += "\n😅 ЧТО НУЖНО УЛУЧШИТЬ:\n"
                     anti_leaders = our_team_leaders.get('anti_leaders', {})
                     if anti_leaders:
                         if 'worst_free_throw' in anti_leaders:
                             data = anti_leaders['worst_free_throw']
-                            message += f"🏀 Штрафные: {data['name']} - {data['value']}%\n"
+                            message += f"🏀 Штрафные: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'worst_two_point' in anti_leaders:
                             data = anti_leaders['worst_two_point']
-                            message += f"🎯 Двухочковые: {data['name']} - {data['value']}%\n"
+                            message += f"🎯 Двухочковые: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'worst_three_point' in anti_leaders:
                             data = anti_leaders['worst_three_point']
                             message += f"🎯 Трехочковые: {data['name']} - {data['value']}%\n"
                         if 'turnovers' in anti_leaders:
                             data = anti_leaders['turnovers']
-                            message += f"💥 Потери: {data['name']} - {data['value']}\n"
+                            message += f"💥 Потери: {data['name']} - {data['value']}{_joke(data)}\n"
                         if 'fouls' in anti_leaders:
                             data = anti_leaders['fouls']
                             message += f"⚠️ Фолы: {data['name']} - {data['value']}\n"
@@ -2301,13 +2313,14 @@ class GameSystemManager:
                     message += "\n🏆 ЛУЧШИЕ ИГРОКИ:\n"
                     if 'points' in our_team_leaders:
                         data = our_team_leaders['points']
-                        message += f"🥇 Очки: {data['name']} - {data['value']} ({data.get('percentage', 0)}%)\n"
+                        message += (f"🥇 Очки: {data['name']} - {data['value']} "
+                                    f"({data.get('percentage', 0)}%){_joke(data)}\n")
                     if 'rebounds' in our_team_leaders:
                         data = our_team_leaders['rebounds']
-                        message += f"🏀 Подборы: {data['name']} - {data['value']}\n"
+                        message += f"🏀 Подборы: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'assists' in our_team_leaders:
                         data = our_team_leaders['assists']
-                        message += f"🎯 Передачи: {data['name']} - {data['value']}\n"
+                        message += f"🎯 Передачи: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'steals' in our_team_leaders:
                         data = our_team_leaders['steals']
                         message += f"🥷 Перехваты: {data['name']} - {data['value']}\n"
