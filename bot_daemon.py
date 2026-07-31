@@ -463,7 +463,7 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
             await message.reply_text(text, reply_markup=_bottom_keyboard(
                 payload or "", is_admin=is_admin, with_fantasy=with_fantasy,
                 with_reports=with_reports, with_personal=with_personal,
-                with_menu=is_member))
+                with_menu=True))
             return
         except Exception as e:
             log.warning(f"нижняя клавиатура (бюджет {budget}) не ушла: {e}")
@@ -687,36 +687,40 @@ MENU_TEXT = ("☰ Меню\n\n"
              "результаты я присылаю сам.")
 
 
-def _menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("😄 Шутки к фамилиям", callback_data="menu:jokes")],
-        [InlineKeyboardButton("🔔 Мои подписки", callback_data="menu:subs")],
-        [InlineKeyboardButton("💬 Написать админам", callback_data="menu:feedback")],
-    ])
-
-
-def _subs_markup(uid: Any) -> InlineKeyboardMarkup:
-    import subscriptions
-    state = subscriptions.all_of(uid)
+def _menu_markup(is_member: bool = False) -> InlineKeyboardMarkup:
+    """Меню открыто всем — посторонним тоже есть что тут делать (написать
+    админам). А вот шутки к фамилиям только своим: они уходят в общий чат
+    команды, и подписывать чужих людей человек со стороны не должен."""
     rows = []
-    for kind, title in subscriptions.KINDS.items():
-        mark = "✅" if state[kind] else "🚫"
-        rows.append([InlineKeyboardButton(f"{mark} {title}",
-                                          callback_data=f"menu:sub:{kind}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")])
+    if is_member:
+        rows.append([InlineKeyboardButton("😄 Шутки к фамилиям",
+                                          callback_data="menu:jokes")])
+    rows.append([InlineKeyboardButton("🔔 Мои подписки", callback_data="menu:subs")])
+    rows.append([InlineKeyboardButton("💬 Написать админам",
+                                      callback_data="menu:feedback")])
     return InlineKeyboardMarkup(rows)
 
 
-def _subs_text(uid: Any) -> str:
-    import subscriptions
-    state = subscriptions.all_of(uid)
-    lines = ["🔔 Мои подписки", "",
-             "Нажми, чтобы включить или выключить. В общий чат всё приходит "
-             "как обычно — это только про личку.", ""]
-    for kind, title in subscriptions.KINDS.items():
-        lines.append(f"{'✅' if state[kind] else '🚫'} {title}")
-        lines.append(f"    {subscriptions.HINTS[kind]}")
-    return "\n".join(lines)
+def _is_member(user) -> bool:
+    try:
+        return bool(_is_admin(user)
+                    or fantasy_api._is_team_member(str(user.id), user.username or ""))
+    except Exception as e:
+        log.warning(f"проверка состава: {e}")
+        return bool(_is_admin(user))
+
+
+# Подписки — следующий шаг. Пока честная заглушка: кнопка есть, но обещает
+# не работу, а сроки. Пустой экран «в разработке» злит; шкала хотя бы
+# показывает, что дело движется.
+SUBS_STUB = ("🔔 Мои подписки\n\n"
+             "Скоро здесь можно будет включать и выключать:\n"
+             "• результаты игр в личку\n"
+             "• таблицу фэнтези по понедельникам\n"
+             "• личную статистику и месячный отчёт\n\n"
+             "Готовность:\n"
+             "▓▓▓▓▓▓▒▒▒▒  60%\n\n"
+             "Хранение и выключатели уже готовы, осталось собрать сам экран.")
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -724,12 +728,11 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
     if not msg or not user or not chat or chat.type != "private":
         return
-    await msg.reply_text(MENU_TEXT, reply_markup=_menu_markup())
+    await msg.reply_text(MENU_TEXT, reply_markup=_menu_markup(_is_member(user)))
     raise ApplicationHandlerStop
 
 
 async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    import subscriptions
     query, user = update.callback_query, update.effective_user
     if not query or not user:
         return
@@ -738,17 +741,17 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     what = parts[1] if len(parts) > 1 else ""
 
     if what == "main":
-        await query.edit_message_text(MENU_TEXT, reply_markup=_menu_markup())
+        await query.edit_message_text(MENU_TEXT,
+                                      reply_markup=_menu_markup(_is_member(user)))
     elif what == "jokes":
+        if not _is_member(user):
+            await query.answer("Это для игроков команды", show_alert=True)
+            return
         text, markup = _joke_menu(user.id, _is_admin(user))
         await query.edit_message_text(text, reply_markup=markup)
     elif what == "subs":
-        await query.edit_message_text(_subs_text(user.id),
-                                      reply_markup=_subs_markup(user.id))
-    elif what == "sub" and len(parts) > 2:
-        subscriptions.toggle(user.id, parts[2])
-        await query.edit_message_text(_subs_text(user.id),
-                                      reply_markup=_subs_markup(user.id))
+        await query.edit_message_text(SUBS_STUB, reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")]]))
     elif what == "feedback":
         _awaiting_feedback.add(user.id)
         await query.edit_message_text(FEEDBACK_ASK)

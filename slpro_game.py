@@ -252,7 +252,8 @@ def format_leaders(box: BoxScore, our_team_id: int,
                 heroes.append(min(two, key=lambda p: pct(p.fg2m, p.fg2a)))
             if three:
                 heroes.append(min(three, key=lambda p: pct(p.fg3m, p.fg3a)))
-            heroes += [max(ours, key=lambda p: p.tur), max(ours, key=lambda p: p.pf)]
+            heroes += [max(ours, key=lambda p: p.tur), max(ours, key=lambda p: p.pf),
+                       min(ours, key=lambda p: p.efficiency)]
         else:
             heroes += [max(ours, key=lambda p: p.pts), max(ours, key=lambda p: p.reb),
                        max(ours, key=lambda p: p.ast), max(ours, key=lambda p: p.stl),
@@ -277,7 +278,7 @@ def format_leaders(box: BoxScore, our_team_id: int,
         three = [p for p in ours if p.fg3a >= 3]
         if three:
             w = min(three, key=lambda p: pct(p.fg3m, p.fg3a))
-            lines.append(f"🎯 Трёхочковые: {nm(w)} — {pct(w.fg3m, w.fg3a)}% "
+            lines.append(f"🎯 Трехочковые: {nm(w)} — {pct(w.fg3m, w.fg3a)}% "
                          f"({w.fg3m}/{w.fg3a}){joke(w)}")
         w = max(ours, key=lambda p: p.tur)
         if w.tur:
@@ -285,6 +286,10 @@ def format_leaders(box: BoxScore, our_team_id: int,
         w = max(ours, key=lambda p: p.pf)
         if w.pf:
             lines.append(f"⚠️ Фолы: {nm(w)} — {w.pf}{joke(w)}")
+        # Шестая строка — как у Инфобаскета: там блок ровно такой же, и два
+        # разных набора показателей у одного бота выглядели бы небрежностью.
+        w = min(ours, key=lambda p: p.efficiency)
+        lines.append(f"📉 КПИ: {nm(w)} — {w.efficiency}{joke(w)}")
     else:
         lines.append("🏆 ЛУЧШИЕ ИГРОКИ:")
         w = max(ours, key=lambda p: p.pts)

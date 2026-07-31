@@ -2317,16 +2317,16 @@ class GameSystemManager:
                             message += f"🎯 Двухочковые: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'worst_three_point' in anti_leaders:
                             data = anti_leaders['worst_three_point']
-                            message += f"🎯 Трехочковые: {data['name']} - {data['value']}%\n"
+                            message += f"🎯 Трехочковые: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'turnovers' in anti_leaders:
                             data = anti_leaders['turnovers']
                             message += f"💥 Потери: {data['name']} - {data['value']}{_joke(data)}\n"
                         if 'fouls' in anti_leaders:
                             data = anti_leaders['fouls']
-                            message += f"⚠️ Фолы: {data['name']} - {data['value']}\n"
+                            message += f"⚠️ Фолы: {data['name']} - {data['value']}{_joke(data)}\n"
                         if 'worst_kpi' in anti_leaders:
                             data = anti_leaders['worst_kpi']
-                            message += f"📉 КПИ: {data['name']} - {data['value']}\n"
+                            message += f"📉 КПИ: {data['name']} - {data['value']}{_joke(data)}\n"
                 else:
                     message += "\n🏆 ЛУЧШИЕ ИГРОКИ:\n"
                     if 'points' in our_team_leaders:
@@ -2341,10 +2341,10 @@ class GameSystemManager:
                         message += f"🎯 Передачи: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'steals' in our_team_leaders:
                         data = our_team_leaders['steals']
-                        message += f"🥷 Перехваты: {data['name']} - {data['value']}\n"
+                        message += f"🥷 Перехваты: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'best_kpi' in our_team_leaders:
                         data = our_team_leaders['best_kpi']
-                        message += f"📈 КПИ: {data['name']} - {data['value']}\n"
+                        message += f"📈 КПИ: {data['name']} - {data['value']}{_joke(data)}\n"
             
             return message
             
