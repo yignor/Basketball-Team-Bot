@@ -358,11 +358,13 @@ PROGRESS_KEYBOARD_LABEL = "📈 Прогресс команды"
 MYSTATS_KEYBOARD_LABEL = "📊 Моя статистика"
 FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
 FEEDBACK_KEYBOARD_LABEL = "💬 Написать админам"
+MENU_KEYBOARD_LABEL = "☰ Меню"
 
 
 def _bottom_keyboard(payload: str = "", is_admin: bool = False,
                      with_fantasy: bool = True, with_reports: bool = False,
-                     with_personal: bool = False) -> ReplyKeyboardMarkup:
+                     with_personal: bool = False,
+                     with_menu: bool = False) -> ReplyKeyboardMarkup:
     """Нижняя клавиатура: обратная связь, закрытые разделы и — админу — панель.
 
     Кнопки фэнтези тут по умолчанию НЕТ: приложение открывается кнопкой меню
@@ -372,7 +374,13 @@ def _bottom_keyboard(payload: str = "", is_admin: bool = False,
     if with_fantasy and FANTASY_FALLBACK_BUTTON and _webapp_url():
         url = _webapp_url() + ("#d=" + payload if payload else "")
         rows.append([KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))])
-    rows.append([KeyboardButton(FEEDBACK_KEYBOARD_LABEL)])
+    # «Меню» — одна кнопка вместо россыпи: под ней шутки, обратная связь и
+    # подписки. Видна только своим: посторонним там нечего делать, а игрокам
+    # не приходится каждый раз спрашивать, где что писать.
+    if with_menu:
+        rows.append([KeyboardButton(MENU_KEYBOARD_LABEL)])
+    else:
+        rows.append([KeyboardButton(FEEDBACK_KEYBOARD_LABEL)])
     # Закрытые разделы: у кого есть доступ, тот и видит кнопку. Нет ни одного —
     # ни одной лишней кнопки под чатом.
     closed = []
@@ -415,13 +423,14 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
     # Закрытые разделы — по выданному доступу, у админа оба.
     with_reports = _can_see_reports(user)
     with_personal = _can_see_personal(user)
-    # Запасная кнопка фэнтези — только игрокам команды: остальным бесполезна.
-    with_fantasy = False
-    if FANTASY_FALLBACK_BUTTON and FANTASY_WEBAPP_URL and _webapp_url():
-        try:
-            with_fantasy = fantasy_api._is_team_member(uid, user.username or "")
-        except Exception as e:
-            log.warning(f"проверка состава для клавиатуры: {e}")
+    # Свой ли это человек: от этого зависят и «Меню», и запасная кнопка.
+    try:
+        is_member = is_admin or fantasy_api._is_team_member(uid, user.username or "")
+    except Exception as e:
+        log.warning(f"проверка состава для клавиатуры: {e}")
+        is_member = is_admin
+    with_fantasy = bool(FANTASY_FALLBACK_BUTTON and FANTASY_WEBAPP_URL
+                        and _webapp_url() and is_member)
 
     # Запасные данные в кнопке собираются из пула. Пул греет фоновый цикл; если
     # он холодный (демон только поднялся) — подождём немного и уйдём без них.
@@ -453,7 +462,8 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
         try:
             await message.reply_text(text, reply_markup=_bottom_keyboard(
                 payload or "", is_admin=is_admin, with_fantasy=with_fantasy,
-                with_reports=with_reports, with_personal=with_personal))
+                with_reports=with_reports, with_personal=with_personal,
+                with_menu=is_member))
             return
         except Exception as e:
             log.warning(f"нижняя клавиатура (бюджет {budget}) не ушла: {e}")
@@ -475,7 +485,8 @@ async def _send_main_menu(update: Update) -> None:
 PLAYER_MENU_TEXT = ("🏀 Привет!\n\n"
                     "• 🏆 Фэнтези — кнопка «Фэнтези» слева от поля ввода: "
                     "собрать состав, таблица, топ игроков\n"
-                    "• 💬 Написать админам — кнопка внизу экрана\n\n"
+                    "• ☰ Меню — внизу экрана: шутки к фамилиям, подписки, "
+                    "написать админам\n\n"
                     "Опросы на игры и тренировки я присылаю сам в общий чат.")
 
 
@@ -648,6 +659,7 @@ def _joke_menu(uid: int, is_admin: bool = False) -> Tuple[str, InlineKeyboardMar
         rows.append([InlineKeyboardButton("📋 Мои фразы", callback_data="joke:mine")])
     if is_admin:
         rows.append([InlineKeyboardButton("👀 Все фразы команды", callback_data="joke:all")])
+    rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu:main")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -668,6 +680,78 @@ def _joke_list_screen(uid: Optional[int], title: str) -> Tuple[str, InlineKeyboa
                                           callback_data=f"joke:del:{j['id']}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="joke:menu")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+MENU_TEXT = ("☰ Меню\n\n"
+             "Здесь всё, что можно сделать в боте руками. Опросы, анонсы и "
+             "результаты я присылаю сам.")
+
+
+def _menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("😄 Шутки к фамилиям", callback_data="menu:jokes")],
+        [InlineKeyboardButton("🔔 Мои подписки", callback_data="menu:subs")],
+        [InlineKeyboardButton("💬 Написать админам", callback_data="menu:feedback")],
+    ])
+
+
+def _subs_markup(uid: Any) -> InlineKeyboardMarkup:
+    import subscriptions
+    state = subscriptions.all_of(uid)
+    rows = []
+    for kind, title in subscriptions.KINDS.items():
+        mark = "✅" if state[kind] else "🚫"
+        rows.append([InlineKeyboardButton(f"{mark} {title}",
+                                          callback_data=f"menu:sub:{kind}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _subs_text(uid: Any) -> str:
+    import subscriptions
+    state = subscriptions.all_of(uid)
+    lines = ["🔔 Мои подписки", "",
+             "Нажми, чтобы включить или выключить. В общий чат всё приходит "
+             "как обычно — это только про личку.", ""]
+    for kind, title in subscriptions.KINDS.items():
+        lines.append(f"{'✅' if state[kind] else '🚫'} {title}")
+        lines.append(f"    {subscriptions.HINTS[kind]}")
+    return "\n".join(lines)
+
+
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «☰ Меню» на нижней клавиатуре."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    await msg.reply_text(MENU_TEXT, reply_markup=_menu_markup())
+    raise ApplicationHandlerStop
+
+
+async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import subscriptions
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else ""
+
+    if what == "main":
+        await query.edit_message_text(MENU_TEXT, reply_markup=_menu_markup())
+    elif what == "jokes":
+        text, markup = _joke_menu(user.id, _is_admin(user))
+        await query.edit_message_text(text, reply_markup=markup)
+    elif what == "subs":
+        await query.edit_message_text(_subs_text(user.id),
+                                      reply_markup=_subs_markup(user.id))
+    elif what == "sub" and len(parts) > 2:
+        subscriptions.toggle(user.id, parts[2])
+        await query.edit_message_text(_subs_text(user.id),
+                                      reply_markup=_subs_markup(user.id))
+    elif what == "feedback":
+        _awaiting_feedback.add(user.id)
+        await query.edit_message_text(FEEDBACK_ASK)
 
 
 async def handle_joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -720,8 +804,8 @@ async def handle_joke_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text("Начни заново: /joke")
             return
         if parts[2] == "next":
-            draft.update(game_source="", game_id="", game_label="", stage="text")
-            where = "в ближайшей игре, где он выйдет на площадку"
+            draft.update(game_source="", game_id="", game_label="", game_date="",
+                         stage="occasion")
         else:
             games = player_jokes.upcoming_games()
             idx = int(parts[2])
@@ -730,12 +814,27 @@ async def handle_joke_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             g = games[idx]
             draft.update(game_source=g["source"], game_id=g["game_id"],
-                         game_label=g["label"], stage="text")
-            where = f"в игре {g['label']}"
+                         game_label=g["label"], game_date=g["date"], stage="occasion")
         _joke_draft[user.id] = draft
         await query.edit_message_text(
-            f"Пиши фразу для «{draft.get('target', '')}» — прозвучит {where}, "
-            f"один раз.\n\n"
+            f"При каком исходе показывать фразу для «{draft.get('target', '')}»?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ После победы", callback_data="joke:when:win"),
+                 InlineKeyboardButton("❌ После поражения", callback_data="joke:when:loss")],
+                [InlineKeyboardButton("🤷 Любой исход", callback_data="joke:when:any")]]))
+    elif action == "when" and len(parts) > 2:
+        draft = _joke_draft.get(user.id) or {}
+        if not draft.get("row"):
+            await query.edit_message_text("Начни заново: /joke")
+            return
+        draft.update(occasion=parts[2], stage="text")
+        _joke_draft[user.id] = draft
+        where = (f"начиная с игры {draft['game_label']}" if draft.get("game_label")
+                 else "в ближайшей игре, где он выйдет на площадку")
+        when = {"win": ", если выиграем", "loss": ", если проиграем"}.get(parts[2], "")
+        await query.edit_message_text(
+            f"Пиши фразу для «{draft.get('target', '')}» — прозвучит {where}{when}, "
+            f"один раз. Не попадёт в строку — подождёт следующей игры.\n\n"
             f"Одной строкой, до {player_jokes.MAX_LEN} символов. Её увидит весь чат "
             f"вместе с твоим ником.")
     elif action == "mine":
@@ -795,7 +894,8 @@ async def handle_joke_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             user.id, user.username or "",
             game_source=draft.get("game_source", ""),
             game_id=draft.get("game_id", ""),
-            game_label=draft.get("game_label", ""))
+            game_label=draft.get("game_label", ""),
+            game_date=draft.get("game_date", ""))
         if ok:
             _joke_draft.pop(user.id, None)
             await msg.reply_text(
@@ -2892,6 +2992,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Text([MYSTATS_KEYBOARD_LABEL]),
                                    handle_mystats_button))
     app.add_handler(MessageHandler(filters.Text([FEEDBACK_KEYBOARD_LABEL]), handle_feedback_button))
+    app.add_handler(MessageHandler(filters.Text([MENU_KEYBOARD_LABEL]), handle_menu_button))
     app.add_handler(CommandHandler("profile", handle_my_profile))
     app.add_handler(CommandHandler("season", handle_season))
     app.add_handler(CommandHandler("feedback", handle_feedback))
@@ -2920,6 +3021,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
 
     log.info("Запуск polling...")
     app.run_polling(

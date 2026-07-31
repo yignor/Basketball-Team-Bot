@@ -373,7 +373,8 @@ class SlproManager:
             try:
                 import player_jokes
                 jokes = player_jokes.Jokes(won=(our_s > opp_s), source="slpro",
-                                           game_id=box.game_id)
+                                           game_id=box.game_id,
+                                           game_date=box.game_date)
             except Exception as e:
                 print(f"⚠️ SLPRO: шутки не подгрузились: {e}")
                 jokes = None

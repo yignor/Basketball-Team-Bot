@@ -238,6 +238,27 @@ def format_leaders(box: BoxScore, our_team_id: int,
     def pct(made: int, att: int) -> int:
         return round(made / att * 100) if att else 0
 
+    # Сначала решаем, КОМУ достанутся фразы: иначе они всегда доставались бы
+    # первым строкам блока, а до последних не доходило никогда.
+    if jokes is not None:
+        heroes = []
+        ft = [p for p in ours if p.fta >= 2]
+        two = [p for p in ours if p.fg2a >= 3]
+        three = [p for p in ours if p.fg3a >= 3]
+        if won:
+            if ft:
+                heroes.append(min(ft, key=lambda p: pct(p.ftm, p.fta)))
+            if two:
+                heroes.append(min(two, key=lambda p: pct(p.fg2m, p.fg2a)))
+            if three:
+                heroes.append(min(three, key=lambda p: pct(p.fg3m, p.fg3a)))
+            heroes += [max(ours, key=lambda p: p.tur), max(ours, key=lambda p: p.pf)]
+        else:
+            heroes += [max(ours, key=lambda p: p.pts), max(ours, key=lambda p: p.reb),
+                       max(ours, key=lambda p: p.ast), max(ours, key=lambda p: p.stl),
+                       max(ours, key=lambda p: p.efficiency)]
+        jokes.plan([h.display_name for h in heroes if h and h.display_name])
+
     lines: List[str] = []
     if won:
         lines.append("😅 ЧТО НУЖНО УЛУЧШИТЬ:")

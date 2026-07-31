@@ -113,6 +113,10 @@ class FantasyRunner:
             # перенёсся с прошлой, очки тоже идут — и таблица им нужна.
             participants = [str(r["user_id"]) for r in
                             fantasy.weekly_standings(season["id"], report_week)]
+            # Кто отписался в «Меню → Мои подписки», тому в личку не шлём:
+            # в общий чат таблица всё равно ушла, и она никуда не денется.
+            import subscriptions
+            participants = subscriptions.filter_subscribed(participants, "fantasy")
             sent_dm = await self._send_dms(participants, text, with_fantasy_button=True)
             print(f"📊 «{season['name']}»: таблица в {len(chat_ids)} чат(ов), личка {sent_dm}/{len(participants)}")
         return True

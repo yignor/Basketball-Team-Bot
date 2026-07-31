@@ -469,7 +469,18 @@ CREATE TABLE IF NOT EXISTS player_jokes (
     game_source  TEXT NOT NULL DEFAULT '',  -- slpro | infobasket | '' (любая)
     game_id      TEXT NOT NULL DEFAULT '',  -- '' = на ближайшую игру
     game_label   TEXT NOT NULL DEFAULT '',  -- как показать автору: «02.08 · Атланты»
+    game_date    TEXT NOT NULL DEFAULT '',  -- ISO выбранной игры: с неё фраза «живёт»
     used_at      TEXT NOT NULL DEFAULT ''   -- сработала — больше не появится
+);
+
+-- На что человек подписан лично, в дополнение к общему чату. Хранится по
+-- числовому Telegram id — он вечный, в отличие от ника.
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,             -- team | fantasy_open | fantasy_lock | personal
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_player_jokes_target ON player_jokes(target_row, active);
 
@@ -580,6 +591,7 @@ def init_db() -> None:
         _ensure_column(conn, "player_jokes", "game_id", "TEXT NOT NULL", "''")
         _ensure_column(conn, "player_jokes", "game_label", "TEXT NOT NULL", "''")
         _ensure_column(conn, "player_jokes", "used_at", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "player_jokes", "game_date", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:

@@ -582,10 +582,14 @@ async def send_all(year: int, month: int, dry_run: bool = False) -> int:
         return 2
     bot = Bot(token)
     sent = skipped = empty = 0
+    import subscriptions
     for uid in player_identity.linked_users():
         prefs = personal_report.get_prefs(uid)
         if not personal_report.monthly_file_due(prefs):
             skipped += 1
+            continue
+        if not subscriptions.enabled(uid, "personal"):
+            skipped += 1          # отписался в «Меню → Мои подписки»
             continue
         profiles = [(r["source"], r["player_id"])
                     for r in player_identity.get_identities(uid)]

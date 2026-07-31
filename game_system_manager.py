@@ -2171,6 +2171,15 @@ class GameSystemManager:
 
         return announcement
     
+    @staticmethod
+    def _joke_game_date(game_info: Dict) -> str:
+        """Дата игры в ISO — по ней шутка понимает, «прошла ли уже её игра».
+        В game_info дата лежит в русском формате («27.06.2026»)."""
+        s = str(game_info.get('date') or '').strip()
+        if len(s) == 10 and s[2] == '.' and s[5] == '.':
+            return f"{s[6:]}-{s[3:5]}-{s[:2]}"
+        return s
+
     def format_game_result_message(self, game_info: Dict, game_link: Optional[str] = None, our_team_leaders: Optional[Dict] = None) -> str:
         """Форматирует сообщение с результатами игры, включая лидеров нашей команды"""
         try:
@@ -2282,7 +2291,14 @@ class GameSystemManager:
                     import player_jokes
                     jokes = player_jokes.Jokes(
                         is_victory, source="infobasket",
-                        game_id=game_info.get('game_id') or "")
+                        game_id=game_info.get('game_id') or "",
+                        game_date=self._joke_game_date(game_info))
+                    # Жребий бросаем ДО сборки строк: иначе фразы всегда
+                    # доставались бы первым показателям блока.
+                    anti = our_team_leaders.get('anti_leaders', {}) or {}
+                    pool = anti.values() if is_victory else our_team_leaders.values()
+                    jokes.plan([d.get('name', '') for d in pool
+                                if isinstance(d, dict)])
                 except Exception:
                     jokes = None
 

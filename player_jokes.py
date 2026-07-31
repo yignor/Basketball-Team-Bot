@@ -152,7 +152,7 @@ def upcoming_games(limit: int = 5) -> List[Dict[str, Any]]:
 def add(target_row: int, occasion: str, text: str,
         author_id: Any, author_nick: str = "",
         game_source: str = "", game_id: str = "",
-        game_label: str = "") -> Tuple[bool, str]:
+        game_label: str = "", game_date: str = "") -> Tuple[bool, str]:
     """Добавляет фразу. (получилось, что сказать человеку).
 
     game_id пустой — «на ближайшую игру этого человека»."""
@@ -179,14 +179,17 @@ def add(target_row: int, occasion: str, text: str,
         conn.execute(
             """INSERT INTO player_jokes
                (target_row, occasion, text, author_id, author_nick, created_at,
-                active, game_source, game_id, game_label)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+                active, game_source, game_id, game_label, game_date)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
             (int(target_row), occasion, text.strip(), str(author_id),
              (author_nick or "").lstrip("@"), sheets_cache.now_iso(),
-             game_source, str(game_id or ""), game_label))
+             game_source, str(game_id or ""), game_label, game_date))
         conn.commit()
-    where = f"в игре {game_label}" if game_label else "в ближайшей его игре"
-    return True, f"Готово. Фраза сработает {where} — один раз."
+    where = f"начиная с игры {game_label}" if game_label else "в ближайшей его игре"
+    when = {"win": " и только после победы", "loss": " и только после поражения"}.get(
+        occasion, "")
+    return True, (f"Готово. Фраза прозвучит {where}{when} — один раз. "
+                  f"Не попал в строку — подождёт следующей игры.")
 
 
 def remove(joke_id: int, author_id: Optional[Any] = None) -> bool:
@@ -237,18 +240,33 @@ class Jokes:
     """
 
     def __init__(self, won: Optional[bool], source: str = "", game_id: Any = "",
-                 limit: int = MAX_PER_MESSAGE):
+                 game_date: str = "", limit: int = MAX_PER_MESSAGE):
         self.occasions = ("any",) if won is None else \
             (("win", "any") if won else ("loss", "any"))
         self.source = "slpro" if source == "slpro" else \
             ("infobasket" if source else "")
         self.game_id = str(game_id or "")
+        self.game_date = str(game_date or "")
         self.limit = limit
         self.used = 0
         self.seen: set = set()
+        self.chosen: Optional[set] = None      # заполняет plan()
         self._by_row: Dict[int, List[Dict[str, Any]]] = {}
         self._names: Dict[str, int] = {}
         self._load()
+
+    def plan(self, names: List[str]) -> None:
+        """Кому из перечисленных достанутся фразы.
+
+        Без этого шутки всегда доставались первым строкам — очкам и подборам, —
+        а до перехватов и фолов не доходило никогда. Здесь вызывающий сообщает
+        ВЕСЬ список имён, которые попадут в сообщение, и жребий решает, кто из
+        них получит подпись."""
+        have = [n for n in dict.fromkeys(names) if n and self._row_of(n) is not None]
+        if len(have) <= self.limit:
+            self.chosen = set(have)
+        else:
+            self.chosen = set(random.sample(have, self.limit))
 
     def _load(self) -> None:
         try:
@@ -257,20 +275,14 @@ class Jokes:
             with sheets_cache.get_connection() as conn:
                 for r in conn.execute(
                         f"""SELECT j.id, j.target_row, j.text, j.author_nick,
-                                   j.game_id, j.game_source
+                                   j.game_id, j.game_source, j.game_date
                             FROM player_jokes j
                             WHERE j.active = 1 AND j.used_at = ''
                               AND j.occasion IN ({marks})""",
                         list(self.occasions)):
                     row = dict(r)
-                    # «На эту игру» — точное совпадение источника и id.
-                    # «На ближайшую» — пустой game_id, подходит к любой.
-                    if row["game_id"]:
-                        if not self.game_id or row["game_id"] != self.game_id:
-                            continue
-                        if row["game_source"] and self.source and \
-                                row["game_source"] != self.source:
-                            continue
+                    if not self._eligible(row):
+                        continue
                     self._by_row.setdefault(int(row["target_row"]), []).append(row)
                 if self._by_row:
                     for r in conn.execute(
@@ -283,6 +295,30 @@ class Jokes:
             # Шутки — украшение. Любая беда с базой не должна помешать команде
             # узнать счёт, поэтому молча остаёмся без них.
             self._by_row, self._names = {}, {}
+
+    def _eligible(self, row: Dict[str, Any]) -> bool:
+        """Подходит ли фраза к этой игре.
+
+        Выбранная игра — это «не раньше», а не «только тогда». Человек мог не
+        попасть ни в одну строку (сыграл ровно, лимит на сообщение выбрали
+        другие) — фраза не должна пропасть. Она ждёт следующих его игр, пока не
+        прозвучит. Поэтому: точное совпадение id ИЛИ игра уже прошла."""
+        if not row["game_id"]:
+            return True                       # «на ближайшую» — подходит любая
+        if row["game_source"] and self.source and row["game_source"] != self.source:
+            # Другая лига — но если её игра уже позади, фраза всё равно ждёт.
+            return bool(row["game_date"] and self.game_date
+                        and self.game_date > row["game_date"])
+        if row["game_id"] == self.game_id:
+            return True
+        return bool(row["game_date"] and self.game_date
+                    and self.game_date > row["game_date"])
+
+    def _row_of(self, name: str) -> Optional[int]:
+        row = self._names.get(_norm(name))
+        if row is None and name:
+            row = self._names.get(_norm(name).split(" ")[0])
+        return row if (row is not None and self._by_row.get(row)) else None
 
     def _burn(self, joke_id: int) -> None:
         """Гасим сработавшую фразу. Делаем это в момент выбора, а не после
@@ -300,11 +336,10 @@ class Jokes:
         """« · фраза (с) @ник» для игрока или пустая строка."""
         if self.used >= self.limit or not self._by_row:
             return ""
-        row = self._names.get(_norm(name))
-        if row is None:
-            # Имя из протокола может отличаться от листа («Шлепикас Ромас» /
-            # «Шлепикас Роман») — пробуем по фамилии.
-            row = self._names.get(_norm(name).split(" ")[0] if name else "")
+        # Если жребий брошен (plan), подписываем только выбранных.
+        if self.chosen is not None and name not in self.chosen:
+            return ""
+        row = self._row_of(name)
         if row is None or row in self.seen:
             return ""
         pool = self._by_row.get(row) or []
