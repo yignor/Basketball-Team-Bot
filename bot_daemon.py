@@ -1745,8 +1745,9 @@ async def _prog_send(message, source: str, team_id: str) -> None:
         buf = io.BytesIO(page.encode("utf-8"))
         buf.name = f"razbor-{team_id}-{detail['series'][-1]['game_date']}.html"
         await message.reply_document(
-            buf, caption="Открой в браузере: вкладки по сезону, последней игре, "
-                         "прошлому сезону и сопернику. Внутри — промт для ИИ.")
+            buf, caption="Открой файл и листай вниз: сезон, последняя игра, "
+                         "динамика, состав с тренировками, лига, лидеры соперника. "
+                         "В самом конце — готовый промт для ИИ.")
     except Exception as e:
         log.error(f"HTML-разбор не собрался: {e}")
         await message.reply_text("⚠️ Подробный файл собрать не вышло, "

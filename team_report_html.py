@@ -12,9 +12,16 @@
 сети (или с заблокированным CDN) — отчёт обязан открыться в любом случае.
 Тёмная тема учтена: половина команды читает с телефона вечером.
 
-Вкладки: Обзор · Сезон · Последняя игра · Прошлый сезон · Соперник · Промт.
-Последняя — готовый текст для ИИ: те же цифры в компактном виде и просьба
-разобрать их как аналитик. Пользователь копирует одной кнопкой.
+И БЕЗ ЕДИНОГО СКРИПТА. Встроенный браузер Telegram на телефоне не выполняет JS
+и не даёт переходов — вкладки и якорные ссылки там просто мертвы, отчёт
+открывался на первой странице и дальше не пускал. Поэтому всё лежит одной
+лентой: восемь разделов подряд, крупные заголовки с номерами, оглавление
+сверху обычным текстом. Ничего не прятать за кликом — единственный способ
+быть уверенным, что это откроется у всех.
+
+Разделы: Обзор · Сезон · Последняя игра · Динамика · Состав · Лига ·
+Соперник · Промт для ИИ. Последний — готовый текст для ИИ: те же цифры в
+компактном виде и просьба разобрать их как аналитик.
 """
 
 import html
@@ -240,19 +247,24 @@ def _roster_table(roster: List[Dict[str, Any]],
     if not roster:
         return '<div class="empty">Нет данных по составу.</div>'
     total = (att or {}).get("trainings") or 0
+    # Порядок колонок под телефон: у экрана в 375 точек дюжина столбцов целиком
+    # не помещается, и за краем оказывается то, что стоит справа. Поэтому сразу
+    # за именем идут вклад и тренировки — главное в этой таблице, — а частности
+    # (броски, ±) уезжают вправо, где их не жалко искать прокруткой.
     th = '<th title="был на тренировках за последний месяц">Трен</th>' if total else ""
     rows = "".join(
-        f'<tr><td>{_e(p["name"])}</td><td class="num">{p["games"]}</td>'
+        f'<tr><td>{_e(p["name"])}</td>'
+        f'<td class="num"><b>{p["fp"]}</b></td>'
+        f'{_att_cell(p, total) if total else ""}'
+        f'<td class="num">{p["games"]}</td>'
         f'<td class="num">{p["mins"] or "—"}</td><td class="num">{p["pts"]}</td>'
         f'<td class="num">{p["reb"]}</td><td class="num">{p["ast"]}</td>'
         f'<td class="num">{p["stl"]}</td><td class="num">{p["tur"]}</td>'
         f'<td class="num">{(str(round(p["fg"] * 100)) + "%") if p["fg"] else "—"}</td>'
-        f'<td class="num">{p["plus_minus"]:+g}</td>'
-        f'<td class="num"><b>{p["fp"]}</b></td>'
-        f'{_att_cell(p, total) if total else ""}</tr>' for p in roster)
-    return ('<table><thead><tr><th>Игрок</th><th>И</th><th>Мин</th><th>Очк</th>'
-            '<th>Подб</th><th>Пас</th><th>Пх</th><th>Пот</th><th>Броски</th>'
-            f'<th>±</th><th>ФО</th>{th}</tr></thead>'
+        f'<td class="num">{p["plus_minus"]:+g}</td></tr>' for p in roster)
+    return (f'<table><thead><tr><th>Игрок</th><th>ФО</th>{th}<th>И</th><th>Мин</th>'
+            '<th>Очк</th><th>Подб</th><th>Пас</th><th>Пх</th><th>Пот</th>'
+            '<th>Броски</th><th>±</th></tr></thead>'
             f'<tbody>{rows}</tbody></table>')
 
 
@@ -452,11 +464,17 @@ body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-sy
         BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:16px; }}
 h1 {{ font-size:20px; margin:0 0 2px; }}
 .sub {{ color:var(--muted); font-size:13px; margin-bottom:14px; }}
-.tabs {{ display:flex; gap:6px; overflow-x:auto; padding-bottom:10px; }}
-.tab {{ padding:8px 12px; border:none; border-radius:10px; background:var(--card);
-        color:var(--fg); font:600 14px inherit; cursor:pointer; white-space:nowrap; }}
-.tab.on {{ background:var(--acc); color:#fff; }}
-.pane {{ display:none; }} .pane.on {{ display:block; }}
+/* Одна страница без скриптов: встроенный браузер Telegram не выполняет JS и
+   не даёт переходов, поэтому вкладки и якорные ссылки там мертвы. Разделы
+   идут подряд, ориентир — крупные заголовки с номерами. */
+h2 {{ font-size:17px; margin:26px 0 10px; padding-top:16px;
+      border-top:2px solid var(--line); }}
+h2 .no {{ color:var(--acc); }}
+h2 small {{ display:block; font-size:12px; font-weight:400; color:var(--muted);
+            margin-top:2px; }}
+.toc {{ background:var(--card); border-radius:12px; padding:10px 12px;
+        margin:0 0 6px; font-size:13px; color:var(--muted); }}
+.toc b {{ color:var(--acc); font-weight:700; }}
 .kpis {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px;
          margin:12px 0 18px; }}
 .kpi {{ background:var(--card); border-radius:12px; padding:12px; }}
@@ -495,94 +513,72 @@ tr.me {{ background:color-mix(in srgb, var(--acc) 18%, transparent); font-weight
 ul.ins {{ padding-left:18px; }} ul.ins li {{ margin:6px 0; }}
 .empty {{ color:var(--muted); padding:12px 0; }}
 pre {{ background:var(--card); border-radius:12px; padding:12px; white-space:pre-wrap;
-       word-break:break-word; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }}
-button.copy {{ background:var(--acc); color:#fff; border:none; border-radius:10px;
-               padding:10px 14px; font:600 14px inherit; cursor:pointer; margin-bottom:10px; }}
+       word-break:break-word; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+       user-select:all; -webkit-user-select:all; }}
 .tablewrap {{ overflow-x:auto; }}
+/* Состав — дюжина колонок, на телефон целиком не влезает даже ужатым. Резать
+   колонки не стали (тренеру нужны все), поэтому прямо говорим про прокрутку:
+   молча обрезанная таблица читается как «данных нет». */
+.swipe {{ display:none; color:var(--muted); font-size:12px; margin-top:6px; }}
+/* Телефон: состав — это дюжина колонок, и лучше ужать шрифт, чем заставлять
+   тянуть таблицу вбок пальцем (во встроенном просмотрщике это не всегда
+   работает). Горизонтальная прокрутка остаётся запасным путём. */
+@media (max-width: 460px) {{
+  body {{ padding:10px; }}
+  table {{ font-size:11px; }}
+  th, td {{ padding:5px 2px; }}
+  th:first-child, td:first-child {{ padding-left:0; }}
+  .lead td.num {{ width:44px; }}
+  .swipe {{ display:block; }}
+}}
 </style></head><body>
 <h1>{_e(team)}</h1>
 <div class="sub">Разбор собран ботом · {_e(data.get('generated', ''))}</div>
 
-<div class="tabs">
-  <button class="tab on" data-p="p0">Обзор</button>
-  <button class="tab" data-p="p1">Сезон</button>
-  <button class="tab" data-p="p2">Последняя игра</button>
-  <button class="tab" data-p="p3">Динамика</button>
-  <button class="tab" data-p="p6">Состав</button>
-  <button class="tab" data-p="p7">Лига</button>
-  <button class="tab" data-p="p4">Соперник</button>
-  <button class="tab" data-p="p5">Промт для ИИ</button>
-</div>
+<div class="toc">Всё одной страницей, просто листай вниз:<br>
+<b>1</b> Обзор · <b>2</b> Сезон · <b>3</b> Последняя игра · <b>4</b> Динамика ·
+<b>5</b> Состав и тренировки · <b>6</b> Лига · <b>7</b> Соперник ·
+<b>8</b> Промт для ИИ</div>
 
-<div class="pane on" id="p0">
-  {kpi}
-  <div class="chart"><div class="ct">Выводы</div><ul class="ins">{ins_html}</ul></div>
-  {diff_chart}
-</div>
+<h2><span class="no">1.</span> Обзор</h2>
+{kpi}
+<div class="chart"><div class="ct">Выводы</div><ul class="ins">{ins_html}</ul></div>
+{diff_chart}
 
-<div class="pane" id="p1">
-  {pts_chart}
-  <div class="chart"><div class="ct">Все игры сезона</div>
-    <div class="tablewrap">{_games_table(series, limit=40)}</div></div>
-</div>
+<h2><span class="no">2.</span> Сезон</h2>
+{pts_chart}
+<div class="chart"><div class="ct">Все игры сезона</div>
+  <div class="tablewrap">{_games_table(series, limit=40)}</div></div>
 
-<div class="pane" id="p2">
-  {last_bars or '<div class="empty">Нет данных по последней игре.</div>'}
-</div>
+<h2><span class="no">3.</span> Последняя игра</h2>
+{last_bars or '<div class="empty">Нет данных по последней игре.</div>'}
 
-<div class="pane" id="p3">
-  {('<div class="sub">' + _e(prev_title) + '</div>' + prev_bars) if prev
-   else (split_html or '<div class="empty">Игр пока мало: динамику покажем, '
-                       'когда наберётся хотя бы шесть.</div>')}
-</div>
+<h2><span class="no">4.</span> Динамика</h2>
+{('<div class="sub">' + _e(prev_title) + '</div>' + prev_bars) if prev
+ else (split_html or '<div class="empty">Игр пока мало: динамику покажем, '
+                     'когда наберётся хотя бы шесть.</div>')}
 
-<div class="pane" id="p6">
-  <div class="chart"><div class="ct">Состав: в среднем за игру</div>
-    {att_note}
-    <div class="tablewrap">{_roster_table(data.get('roster') or [], att)}</div></div>
-  {att_extra}
-</div>
+<h2><span class="no">5.</span> Состав</h2>
+<div class="chart"><div class="ct">В среднем за игру</div>
+  {att_note}
+  <div class="tablewrap">{_roster_table(data.get('roster') or [], att)}</div>
+  <div class="swipe">Таблица шире экрана — тяни её вбок пальцем: справа
+    остались броски и ±. Главное (вклад и тренировки) видно сразу.</div></div>
+{att_extra}
 
-<div class="pane" id="p7">
-  <div class="chart"><div class="ct">Турнирная таблица</div>
-    <div class="tablewrap">{_standings_table(data.get('standings') or [],
-                                             data.get('our_team_id', ''))}</div></div>
-  {league_bars}
-</div>
+<h2><span class="no">6.</span> Лига</h2>
+<div class="chart"><div class="ct">Турнирная таблица</div>
+  <div class="tablewrap">{_standings_table(data.get('standings') or [],
+                                           data.get('our_team_id', ''))}</div></div>
+{league_bars}
 
-<div class="pane" id="p4">
-  {lead_html}
-  {h2h_lead_html}
-  <div class="chart"><div class="ct">Встречи с «{_e(opp_name or '—')}»</div>
-    <div class="tablewrap">{h2h_html}</div></div>
-</div>
+<h2><span class="no">7.</span> Соперник<small>{_e(opp_name or '—')}</small></h2>
+{lead_html}
+{h2h_lead_html}
+<div class="chart"><div class="ct">Встречи с «{_e(opp_name or '—')}»</div>
+  <div class="tablewrap">{h2h_html}</div></div>
 
-<div class="pane" id="p5">
-  <button class="copy" onclick="cp()">Скопировать промт</button>
-  <pre id="prompt">{_e(prompt)}</pre>
-</div>
-
-<script>
-for (const t of document.querySelectorAll('.tab')) {{
-  t.onclick = () => {{
-    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
-    document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === t.dataset.p));
-  }};
-}}
-function cp() {{
-  const text = document.getElementById('prompt').textContent;
-  // clipboard API есть не везде (встроенный браузер Telegram, http) — запасной
-  // путь через выделение, иначе кнопка молча ничего не делает.
-  const done = () => {{ const b = document.querySelector('.copy');
-                        b.textContent = 'Скопировано ✓';
-                        setTimeout(() => b.textContent = 'Скопировать промт', 2000); }};
-  if (navigator.clipboard) {{ navigator.clipboard.writeText(text).then(done, sel); }}
-  else sel();
-  function sel() {{
-    const r = document.createRange(); r.selectNodeContents(document.getElementById('prompt'));
-    const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-    try {{ document.execCommand('copy'); done(); }} catch (e) {{}}
-  }}
-}}
-</script>
+<h2><span class="no">8.</span> Промт для ИИ<small>Долгое нажатие по тексту — выделить
+  и скопировать, дальше вставить в любого чат-бота.</small></h2>
+<pre id="prompt">{_e(prompt)}</pre>
 </body></html>"""
