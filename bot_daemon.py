@@ -388,6 +388,10 @@ PAYLOAD_BUDGETS = (8000, 4000, None)      # None — кнопка вообще �
 # задачу без владельца сборщик мусора вправе выкинуть на полпути.
 _side_tasks: set = set()
 
+# Сколько ждать прогрева пула, отвечая человеку. Живая лига укладывается в
+# секунду; всё, что дольше, — уже она недоступна, и ждать её незачем.
+POOL_WAIT_SECONDS = 3.0
+
 
 async def send_bottom_keyboard(message, user, text: str) -> None:
     """Показывает нижнюю клавиатуру, ужимая данные фэнтези, пока Telegram не
@@ -412,16 +416,25 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
     # тёплый — берём готовое, если нет — отдаём клавиатуру без данных и греем
     # в фоне. Иначе одна недоступная лига превращала /start в пятиминутное
     # ожидание, потому что клиент честно вырабатывал все таймауты.
+    with_fantasy_payload = with_fantasy
     if with_fantasy and not fantasy_api.pool_is_warm():
-        log.info("клавиатура: пул фэнтези холодный — отдаю без запасных данных, грею в фоне")
         # Ссылку держим: задачу без владельца сборщик мусора вправе выкинуть
         # на полпути, и прогрев молча не случится.
         task = asyncio.create_task(_warm_fantasy_pool(force=True))
         _side_tasks.add(task)
         task.add_done_callback(_side_tasks.discard)
-        with_fantasy_payload = False
-    else:
-        with_fantasy_payload = with_fantasy
+        # Немного подождать всё же стоит: с живой лигой пул собирается за
+        # секунду, и уходить без запасных данных только потому, что демон
+        # недавно перезапустился, — значит оставить человека с пустой кнопкой
+        # до следующего /start. Не успели за POOL_WAIT — уходим без них,
+        # прогрев доработает в фоне.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=POOL_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+        with_fantasy_payload = fantasy_api.pool_is_warm()
+        if not with_fantasy_payload:
+            log.info("клавиатура: пул фэнтези не успел прогреться — отдаю без запасных данных")
 
     payload: Optional[str] = None
     for budget in PAYLOAD_BUDGETS:
@@ -2550,6 +2563,13 @@ async def on_startup(app: Application) -> None:
 
     global _background_task
     _background_task = asyncio.create_task(_background_loop(app))
+
+    # Пул греем сразу, а не через полминуты первого тика: перезапуск демона —
+    # обычное дело, и ровно в это окно приходят первые /start. Холодный пул в
+    # этот момент означал бы кнопку без запасных данных на ровном месте.
+    _warm = asyncio.create_task(_warm_fantasy_pool(force=True))
+    _side_tasks.add(_warm)
+    _warm.add_done_callback(_side_tasks.discard)
 
     # Фэнтези-API в том же event loop (localhost; наружу — Tailscale Funnel).
     global _fantasy_runner
