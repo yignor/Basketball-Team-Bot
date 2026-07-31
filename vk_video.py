@@ -56,11 +56,15 @@ def groups() -> List[str]:
     out: List[str] = []
     try:
         import config_sheet
+        from enhanced_duplicate_protection import VK_TYPE_ALIASES
         rows = config_sheet.split(sheets_cache.get_config_rows() or [])[config_sheet.GAME]
         for row in rows:
             cells = [str(c or "").strip() for c in list(row) + [""] * 3]
-            if cells[0].upper() != "VK":
+            # Тип пишут и латиницей, и кириллицей («вк») — принимаем оба.
+            if cells[0].upper() not in VK_TYPE_ALIASES:
                 continue
+            # Имя группы кладут то в «ИД», то в «ИД команды» — обе колонки
+            # выглядят подходящими. Берём ту, что заполнена.
             val = cells[1] or cells[2]
             if val and val.upper() not in ("ИД", "ID"):
                 out.append(val)
