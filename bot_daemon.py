@@ -51,11 +51,20 @@ ADMIN_USER_IDS    = {x.strip() for x in os.getenv("ADMIN_USER_IDS", os.getenv("A
 
 DAEMON_LOG_PATH = os.getenv("DAEMON_LOG_PATH", "/var/log/basketball-bot/daemon.log")
 
-# Mini App фэнтези без туннеля: фронт — статикой на GitHub Pages
-# (FANTASY_WEBAPP_URL), данные (пул/состав/таблица) бот кладёт прямо в URL при
-# открытии, выбранный состав приходит обратно через Telegram sendData (сервер
-# наружу не светим). Открывается reply-кнопкой (sendData работает только так).
+# Mini App фэнтези: фронт — статикой на GitHub Pages (FANTASY_WEBAPP_URL),
+# данные и сохранение состава — через живой API (Cloudflare-туннель на
+# api.one4two.ru, запасной путь — Tailscale Funnel).
 FANTASY_WEBAPP_URL = os.getenv("FANTASY_WEBAPP_URL", "").strip()
+
+# ЗАПАСНОЙ ВХОД (по умолчанию выключен, 31.07.2026). Пока туннеля не было, у
+# части игроков живой API не открывался, и приложение работало «чёрным ходом»:
+# reply-кнопка с данными прямо в URL (#d=payload) и сохранение состава через
+# Telegram sendData, минуя сервер. С поднятым туннелем это лишняя дверь —
+# лишний вход, лишние килобайты в клавиатуре и лишний способ разойтись с базой.
+# Включается обратно одной переменной окружения, если туннель когда-нибудь ляжет:
+#   FANTASY_FALLBACK_BUTTON=1
+FANTASY_FALLBACK_BUTTON = os.getenv("FANTASY_FALLBACK_BUTTON", "").strip().lower() \
+    in ("1", "true", "yes", "on")
 
 
 _WEBAPP_VERSION = str(int(time.time()))
@@ -354,13 +363,13 @@ FEEDBACK_KEYBOARD_LABEL = "💬 Написать админам"
 def _bottom_keyboard(payload: str = "", is_admin: bool = False,
                      with_fantasy: bool = True, with_reports: bool = False,
                      with_personal: bool = False) -> ReplyKeyboardMarkup:
-    """Нижняя клавиатура: фэнтези, обратная связь и — админу — панель.
+    """Нижняя клавиатура: обратная связь, закрытые разделы и — админу — панель.
 
-    Фэнтези открывается как web_app: только reply-кнопка даёт sendData, поэтому
-    состав сохраняется через Telegram и не зависит от живого API. Данные едут в
-    самом URL (#d=payload), приватно, в личном чате игрока."""
+    Кнопки фэнтези тут по умолчанию НЕТ: приложение открывается кнопкой меню
+    слева от поля ввода. Reply-кнопка была запасным входом на время, пока у
+    части игроков не работал живой API (см. FANTASY_FALLBACK_BUTTON)."""
     rows: List[List[KeyboardButton]] = []
-    if with_fantasy and _webapp_url():
+    if with_fantasy and FANTASY_FALLBACK_BUTTON and _webapp_url():
         url = _webapp_url() + ("#d=" + payload if payload else "")
         rows.append([KeyboardButton(FANTASY_KEYBOARD_LABEL, web_app=WebAppInfo(url=url))])
     rows.append([KeyboardButton(FEEDBACK_KEYBOARD_LABEL)])
@@ -394,28 +403,28 @@ POOL_WAIT_SECONDS = 3.0
 
 
 async def send_bottom_keyboard(message, user, text: str) -> None:
-    """Показывает нижнюю клавиатуру, ужимая данные фэнтези, пока Telegram не
-    примет. Последняя ступень — без данных: живой вход у большинства работает,
-    и это лучше, чем клавиатура, которая не отправилась вовсе (так и было
-    с 26.07, пока payload не дорос до 26 КБ)."""
+    """Показывает нижнюю клавиатуру.
+
+    Пока был включён запасной вход, сюда упаковывались данные фэнтези, и
+    ступени бюджета нужны были потому, что Telegram отвергает слишком длинную
+    клавиатуру. С выключенным FANTASY_FALLBACK_BUTTON ничего этого не
+    происходит: кнопки фэнтези в клавиатуре нет, payload не собирается, и
+    /start отвечает мгновенно."""
     is_admin = _is_admin(user)
     uid = str(user.id)
     # Закрытые разделы — по выданному доступу, у админа оба.
     with_reports = _can_see_reports(user)
     with_personal = _can_see_personal(user)
-    # Кнопка фэнтези — только игрокам команды: остальным она бесполезна.
+    # Запасная кнопка фэнтези — только игрокам команды: остальным бесполезна.
     with_fantasy = False
-    if FANTASY_WEBAPP_URL and _webapp_url():
+    if FANTASY_FALLBACK_BUTTON and FANTASY_WEBAPP_URL and _webapp_url():
         try:
             with_fantasy = fantasy_api._is_team_member(uid, user.username or "")
         except Exception as e:
             log.warning(f"проверка состава для клавиатуры: {e}")
 
-    # Запасные данные в кнопке собираются из пула, а пул — это поход в API двух
-    # лиг. Человек ждать этого не должен: пул греет фоновый цикл, и если он
-    # тёплый — берём готовое, если нет — отдаём клавиатуру без данных и греем
-    # в фоне. Иначе одна недоступная лига превращала /start в пятиминутное
-    # ожидание, потому что клиент честно вырабатывал все таймауты.
+    # Запасные данные в кнопке собираются из пула. Пул греет фоновый цикл; если
+    # он холодный (демон только поднялся) — подождём немного и уйдём без них.
     with_fantasy_payload = with_fantasy
     if with_fantasy and not fantasy_api.pool_is_warm():
         # Ссылку держим: задачу без владельца сборщик мусора вправе выкинуть
@@ -423,11 +432,6 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
         task = asyncio.create_task(_warm_fantasy_pool(force=True))
         _side_tasks.add(task)
         task.add_done_callback(_side_tasks.discard)
-        # Немного подождать всё же стоит: с живой лигой пул собирается за
-        # секунду, и уходить без запасных данных только потому, что демон
-        # недавно перезапустился, — значит оставить человека с пустой кнопкой
-        # до следующего /start. Не успели за POOL_WAIT — уходим без них,
-        # прогрев доработает в фоне.
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=POOL_WAIT_SECONDS)
         except asyncio.TimeoutError:
@@ -468,9 +472,10 @@ async def _send_main_menu(update: Update) -> None:
     log.error("Не удалось отправить админ-панель после 3 попыток")
 
 
-PLAYER_MENU_TEXT = ("🏀 Привет! Кнопки внизу экрана — всегда под рукой:\n\n"
-                    "• Фэнтези — собрать состав, посмотреть таблицу и топ игроков\n"
-                    "• Написать админам — идея, баг, пожелание\n\n"
+PLAYER_MENU_TEXT = ("🏀 Привет!\n\n"
+                    "• 🏆 Фэнтези — кнопка «Фэнтези» слева от поля ввода: "
+                    "собрать состав, таблица, топ игроков\n"
+                    "• 💬 Написать админам — кнопка внизу экрана\n\n"
                     "Опросы на игры и тренировки я присылаю сам в общий чат.")
 
 
