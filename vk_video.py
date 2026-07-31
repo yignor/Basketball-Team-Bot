@@ -41,6 +41,12 @@ API_VERSION = "5.199"
 WINDOW_DAYS = 2
 WALL_COUNT = 100
 
+# Оповещаем только о СВЕЖИХ играх. Первый проход разбирает всю историю разом,
+# и без этого порога чат получает пачку уведомлений о матчах месячной давности
+# — ровно так и вышло при первом запуске. Ссылки к старым играм всё равно
+# сохраняются, просто молча: в отчёте и в сообщении о результате они появятся.
+ANNOUNCE_MAX_AGE_DAYS = 3
+
 
 def token() -> str:
     return (os.getenv("VK_TOKEN") or os.getenv("VK_SERVICE_TOKEN") or "").strip()
@@ -191,6 +197,20 @@ def games_without_video(limit: int = 20) -> List[Dict[str, Any]]:
                 ORDER BY game_date DESC LIMIT ?""", ours + ours + [limit])]
 
 
+def is_fresh(game_date: str, today: Optional[Any] = None) -> bool:
+    """Стоит ли вообще шуметь об этой записи.
+
+    Запись игры интересна, пока игру помнят. Через неделю оповещение — это уже
+    не новость, а спам, и особенно неприятно, когда таких сразу четыре."""
+    import datetime as _dt
+    try:
+        day = _dt.date.fromisoformat(str(game_date))
+    except ValueError:
+        return False
+    now = today or _dt.date.today()
+    return 0 <= (now - day).days <= ANNOUNCE_MAX_AGE_DAYS
+
+
 def _announce_text(game: Dict[str, Any], link: str) -> str:
     """Текст оповещения о появившейся записи."""
     d = str(game.get("game_date") or "")
@@ -260,7 +280,9 @@ async def sync(limit: int = 20, bot: Any = None,
             continue
         out["found"] += 1
         print(f"📹 VK: {g['home_name']} — {g['guest_name']} ({g['game_date']}): {link}")
-        if bot is not None:
+        if bot is not None and not is_fresh(g["game_date"]):
+            print(f"   игра старше {ANNOUNCE_MAX_AGE_DAYS} дней — ссылку сохранил молча")
+        elif bot is not None:
             try:
                 res = await announce(bot, g, link, chat_ids, topic_id)
                 out["notified"] += res["chat"] + res["team"] + res["players"]
