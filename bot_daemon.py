@@ -710,17 +710,27 @@ def _is_member(user) -> bool:
         return bool(_is_admin(user))
 
 
-# Подписки — следующий шаг. Пока честная заглушка: кнопка есть, но обещает
-# не работу, а сроки. Пустой экран «в разработке» злит; шкала хотя бы
-# показывает, что дело движется.
-SUBS_STUB = ("🔔 Мои подписки\n\n"
-             "Скоро здесь можно будет включать и выключать:\n"
-             "• результаты игр в личку\n"
-             "• таблицу фэнтези по понедельникам\n"
-             "• личную статистику и месячный отчёт\n\n"
-             "Готовность:\n"
-             "▓▓▓▓▓▓▒▒▒▒  60%\n\n"
-             "Хранение и выключатели уже готовы, осталось собрать сам экран.")
+def _subs_markup(uid: Any) -> InlineKeyboardMarkup:
+    import subscriptions
+    state = subscriptions.all_of(uid)
+    rows = [[InlineKeyboardButton(f"{'✅' if state[k] else '🚫'} {title}",
+                                  callback_data=f"menu:sub:{k}")]
+            for k, title in subscriptions.KINDS.items()]
+    rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _subs_text(uid: Any) -> str:
+    import subscriptions
+    state = subscriptions.all_of(uid)
+    lines = ["🔔 Мои подписки", "",
+             "Нажми, чтобы включить или выключить. В общий чат всё приходит "
+             "как обычно — это только про личку.", ""]
+    for kind, title in subscriptions.KINDS.items():
+        lines.append(f"{'✅' if state[kind] else '🚫'} {title}")
+        lines.append(f"    {subscriptions.HINTS[kind]}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -750,8 +760,14 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         text, markup = _joke_menu(user.id, _is_admin(user))
         await query.edit_message_text(text, reply_markup=markup)
     elif what == "subs":
-        await query.edit_message_text(SUBS_STUB, reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Назад", callback_data="menu:main")]]))
+        await query.edit_message_text(_subs_text(user.id),
+                                      reply_markup=_subs_markup(user.id))
+    elif what == "sub" and len(parts) > 2:
+        import subscriptions
+        now_on = subscriptions.toggle(user.id, parts[2])
+        await query.answer("Включено" if now_on else "Выключено")
+        await query.edit_message_text(_subs_text(user.id),
+                                      reply_markup=_subs_markup(user.id))
     elif what == "feedback":
         _awaiting_feedback.add(user.id)
         await query.edit_message_text(FEEDBACK_ASK)

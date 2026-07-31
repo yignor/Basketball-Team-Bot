@@ -208,6 +208,16 @@ class NotificationManager:
             self.sent_game_result_notifications.add(notification_id)
             self._save_sent_notifications()
             logger.info("✅ Отправлено уведомление о результате игры")
+
+            # Подписчикам — в личку. Подписка выключена по умолчанию: это для
+            # тех, кто не сидит в общем чате, а не дубль для всей команды.
+            try:
+                import subscriptions
+                dm = await subscriptions.deliver(bot, "team", message)
+                if dm:
+                    logger.info(f"✅ Результат отправлен в личку: {dm}")
+            except Exception as e:
+                logger.warning(f"Рассылка результата подписчикам не прошла: {e}")
             
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления о результате игры: {e}")

@@ -413,6 +413,16 @@ class SlproManager:
         if not messages:
             return False
 
+        # Подписчикам — в личку. По умолчанию выключено: это для тех, кто не
+        # сидит в общем чате, а не дубль для всей команды.
+        try:
+            import subscriptions
+            dm = await subscriptions.deliver(self.bot, "team", text)
+            if dm:
+                print(f"✅ SLPRO: результат в личку подписчикам — {dm}")
+        except Exception as e:
+            print(f"⚠️ SLPRO: рассылка подписчикам не прошла: {e}")
+
         duplicate_protection.add_record(
             DT_RESULT, sid, status="ОТПРАВЛЕН",
             additional_data=f"{our} {our_s}:{opp_s} {opp}",

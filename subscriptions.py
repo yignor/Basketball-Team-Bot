@@ -29,6 +29,16 @@ KINDS = {
     "personal": "📊 Личная статистика и месячный отчёт",
 }
 
+# Что включено, пока человек ничего не трогал.
+#
+# Фэнтези и личная статистика приходили и раньше — выключить их было нельзя,
+# поэтому оставляем как было: подписан, пока не отписался.
+#
+# А вот результаты в личку — НОВОЕ. Включи их по умолчанию, и вся команда
+# внезапно начнёт получать дубль того, что и так видит в общем чате. Такие
+# вещи включает человек сам.
+DEFAULTS = {"team": False, "fantasy": True, "personal": True}
+
 # Пояснение под каждым тумблером — человеку должно быть понятно, от чего он
 # отписывается, до того как отпишется.
 HINTS = {
@@ -39,13 +49,13 @@ HINTS = {
 
 
 def enabled(user_id: Any, kind: str) -> bool:
-    """Подписан ли. Нет записи — да: по умолчанию всё включено."""
+    """Подписан ли. Нет записи — берём значение по умолчанию для этого вида."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             "SELECT enabled FROM subscriptions WHERE user_id = ? AND kind = ?",
             (str(user_id), kind)).fetchone()
-    return True if row is None else bool(row["enabled"])
+    return DEFAULTS.get(kind, True) if row is None else bool(row["enabled"])
 
 
 def all_of(user_id: Any) -> Dict[str, bool]:
@@ -86,11 +96,37 @@ def filter_subscribed(user_ids: List[Any], kind: str) -> List[str]:
 
 
 def subscribers(kind: str) -> List[str]:
-    """Кому слать результаты в личку: все, кто когда-либо запускал бота и не
-    отписался. Список нарочно строим от bot_users, а не от листа «Игроки»:
-    подписка — про человека, а не про игровой статус."""
+    """Кому слать в личку.
+
+    Для видов, выключенных по умолчанию (результаты игр), это ровно те, кто
+    подписался явно — читаем прямо из таблицы. Для включённых по умолчанию —
+    все, кто запускал бота и не отписался. Список строим от bot_users, а не от
+    листа «Игроки»: подписка про человека, а не про игровой статус."""
     sheets_cache.init_db()
+    if not DEFAULTS.get(kind, True):
+        with sheets_cache.get_connection() as conn:
+            return [str(r["user_id"]) for r in conn.execute(
+                "SELECT user_id FROM subscriptions WHERE kind = ? AND enabled = 1",
+                (kind,))]
     with sheets_cache.get_connection() as conn:
         known = [str(r["telegram_id"]) for r in conn.execute(
             "SELECT telegram_id FROM bot_users WHERE telegram_id != ''")]
     return filter_subscribed(known, kind)
+
+
+async def deliver(bot: Any, kind: str, text: str,
+                  parse_mode: Optional[str] = "HTML") -> int:
+    """Разослать текст подписчикам в личку. Возвращает, сколько дошло.
+
+    Ошибка у одного (закрыл личку, заблокировал бота) не должна ронять
+    рассылку остальным — поэтому каждый в своём try."""
+    sent = 0
+    for uid in subscribers(kind):
+        try:
+            await bot.send_message(chat_id=int(uid), text=text,
+                                   parse_mode=parse_mode,
+                                   disable_web_page_preview=True)
+            sent += 1
+        except Exception as e:
+            print(f"⚠️ Подписка «{kind}»: не доставлено {uid} — {e}")
+    return sent
