@@ -260,6 +260,20 @@ def _norm(text: str) -> str:
     return " ".join((text or "").lower().replace("ё", "е").split())
 
 
+def _birth_key(text: str) -> str:
+    """Дата рождения к одному виду.
+
+    SLPRO отдаёт «1993-05-17», Инфобаскет — «17.05.1993». Пока сравнивали
+    строки как есть, один и тот же человек в двух лигах никогда не совпадал —
+    и склейка по дате между лигами не срабатывала вообще."""
+    s = (text or "").strip()
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    if len(s) == 10 and s[2] == "." and s[5] == ".":
+        return f"{s[6:]}-{s[3:5]}-{s[:2]}"
+    return s
+
+
 def detect_same_person(people: List[Dict[str, Any]], source: str,
                        team_id: str) -> List[Tuple[str, str]]:
     """Пары id, за которыми стоит один человек.
@@ -273,7 +287,7 @@ def detect_same_person(people: List[Dict[str, Any]], source: str,
     отдаём только пары идентификаторов."""
     by_birth: Dict[str, List[Dict[str, Any]]] = {}
     for p in people:
-        birth = (p.get("birth") or "").strip()
+        birth = _birth_key(p.get("birth") or "")
         if birth and p.get("name"):
             by_birth.setdefault(birth, []).append(p)
     pairs: List[Tuple[str, str]] = []
@@ -297,6 +311,40 @@ def detect_same_person(people: List[Dict[str, Any]], source: str,
                                   f"{pref}:{team_id}:{b['player_id']}"))
                     log.info(f"качалка: {a['name']} и {b['name']} ({birth}) — "
                              f"один человек, склеиваю")
+    return pairs
+
+
+def detect_across_leagues(by_team: Dict[str, List[Dict[str, Any]]]) -> List[Tuple[str, str]]:
+    """Один человек в РАЗНЫХ лигах: Farm в SLPRO и основа в Инфобаскете — это
+    часто одни и те же люди, и лиги пишут их по-разному («Шлепикас Роман» и
+    «Ромас Шлепикас»). Тут склейка держится на дате рождения, а имя нужно лишь
+    чтобы не слепить двух однодневок: совпасть должна фамилия или имя.
+
+    by_team: {"source:team_id" -> [{player_id, name, birth}]}."""
+    flat: List[Tuple[str, str, Dict[str, Any]]] = []
+    for key, people in by_team.items():
+        source, team_id = key.split(":", 1)
+        for p in people:
+            if p.get("name") and _birth_key(p.get("birth") or ""):
+                flat.append((source, team_id, p))
+    pairs: List[Tuple[str, str]] = []
+    for i in range(len(flat)):
+        for j in range(i + 1, len(flat)):
+            (sa, ta, a), (sb, tb, b) = flat[i], flat[j]
+            if sa == sb:
+                continue                      # внутри лиги — другая функция
+            if _birth_key(a["birth"]) != _birth_key(b["birth"]):
+                continue
+            na, nb = set(_norm(a["name"]).split()), set(_norm(b["name"]).split())
+            # Порядок «фамилия имя» у лиг разный, поэтому сравниваем множества
+            # слов: хотя бы одно должно совпасть точно.
+            if not (na & nb):
+                continue
+            pa = "slpro" if sa == "slpro" else "ib"
+            pb = "slpro" if sb == "slpro" else "ib"
+            pairs.append((f"{pa}:{ta}:{a['player_id']}", f"{pb}:{tb}:{b['player_id']}"))
+            log.info(f"качалка: {a['name']} ({sa}) и {b['name']} ({sb}) — "
+                     f"один человек по дате рождения, склеиваю")
     return pairs
 
 
@@ -369,12 +417,16 @@ async def fill_missing_names(limit: int = 40) -> int:
     # протокола ↔ действующий из заявки» — самый частый случай, и увидеть её
     # можно только в общем списке.
     merged = 0
+    full: Dict[str, List[Dict[str, Any]]] = {}
     for t in teams:
         people = list(_roster_cache.get(f"{t['source']}:{t['team_id']}") or [])
         people += extra.get(t["source"], [])
+        full[f"{t['source']}:{t['team_id']}"] = people
         pairs = detect_same_person([p for p in people if p.get("birth")],
                                    t["source"], t["team_id"])
         merged += _store_pairs(pairs)
+    # И между лигами: Farm в SLPRO и основа в Инфобаскете — во многом одни люди.
+    merged += _store_pairs(detect_across_leagues(full))
     if merged:
         log.info(f"качалка: склеено пар «это один человек»: {merged}")
     return got

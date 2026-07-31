@@ -662,7 +662,10 @@ class EnhancedGameParser:
             # Извлекаем основные данные игрока
             first_name = player_data.get('FirstNameRu', '')
             last_name = player_data.get('LastNameRu', '')
-            player_name = f"{first_name} {last_name}".strip()
+            # ФАМИЛИЯ ИМЯ — так и в листе «Игроки», и у SLPRO, и во всех
+            # отчётах. Инфобаскет отдаёт наоборот, и один человек выглядел
+            # в сообщениях двумя разными («Ромас Шлепикас» / «Шлепикас Роман»).
+            player_name = f"{last_name} {first_name}".strip()
             
             if not player_name or player_name == ' ':
                 return None
