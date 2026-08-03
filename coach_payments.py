@@ -438,13 +438,22 @@ def ensure_payment_columns(spreadsheet) -> List[str]:
         return []
     ws = spreadsheet.worksheet(sheets_cache.PLAYERS_SHEET_NAME)
     header = ws.row_values(1)
+    missing = [t for t in (sheets_cache.PLAYERS_PAY_SEASON_HEADER,
+                           sheets_cache.PLAYERS_PAY_GAME_HEADER)
+               if t not in header]
+    if not missing:
+        return []
+    # Лист заведён ровно под свои столбцы, и записи в тринадцатый Google
+    # отвечает «exceeds grid limits» — сетку надо сначала расширить.
+    need = len(header) + len(missing)
+    have = int(getattr(ws, "col_count", 0) or 0)
+    if have and need > have:
+        ws.add_cols(need - have)
     added = []
-    for title in (sheets_cache.PLAYERS_PAY_SEASON_HEADER,
-                  sheets_cache.PLAYERS_PAY_GAME_HEADER):
-        if title not in header:
-            header.append(title)
-            ws.update_cell(1, len(header), title)
-            added.append(title)
+    for title in missing:
+        header.append(title)
+        ws.update_cell(1, len(header), title)
+        added.append(title)
     if added:
         logger.info("В листе «Игроки» добавлены столбцы: %s", ", ".join(added))
     return added
