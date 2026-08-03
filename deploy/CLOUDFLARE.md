@@ -40,6 +40,38 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cloudflared-api
 ```
 
+## Если домен отдаёт 502/530
+
+Смотреть надо не на «жив ли сервис», а на **код ошибки в теле ответа**:
+
+```bash
+curl -s https://api.one4two.ru/health | grep -o 'error code: [0-9]*'
+```
+
+- **1033** — Cloudflare не нашёл туннель для этого имени. Сам туннель при этом
+  может быть в полном порядке (`Registered tunnel connection` в логе, запросы
+  до него просто не доходят). Значит DNS-запись `api.one4two.ru` смотрит на
+  ДРУГОЙ туннель — например, пересоздали туннель, а CNAME остался со старым
+  UUID. Лечится повторной привязкой имени (нужен `~/.cloudflared/cert.pem`,
+  он появляется после `cloudflared tunnel login`):
+
+  ```bash
+  sudo cloudflared tunnel list                       # какой UUID у pullup-api
+  sudo cloudflared tunnel route dns --overwrite-dns pullup-api api.one4two.ru
+  sudo systemctl restart cloudflared-api
+  ```
+
+  То же самое руками: в панели Cloudflare DNS → `api` → CNAME →
+  `<UUID>.cfargotunnel.com`, Proxied (оранжевое облако).
+
+- **1016 / «no recent network activity»** в логе cloudflared — не проходит QUIC
+  (UDP/7844). В конфиге для этого стоит `protocol: http2`: тот же TCP/443, что
+  и обычный HTTPS. Проверено 03.08.2026 — с QUIC туннель регистрировался и
+  тут же отваливался.
+
+Пока домен лежит, приложение работает: фронт сам перебирает двери и уходит на
+Tailscale Funnel. Это не авария, но запасная дверь остаётся одна.
+
 ## Проверка
 
 ```bash
