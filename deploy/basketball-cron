@@ -6,15 +6,19 @@ LOG=/var/log/basketball-bot
 
 # ── Ежедневные задачи ────────────────────────────────────────────────────────
 
-# Daily Bot: игры, опросы, анонсы — каждые 3 часа (быстрее ловим смену
-# соперника/переприсвоение game_id лигой, а не раз в сутки)
-5 */3 * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
+# Daily Bot: игры, опросы, анонсы.
+# Раз в три часа было слишком редко: анонс на игру мог уйти через два часа
+# после старта, а очки фэнтези за вечерний матч появлялись к ночи. Всё это
+# идемпотентно (дедуп по service_records), поэтому частый запуск ничего не
+# дублирует — он только сокращает задержку. Минуты разведены, чтобы три
+# процесса не лезли в чужие API одновременно.
+*/15 * * * * botuser cd $BOT_DIR && $VENV run_game_system.py >> $LOG/game_system.log 2>&1
 
-# SLPRO (Pull Up Farm): опросы/анонсы/результаты — каждые 3 часа
-20 */3 * * * botuser cd $BOT_DIR && $VENV run_slpro_monitor.py >> $LOG/slpro.log 2>&1
+# SLPRO (Pull Up Farm): опросы/анонсы/результаты — каждые 15 минут
+5-59/15 * * * * botuser cd $BOT_DIR && $VENV run_slpro_monitor.py >> $LOG/slpro.log 2>&1
 
-# Фэнтези: выкачка статистики завершённых игр — каждые 3 часа
-35 */3 * * * botuser cd $BOT_DIR && $VENV run_fantasy.py --only ingest >> $LOG/fantasy.log 2>&1
+# Фэнтези: выкачка статистики завершённых игр — каждые 20 минут
+10-59/20 * * * * botuser cd $BOT_DIR && $VENV run_fantasy.py --only ingest >> $LOG/fantasy.log 2>&1
 
 # Фэнтези: понедельничный подсчёт + рассылка таблицы — пн 09:00 МСК (06:00 UTC)
 0 6 * * 1 botuser cd $BOT_DIR && $VENV run_fantasy.py --only weekly >> $LOG/fantasy.log 2>&1
