@@ -5,22 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-# Туннель pullup-api заведён В ПАНЕЛИ Cloudflare, а такой туннель управляется
-# оттуда же: маршруты (api.one4two.ru -> http://localhost:8081) живут на
-# стороне Cloudflare, а коннектор должен подключаться ТОКЕНОМ. С файлом
-# credentials он тоже подключается — в логе честные «Registered tunnel
-# connection», — но панель показывает Status: Down, Active replicas: 0, а
-# домен отдаёт 1033 «Cloudflare Tunnel error»: маршрутизировать запрос
-# некуда. Диагноз 03.08.2026, до этого сутки искали проблему не там.
+# Туннель pullup-api — ЛОКАЛЬНО УПРАВЛЯЕМЫЙ: маршруты живут в
+# /etc/cloudflared/config.yml, панель их только показывает («This tunnel is
+# locally managed»). Поэтому --config обязателен: без него коннектор
+# подключается, но правил маршрутизации у него нет, и домен отдаёт 1033
+# «Cloudflare Tunnel error». На токен такой туннель переводить нельзя — токен
+# для тех, что заведены в панели (проверено 03.08.2026, потеряли на этом день).
 #
-# Токен лежит в /etc/cloudflared/token (root:root, 600) строкой
-#   TUNNEL_TOKEN=eyJhIjoi...
-# Взять его: панель -> Networking -> Tunnels -> pullup-api -> команда установки.
-# В юните его держать нельзя: файл юнита читается всеми.
-EnvironmentFile=/etc/cloudflared/token
-# --protocol http2: QUIC (UDP/7844) у провайдера не живёт, туннель
-# регистрируется и тут же отваливается с «no recent network activity».
-ExecStart=/usr/local/bin/cloudflared --no-autoupdate --protocol http2 tunnel run
+# В самом config.yml стоит protocol: http2 — QUIC (UDP/7844) у провайдера не
+# живёт: туннель регистрируется и тут же отваливается с «no recent network
+# activity».
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
 Restart=always
 RestartSec=5
 User=root

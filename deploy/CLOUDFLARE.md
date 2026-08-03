@@ -54,36 +54,28 @@ curl -s https://api.one4two.ru/health | grep -o 'error code: [0-9]*'
   надо на страницу туннеля в панели: **Status: Down, Active replicas: 0** при
   живом логе на сервере — это и есть диагноз.
 
-  Причина (03.08.2026): туннель `pullup-api` заведён В ПАНЕЛИ, а такой туннель
-  управляется оттуда — маршруты хранятся у Cloudflare, и коннектор обязан
-  подключаться **токеном**. С парой `config.yml` + `credentials-file` коннектор
-  подключается к edge, но панель его не видит и маршрут не применяется.
+  **Первым делом посмотреть на вкладку Routes страницы туннеля.** Там написано,
+  кто хозяин маршрутов, и от этого зависит всё:
 
-  Лечение — перевести сервис на токен:
+  - **«This tunnel is locally managed»** — наш случай. Маршруты берутся из
+    `/etc/cloudflared/config.yml`, панель их только показывает и менять не
+    даёт. Значит коннектор ОБЯЗАН запускаться с `--config`; без него он
+    подключается к edge, но правил маршрутизации у него нет — и домен отдаёт
+    1033. **Токен такому туннелю не подходит**: он для тех, что заведены в
+    панели. Проверять так:
 
-  ```bash
-  # 1. Токен: панель -> Networking -> Tunnels -> pullup-api -> команда установки,
-  #    оттуда длинная строка eyJhIjoi... Скопировать её ТОЛЬКО на сервер.
-  sudo install -m 600 /dev/null /etc/cloudflared/token
-  sudo nano /etc/cloudflared/token       # одна строка: TUNNEL_TOKEN=eyJhIjoi...
+    ```bash
+    ps -eo cmd | grep '[c]loudflared'    # должен быть --config /etc/cloudflared/config.yml
+    ```
 
-  # 2. Юнит уже умеет читать этот файл
-  sudo cp /opt/basketball-bot/deploy/cloudflared-api.service /etc/systemd/system/
-  sudo systemctl daemon-reload && sudo systemctl restart cloudflared-api
-  ```
+  - Если бы туннель был заведён в панели, всё наоборот: маршруты настраиваются
+    там же, а коннектор подключается токеном (`TUNNEL_TOKEN` в
+    `/etc/cloudflared/token`, 600).
 
-  Проверить на вкладке **Routes** страницы туннеля, что `api.one4two.ru`
-  указывает на `http://localhost:8081`. Через полминуты панель должна показать
-  Status: Healthy и Active replicas: 1.
-
-  Если туннель, наоборот, локальный (создан через `cloudflared tunnel create`),
-  то 1033 значит, что DNS смотрит на другой UUID, и лечится это так:
-
-  ```bash
-  sudo cloudflared tunnel route dns --overwrite-dns pullup-api api.one4two.ru
-  ```
-
-  (нужен `~/.cloudflared/cert.pem` — появляется после `cloudflared tunnel login`).
+  История 03.08.2026: увидели 1033, приняли туннель за панельный, перевели на
+  токен — стало только хуже, потому что вместе с токеном коннектор потерял
+  локальный ingress. Вернули `--config` — заработало. День потерян на том, что
+  не посмотрели на эту надпись сразу.
 
 - **1016 / «no recent network activity»** в логе cloudflared — не проходит QUIC
   (UDP/7844). В конфиге для этого стоит `protocol: http2`: тот же TCP/443, что
