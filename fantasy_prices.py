@@ -348,42 +348,63 @@ def _remember(source: str, game_id: str, changes: List[Dict[str, Any]]) -> None:
         conn.commit()
 
 
-def history(limit_games: int = 12) -> List[Dict[str, Any]]:
-    """Движения цен по играм, свежие первыми.
+# С этого дня пересчёт запоминает движения цен. Игры раньше него в истории
+# показываем, но честно говорим: изменения тогда не записывались. Восстановить
+# их нечем — старых цен у нас нигде не сохранилось.
+HISTORY_SINCE = "2026-08-03"
 
-    [{source, game_id, date, league, opponent, changes: [{row, ref, old, new,
-    old_rank, new_rank, reason}]}]. ФИО тут нет — его подставляет тот, кто
-    показывает (у нас на диске имён не бывает)."""
+
+def history(teams: Optional[List[Tuple[str, str]]] = None,
+            limit_games: int = 15) -> List[Dict[str, Any]]:
+    """Игры наших команд и что после каждой стало с ценами, свежие первыми.
+
+    Показываем ИГРЫ, а не только записанные движения: «изменений нет» — это
+    ответ, а пустой экран со словами «игр не было» — неправда, игры были.
+
+    [{source, game_id, date, home, guest, score, recorded, changes: [...]}].
+    ФИО тут нет — его подставляет тот, кто показывает."""
     import sheets_cache
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
-        games = conn.execute(
-            """SELECT source, game_id, MAX(game_date) AS game_date, COUNT(*) AS n
-               FROM price_history GROUP BY source, game_id
-               ORDER BY game_date DESC, changed_at DESC LIMIT ?""",
-            (int(limit_games),)).fetchall()
-        out = []
-        for g in games:
+        if teams:
+            marks = " OR ".join(["(source = ? AND team_id = ?)"] * len(teams))
+            params: List[Any] = [x for pair in teams for x in pair]
             rows = conn.execute(
+                f"""SELECT DISTINCT source, game_id, game_date FROM game_player_stats
+                    WHERE ({marks}) AND game_date != ''
+                    ORDER BY game_date DESC, game_id DESC LIMIT ?""",
+                params + [int(limit_games)]).fetchall()
+        else:
+            # Команды не передали — берём то, по чему хоть что-то записано.
+            rows = conn.execute(
+                """SELECT source, game_id, MAX(game_date) AS game_date
+                   FROM price_history GROUP BY source, game_id
+                   ORDER BY game_date DESC LIMIT ?""", (int(limit_games),)).fetchall()
+
+        out = []
+        for g in rows:
+            src, gid = str(g["source"]), str(g["game_id"])
+            changes = conn.execute(
                 """SELECT * FROM price_history WHERE source = ? AND game_id = ?
-                   ORDER BY ABS(new_price - old_price) DESC""",
-                (g["source"], g["game_id"])).fetchall()
+                   ORDER BY ABS(new_price - old_price) DESC""", (src, gid)).fetchall()
             meta = conn.execute(
                 """SELECT home_name, guest_name, home_score, guest_score
                    FROM game_meta WHERE source = ? AND game_id = ?""",
-                (g["source"], g["game_id"])).fetchone()
+                (src, gid)).fetchone()
+            date_str = str(g["game_date"] or "")
             out.append({
-                "source": str(g["source"]), "game_id": str(g["game_id"]),
-                "date": str(g["game_date"] or ""),
+                "source": src, "game_id": gid, "date": date_str,
                 "home": str((meta["home_name"] if meta else "") or ""),
                 "guest": str((meta["guest_name"] if meta else "") or ""),
                 "score": (f"{meta['home_score']}:{meta['guest_score']}"
                           if meta and (meta["home_score"] or meta["guest_score"]) else ""),
+                # Записывали ли мы движения на момент этой игры.
+                "recorded": bool(changes) or date_str >= HISTORY_SINCE,
                 "changes": [{"row": int(r["player_row"]), "ref": str(r["ref"] or ""),
                              "old": int(r["old_price"]), "new": int(r["new_price"]),
                              "old_rank": str(r["old_rank"] or ""),
                              "new_rank": str(r["new_rank"] or ""),
-                             "reason": str(r["reason"] or "")} for r in rows],
+                             "reason": str(r["reason"] or "")} for r in changes],
             })
     return out
 

@@ -1758,12 +1758,17 @@
       `<b>${up ? '+' : ''}${c.new - c.old}</b></div>`;
   }
 
+  function changesWord(n) {
+    if (n % 10 === 1 && n % 100 !== 11) return n + ' изменение';
+    if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return n + ' изменения';
+    return n + ' изменений';
+  }
+
   function renderHistory(games) {
     const el = $('historyBody');
     el.innerHTML = '';
     if (!games.length) {
-      el.innerHTML = '<div class="banner">Цены пока не двигались. ' +
-        'После первой же сыгранной игры здесь появится, кто куда переехал.</div>';
+      el.innerHTML = '<div class="banner">Сыгранных игр в базе пока нет.</div>';
       return;
     }
     games.forEach((g, i) => {
@@ -1771,12 +1776,21 @@
       det.className = 'guess';
       if (i === 0) det.open = true;         // последняя игра — сразу открыта
       const n = g.changes.length;
+      // Игра была, а движений нет — это два разных случая: цены не менялись
+      // или мы тогда их ещё не записывали. Врать про «не менялись» нельзя.
+      const note = n ? changesWord(n) + ' в ценах'
+        : (g.recorded ? 'Цены не изменились'
+                      : 'Изменения тогда не записывались');
+      const body = n ? g.changes.map(priceLine).join('')
+        : `<div class="pstat">${g.recorded
+            ? 'После этой игры ни у кого не сдвинулась цена.'
+            : 'Бот начал запоминать движения цен позже этой игры — ' +
+              'восстановить их нечем.'}</div>`;
       det.innerHTML =
         `<summary class="rank"><div class="info">` +
         `<div class="pname">${esc(g.title || g.date)}<span class="chev">▾</span></div>` +
-        `<div class="pstat">${n} ${n === 1 ? 'изменение' : (n < 5 ? 'изменения' : 'изменений')}` +
-        ` в ценах</div></div></summary>` +
-        `<div class="guess-body">${g.changes.map(priceLine).join('')}</div>`;
+        `<div class="pstat">${note}</div></div></summary>` +
+        `<div class="guess-body">${body}</div>`;
       el.appendChild(det);
     });
   }

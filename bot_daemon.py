@@ -2626,7 +2626,9 @@ def _games_screen() -> Tuple[str, InlineKeyboardMarkup]:
     Игру в лиге открывают когда угодно, а состав тренеру бывает нужен раньше."""
     import game_roster
     today = date.today()
-    upcoming = game_roster.games(from_day=today - timedelta(days=1),
+    # Только предстоящие: по сыгранной игре состав уже не собирают, а в списке
+    # она путается с ближайшей.
+    upcoming = game_roster.games(from_day=today,
                                  until_day=today + timedelta(days=21))
     if not upcoming:
         return ("👥 Ближайших игр не вижу.\n\nОпрос на игру бот заводит, когда "

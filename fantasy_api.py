@@ -862,9 +862,14 @@ async def handle_history(request: web.Request) -> web.Response:
     if not _can_view(user):
         return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
-    rows = await asyncio.get_running_loop().run_in_executor(
-        None, lambda: fantasy_prices.history(20))
     pool = await build_pool(season=season)
+    # Команды сезона — чтобы в истории были ИГРЫ, а не только записанные
+    # движения цен: до 03.08 их никто не сохранял, и экран выглядел бы пустым.
+    teams = sorted({(fantasy_stats.parse_ref(one)[0], one.split(":")[1])
+                    for p in pool for one in fantasy_stats.expand_refs([p["ref"]])
+                    if len(one.split(":")) >= 3})
+    rows = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: fantasy_prices.history(teams))
     by_ref = {p["ref"]: p for p in pool}
     by_row: Dict[int, Dict[str, Any]] = {}
     prices = sheets_cache.get_player_prices()
@@ -882,7 +887,8 @@ async def handle_history(request: web.Request) -> web.Response:
             changes.append({**ch, "name": name})
         games.append({**g, "changes": changes,
                       "title": _history_title(g)})
-    return web.json_response({"games": games})
+    return web.json_response({"games": games,
+                              "since": fantasy_prices.HISTORY_SINCE})
 
 
 def _history_title(game: Dict[str, Any]) -> str:
