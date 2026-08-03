@@ -900,10 +900,15 @@ def season_standings_live(season_id: int, history_limit: int = 20,
 
 
 def top_participants(season_id: int, d_from: Optional[str] = None,
-                     d_to: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
+                     d_to: Optional[str] = None, limit: int = 30,
+                     mode: Optional[str] = None) -> List[Dict[str, Any]]:
     """Топ угадавших: участники по сумме очков за период. Берём из тех же
     снимков по играм, поэтому срез за любой период честный — очки уже
-    привязаны к дате конкретной игры, а не к «текущему» составу."""
+    привязаны к дате конкретной игры, а не к «текущему» составу.
+
+    mode — считать только составы этого режима. Складывать режимы в один
+    список нельзя: они играют по разным правилам, и при лучшей игре свободный
+    даёт вдвое больше бюджета — общий топ был бы топом режима, а не людей."""
     sheets_cache.init_db()
     query = ("""SELECT user_id, ROUND(SUM(points), 2) AS points, COUNT(*) AS games
                 FROM fantasy_game_scores WHERE season_id = ?""")
@@ -912,6 +917,15 @@ def top_participants(season_id: int, d_from: Optional[str] = None,
         query += " AND game_date >= ?"; params.append(d_from)
     if d_to:
         query += " AND game_date <= ?"; params.append(d_to)
+    if mode:
+        # Снимки, сделанные до появления режимов, лежат с пустым mode — тогда
+        # играли только свободным. Считаем их свободным, иначе одни и те же
+        # люди дважды: отдельно «Свободный» и отдельно безымянный блок.
+        import fantasy_modes
+        if mode == fantasy_modes.FREE:
+            query += " AND (mode = ? OR mode = '')"; params.append(mode)
+        else:
+            query += " AND mode = ?"; params.append(mode)
     query += " GROUP BY user_id ORDER BY points DESC LIMIT ?"
     params.append(limit)
     with sheets_cache.get_connection() as conn:
@@ -925,6 +939,36 @@ def top_participants(season_id: int, d_from: Optional[str] = None,
         r["points"] = r["points"] or 0.0
         r["picks"] = picks.get(r["user_id"], [])
     return rows
+
+
+def top_participants_by_mode(season_id: int, d_from: Optional[str] = None,
+                             d_to: Optional[str] = None, limit: int = 30
+                             ) -> List[Dict[str, Any]]:
+    """[{mode, title, rows}] — по таблице на каждый режим, где кто-то играл.
+
+    Пустые режимы не показываем: вкладка «Бюджет» без единого участника только
+    сбивает с толку."""
+    import fantasy_modes
+    sheets_cache.init_db()
+    query = ("SELECT DISTINCT mode FROM fantasy_game_scores WHERE season_id = ?")
+    params: List[Any] = [season_id]
+    if d_from:
+        query += " AND game_date >= ?"; params.append(d_from)
+    if d_to:
+        query += " AND game_date <= ?"; params.append(d_to)
+    with sheets_cache.get_connection() as conn:
+        modes = {str(r["mode"] or "") or fantasy_modes.FREE
+                 for r in conn.execute(query, params)}
+    out = []
+    for mode in sorted(modes):
+        rows = top_participants(season_id, d_from, d_to, limit, mode=mode)
+        if not rows:
+            continue
+        title = fantasy_modes.MODE_TITLES.get(mode) or "Свободный"
+        out.append({"mode": mode, "title": title, "rows": rows})
+    # Больше участников — выше в списке: первым открывается самый живой режим.
+    out.sort(key=lambda m: -len(m["rows"]))
+    return out
 
 
 PICKS_PER_USER = 3

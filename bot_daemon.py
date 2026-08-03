@@ -3939,7 +3939,8 @@ async def _personal_digests(app: Application) -> None:
             if not text:
                 await asyncio.to_thread(personal_game.mark_sent, item["key"], "пусто")
                 continue
-            await app.bot.send_message(chat_id=int(item["uid"]), text=text)
+            await app.bot.send_message(chat_id=int(item["uid"]), text=text,
+                                       parse_mode="HTML")
             await asyncio.to_thread(personal_game.mark_sent, item["key"], "отправлено")
             log.info(f"Личный разбор игры {item['source']}:{item['game']['game_id']} "
                      f"ушёл {item['uid']}")

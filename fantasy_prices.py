@@ -36,6 +36,7 @@
 бы повышение в вечер, когда его даже не было в зале.
 """
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 BRONZE, SILVER, GOLD = "Бронза", "Серебро", "Золото"
@@ -300,15 +301,91 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
             updates[row] = res["price"]
             changes.append({"name": item["name"], "old": item["price"],
                             "new": res["price"], "rank": res["rank"],
+                            "old_rank": rank_of(item["price"]),
+                            "row": row, "ref": (item["refs"] or [""])[0],
                             "reason": res["reason"]})
 
     written = 0
     if updates and not dry_run:
         written = sheets_cache.write_player_prices(spreadsheet, updates)
         fantasy_api.invalidate_pool()
+        # Историю пишем только когда цены реально уехали в лист: иначе экран
+        # «что изменилось после игры» показывал бы движения, которых не было.
+        if source and game_id:
+            _remember(source, str(game_id), changes)
     changes.sort(key=lambda c: abs(c["new"] - c["old"]), reverse=True)
     return {"updated": written, "checked": len(by_row), "dry_run": dry_run,
             "changes": changes}
+
+
+def _remember(source: str, game_id: str, changes: List[Dict[str, Any]]) -> None:
+    """Кладёт движения цен в price_history — по строке на игрока и игру."""
+    import sheets_cache
+    if not changes:
+        return
+    game_date = ""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT game_date FROM game_meta WHERE source = ? AND game_id = ?",
+            (source, game_id)).fetchone()
+        if row:
+            game_date = str(row["game_date"] or "")
+        if not game_date:
+            row = conn.execute(
+                "SELECT game_date FROM game_player_stats WHERE source = ? AND game_id = ? LIMIT 1",
+                (source, game_id)).fetchone()
+            game_date = str((row["game_date"] if row else "") or "")
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.executemany(
+            """INSERT OR REPLACE INTO price_history
+               (source, game_id, game_date, player_row, ref, old_price, new_price,
+                old_rank, new_rank, reason, changed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(source, game_id, game_date, int(c.get("row") or 0), c.get("ref", ""),
+              int(c["old"]), int(c["new"]), c.get("old_rank", ""), c.get("rank", ""),
+              c.get("reason", ""), now) for c in changes if c.get("row")])
+        conn.commit()
+
+
+def history(limit_games: int = 12) -> List[Dict[str, Any]]:
+    """Движения цен по играм, свежие первыми.
+
+    [{source, game_id, date, league, opponent, changes: [{row, ref, old, new,
+    old_rank, new_rank, reason}]}]. ФИО тут нет — его подставляет тот, кто
+    показывает (у нас на диске имён не бывает)."""
+    import sheets_cache
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        games = conn.execute(
+            """SELECT source, game_id, MAX(game_date) AS game_date, COUNT(*) AS n
+               FROM price_history GROUP BY source, game_id
+               ORDER BY game_date DESC, changed_at DESC LIMIT ?""",
+            (int(limit_games),)).fetchall()
+        out = []
+        for g in games:
+            rows = conn.execute(
+                """SELECT * FROM price_history WHERE source = ? AND game_id = ?
+                   ORDER BY ABS(new_price - old_price) DESC""",
+                (g["source"], g["game_id"])).fetchall()
+            meta = conn.execute(
+                """SELECT home_name, guest_name, home_score, guest_score
+                   FROM game_meta WHERE source = ? AND game_id = ?""",
+                (g["source"], g["game_id"])).fetchone()
+            out.append({
+                "source": str(g["source"]), "game_id": str(g["game_id"]),
+                "date": str(g["game_date"] or ""),
+                "home": str((meta["home_name"] if meta else "") or ""),
+                "guest": str((meta["guest_name"] if meta else "") or ""),
+                "score": (f"{meta['home_score']}:{meta['guest_score']}"
+                          if meta and (meta["home_score"] or meta["guest_score"]) else ""),
+                "changes": [{"row": int(r["player_row"]), "ref": str(r["ref"] or ""),
+                             "old": int(r["old_price"]), "new": int(r["new_price"]),
+                             "old_rank": str(r["old_rank"] or ""),
+                             "new_rank": str(r["new_rank"] or ""),
+                             "reason": str(r["reason"] or "")} for r in rows],
+            })
+    return out
 
 
 # ── Личный кабинет игрока ─────────────────────────────────────────────────

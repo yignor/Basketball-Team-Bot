@@ -168,10 +168,10 @@
   <div class="tabs">
     <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
     <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
-    <button class="tab" id="tab-top" onclick="showTab('top')">🔥 Топ</button>
-    <button class="tab hidden" id="tab-me" onclick="showTab('me')">👤 Я</button>
-    <button class="tab" id="tab-rules" onclick="showTab('rules')">📖</button>
-    <button class="tab hidden" id="tab-admin" onclick="showTab('admin')">⚙️</button>
+    <button class="tab" id="tab-history" onclick="showTab('history')" title="История">📈</button>
+    <button class="tab hidden" id="tab-me" onclick="showTab('me')" title="Мой кабинет">👤</button>
+    <button class="tab" id="tab-rules" onclick="showTab('rules')" title="Правила">📖</button>
+    <button class="tab hidden" id="tab-admin" onclick="showTab('admin')" title="Настройки">⚙️</button>
   </div>
   <div id="draft">
     <div class="bar hidden" id="modeBar"></div>
@@ -203,24 +203,27 @@
     <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
   </div>
   <div id="table" class="hidden">
-    <div class="bar hidden" id="tableModes"></div>
-    <div class="bar"><div class="counter" id="weekLabel"></div></div>
-    <div class="list" id="standings"></div>
-  </div>
-  <div id="top" class="hidden">
-    <div class="bar" id="topPeriods">
+    <div class="tabs">
+      <button class="tab active" id="ttab-board" onclick="showTableTab('board')">🏆 Зачёт</button>
+      <button class="tab" id="ttab-players" onclick="showTableTab('players')">🏀 Игроки</button>
+      <button class="tab" id="ttab-guess" onclick="showTableTab('guess')">🎯 Угадали</button>
+    </div>
+    <div class="bar hidden" id="topPeriods">
       <button class="chip on" data-period="last" onclick="showTop('last')">Последняя игра</button>
       <button class="chip" data-period="week" onclick="showTop('week')">Неделя</button>
       <button class="chip" data-period="month" onclick="showTop('month')">Месяц</button>
       <button class="chip" data-period="all" onclick="showTop('all')">Всё время</button>
     </div>
-    <div class="bar"><div class="counter" id="topLabel"></div></div>
-    <div class="tabs">
-      <button class="tab active" id="ttab-players" onclick="showTopTab('players')">🏀 Игроки</button>
-      <button class="tab" id="ttab-guess" onclick="showTopTab('guess')">🎯 Участники</button>
-    </div>
-    <div class="list" id="topList"></div>
+    <div class="bar hidden" id="tableModes"></div>
+    <div class="bar hidden" id="guessModes"></div>
+    <div class="bar"><div class="counter" id="weekLabel"></div></div>
+    <div class="list" id="standings"></div>
+    <div class="list hidden" id="topList"></div>
     <div class="list hidden" id="guessList"></div>
+  </div>
+  <div id="history" class="hidden">
+    <div class="bar"><div class="counter">Как двигались цены после каждой игры</div></div>
+    <div class="list" id="historyBody"></div>
   </div>
   <div id="me" class="hidden">
     <div class="bar hidden" id="meWho"></div>
@@ -298,7 +301,7 @@
   // прячем — рабочий вид приложения над текстом ошибки только сбивает с толку.
   function deadEnd(text) {
     for (const el of [$('leagueBar'), document.querySelector('.tabs'),
-                      $('draft'), $('table'), $('top'), $('admin'), $('saveBar')]) {
+                      $('draft'), $('table'), $('history'), $('admin'), $('saveBar')]) {
       if (el) el.classList.add('hidden');
     }
     msg(text);
@@ -916,7 +919,7 @@
   function renderTableModes() {
     const bar = $('tableModes');
     const ids = Object.keys(tables || {});
-    bar.classList.toggle('hidden', ids.length < 2);
+    bar.classList.toggle('hidden', ids.length < 2 || tableTab !== 'board');
     if (ids.length < 2) { tableMode = ids[0] || ''; return; }
     if (!ids.includes(tableMode)) tableMode = myMode && ids.includes(myMode) ? myMode : ids[0];
     bar.innerHTML = ids.map(id =>
@@ -960,12 +963,13 @@
   }
 
   function showTab(name) {
-    for (const t of ['draft', 'table', 'top', 'me', 'rules', 'admin']) {
+    for (const t of ['draft', 'table', 'history', 'me', 'rules', 'admin']) {
       $(t).classList.toggle('hidden', name !== t);
       $('tab-' + t).classList.toggle('active', name === t);
     }
     syncButton();
-    if (name === 'top' && !$('topList').children.length) showTop(topPeriod);
+    if (name === 'table') showTableTab(tableTab);
+    if (name === 'history') loadHistory();
     if (name === 'admin') loadAdmin();
     if (name === 'rules') renderRules();
     if (name === 'me') loadMe(meRef);
@@ -1572,7 +1576,7 @@
     // честно показываем всё время и не притворяемся, что знаем срезы.
     if (!live) {
       if (period !== 'all') {
-        $('topLabel').textContent = '';
+        $('weekLabel').textContent = '';
         $('topList').innerHTML = '<div class="banner">Срезы по периодам доступны ' +
           'при связи с ботом. Здесь — только «Всё время».</div>';
         return;
@@ -1587,7 +1591,7 @@
       return;
     }
 
-    $('topLabel').textContent = '';
+    $('weekLabel').textContent = '';
     $('topList').innerHTML = '<div class="banner">Загрузка…</div>';
     try {
       const d = await api('/fantasy/top?period=' + period);
@@ -1601,19 +1605,60 @@
 
   function medal(i) { return ['🥇','🥈','🥉'][i] || (i + 1) + '.'; }
 
-  // Две таблицы на одном экране не читались: чтобы добраться до участников,
-  // приходилось листать через весь список игроков.
-  let topTab = 'players';
+  // Зачёт, топ игроков и топ угадавших — один раздел «Таблица» с подвкладками.
+  // Отдельная вкладка «Топ» уводила в сторону: человек искал таблицу в двух
+  // местах и не понимал, чем они отличаются.
+  let tableTab = 'board';
 
-  function showTopTab(which) {
-    topTab = which;
+  function showTableTab(which) {
+    tableTab = which;
     haptic('light');
-    $('ttab-players').classList.toggle('active', which === 'players');
-    $('ttab-guess').classList.toggle('active', which === 'guess');
+    for (const [id, key] of [['ttab-board','board'], ['ttab-players','players'],
+                             ['ttab-guess','guess']]) {
+      $(id).classList.toggle('active', which === key);
+    }
+    $('standings').classList.toggle('hidden', which !== 'board');
     $('topList').classList.toggle('hidden', which !== 'players');
     $('guessList').classList.toggle('hidden', which !== 'guess');
+    // Периоды — только там, где они что-то меняют; режимы — там, где зачёт.
+    $('topPeriods').classList.toggle('hidden', which === 'board');
+    renderTableModes();
+    renderGuessModes();
+    if (which === 'board') { renderStandings(); return; }
+    if (!topCache[topPeriod]) showTop(topPeriod);
+    else renderTop(topCache[topPeriod]);
   }
-  window.showTopTab = showTopTab;
+  window.showTableTab = showTableTab;
+
+  // Топ угадавших разнесён по режимам: у свободного выбора при лучшей игре
+  // выходит вдвое больше очков, чем у бюджета, — в общем списке это был бы
+  // топ режима, а не людей.
+  let guessMode = '';
+  let guessBlocks = [];
+
+  function renderGuessModes() {
+    const bar = $('guessModes');
+    const show = tableTab === 'guess' && guessBlocks.length > 1;
+    bar.classList.toggle('hidden', !show);
+    if (!guessBlocks.length) { guessMode = ''; return; }
+    if (!guessBlocks.some(b => b.mode === guessMode)) {
+      const mine = guessBlocks.find(b => b.mode === myMode);
+      guessMode = (mine || guessBlocks[0]).mode;
+    }
+    if (!show) return;
+    bar.innerHTML = guessBlocks.map(b =>
+      `<button class="chip${b.mode === guessMode ? ' on' : ''}" ` +
+      `onclick="pickGuessMode(${jattr(b.mode)})">${esc(b.title)}` +
+      `${b.mode === myMode ? ' · ты' : ''}</button>`).join('');
+  }
+
+  function pickGuessMode(id) {
+    haptic('light');
+    guessMode = id;
+    renderGuessModes();
+    renderGuessList();
+  }
+  window.pickGuessMode = pickGuessMode;
 
   function pickLine(pick) {
     const when = (pick.date || '').slice(8, 10) + '.' + (pick.date || '').slice(5, 7);
@@ -1622,7 +1667,7 @@
   }
 
   function renderTop(d) {
-    $('topLabel').textContent = d.title ? 'Фэнтези-очки ' + d.title : '';
+    $('weekLabel').textContent = d.title ? 'Фэнтези-очки ' + d.title : '';
 
     const el = $('topList');
     el.innerHTML = '';
@@ -1641,13 +1686,24 @@
       });
     }
 
+    guessBlocks = d.guessers_by_mode && d.guessers_by_mode.length
+      ? d.guessers_by_mode
+      : (d.guessers && d.guessers.length
+         ? [{mode: '', title: 'Все участники', rows: d.guessers}] : []);
+    renderGuessModes();
+    renderGuessList();
+  }
+
+  function renderGuessList() {
     const gl = $('guessList');
     gl.innerHTML = '';
-    if (!d.guessers || !d.guessers.length) {
+    const block = guessBlocks.find(b => b.mode === guessMode) || guessBlocks[0];
+    const rows = (block && block.rows) || [];
+    if (!rows.length) {
       gl.innerHTML = '<div class="banner">За этот период никто не набрал очков.</div>';
       return;
     }
-    d.guessers.forEach((g, i) => {
+    rows.forEach((g, i) => {
       const picks = g.picks || [];
       const det = document.createElement('details');
       det.className = 'guess';
@@ -1661,6 +1717,64 @@
           ? `<div class="guess-body">${picks.map(pickLine).join('')}</div>`
           : '<div class="guess-body"><div class="pstat">Состав не сохранился.</div></div>');
       gl.appendChild(det);
+    });
+  }
+
+  // ─── история: кто куда поехал по ценам после каждой игры ──────────────────
+  //
+  // Развёрнута последняя игра — она и интересна; остальные свёрнуты, но
+  // открываются. Данные приходят по играм, а не общим списком: цена двигается
+  // после конкретного матча, и «почему упал» без игры рядом не читается.
+
+  let historyLoaded = false;
+
+  async function loadHistory() {
+    const el = $('historyBody');
+    if (historyLoaded) return;
+    if (!live) {
+      el.innerHTML = '<div class="banner">История цен доступна при связи с ботом.</div>';
+      return;
+    }
+    el.innerHTML = '<div class="banner">Загрузка…</div>';
+    try {
+      const d = await api('/fantasy/history');
+      historyLoaded = true;
+      renderHistory(d.games || []);
+    } catch (e) {
+      el.innerHTML = '<div class="banner">Не удалось загрузить историю.</div>';
+    }
+  }
+
+  function priceLine(c) {
+    const up = c.new > c.old;
+    const arrow = up ? '▲' : '▼';
+    const rank = (c.new_rank && c.new_rank !== c.old_rank)
+      ? ` · ранг ${esc(c.old_rank)} → ${esc(c.new_rank)}` : '';
+    return `<div class="row"><span class="d">${arrow} ${esc(c.name || 'Игрок')}</span>` +
+      `<span>${c.old} → ${c.new}${rank}</span>` +
+      `<b>${up ? '+' : ''}${c.new - c.old}</b></div>`;
+  }
+
+  function renderHistory(games) {
+    const el = $('historyBody');
+    el.innerHTML = '';
+    if (!games.length) {
+      el.innerHTML = '<div class="banner">Цены пока не двигались. ' +
+        'После первой же сыгранной игры здесь появится, кто куда переехал.</div>';
+      return;
+    }
+    games.forEach((g, i) => {
+      const det = document.createElement('details');
+      det.className = 'guess';
+      if (i === 0) det.open = true;         // последняя игра — сразу открыта
+      const n = g.changes.length;
+      det.innerHTML =
+        `<summary class="rank"><div class="info">` +
+        `<div class="pname">${esc(g.title || g.date)}<span class="chev">▾</span></div>` +
+        `<div class="pstat">${n} ${n === 1 ? 'изменение' : (n < 5 ? 'изменения' : 'изменений')}` +
+        ` в ценах</div></div></summary>` +
+        `<div class="guess-body">${g.changes.map(priceLine).join('')}</div>`;
+      el.appendChild(det);
     });
   }
 
@@ -1690,6 +1804,10 @@
     // нельзя, иначе после переключения человек видит цифры чужого сезона.
     $('topList').innerHTML = '';
     $('guessList').innerHTML = '';
+    $('historyBody').innerHTML = '';
+    historyLoaded = false;
+    guessBlocks = [];
+    for (const k of Object.keys(topCache)) delete topCache[k];
     msg('Загрузка…');
     try { if (!await fromApi()) return; } catch (e) { msg('Не удалось переключить лигу.'); return; }
     msg('');

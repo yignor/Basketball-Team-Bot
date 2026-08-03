@@ -89,9 +89,31 @@ def _opponent_name(source: str, game_id: str, my_team: str, opp_id: str) -> str:
     return ""
 
 
+MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+              "августа", "сентября", "октября", "ноября", "декабря"]
+
+
+def _human_day(iso: str) -> str:
+    """'2026-08-02' -> '2 августа'."""
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+        return f"{d.day} {MONTHS_GEN[d.month - 1]}"
+    except (ValueError, IndexError):
+        return str(iso or "")
+
+
+def _esc(text: str) -> str:
+    return (str(text or "").replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
 def digest(source: str, source_title: str, player_id: str,
            game: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    """Текст разбора последней игры. None — если разбирать нечего."""
+    """Разбор последней игры для личного сообщения (HTML). None — если пусто.
+
+    Собран блоками: результат, своя строка, броски, фэнтези, отличия от
+    обычного. Сплошным текстом это читалось как выписка из протокола — а
+    человек хочет за пять секунд понять, хорошо он сыграл или нет."""
     rows = _rows(source, player_id)
     if not rows:
         return None
@@ -107,62 +129,74 @@ def digest(source: str, source_title: str, player_id: str,
                                        str(game["team_id"]), str(player_id))
     opp = _opponent_name(source, str(game["game_id"]), str(game["team_id"]),
                          str(ctx.get("opponent", ""))) or "соперник"
-    when = personal_report._d(str(game["game_date"]))
 
-    head = f"🏀 Твоя игра · {when} · {opp}"
-    if ctx.get("ours") is not None and ctx.get("theirs") is not None:
-        outcome = ("победа" if ctx["ours"] > ctx["theirs"]
-                   else "поражение" if ctx["ours"] < ctx["theirs"] else "ничья")
-        head += f" · {ctx['ours']}:{ctx['theirs']} ({outcome})"
-    lines = [head, ""]
+    # Шапка: сначала исход, потом с кем и когда. Счёт без исхода приходится
+    # расшифровывать самому, а это первое, что человек хочет увидеть.
+    ours, theirs = ctx.get("ours"), ctx.get("theirs")
+    if ours is not None and theirs is not None and (ours or theirs):
+        icon, word = ("🏆", "Победа") if ours > theirs else (
+            ("🤝", "Ничья") if ours == theirs else ("💔", "Поражение"))
+        head = f"{icon} <b>{word} {ours}:{theirs}</b> · {_esc(opp)}"
+    else:
+        head = f"🏀 <b>Игра с {_esc(opp)}</b>"
+    lines = [head, f"{_human_day(str(game['game_date']))} · {_esc(source_title)}", ""]
 
-    stat_bits = [f"{title} {int(game.get(k) or 0)}" for k, title, _ in LINE_METRICS
-                 if int(game.get(k) or 0)]
-    lines.append(" · ".join(stat_bits) if stat_bits else "В протоколе — нули.")
-
+    stat_bits = [f"{title.capitalize()} {int(game.get(k) or 0)}"
+                 for k, title, _ in LINE_METRICS if int(game.get(k) or 0)]
     mins = int(game.get("secs") or 0) // 60
+    lines.append("📊 <b>Твоя игра</b>")
+    lines.append(" · ".join(stat_bits) if stat_bits else "В протоколе одни нули.")
     if mins:
-        lines.append(f"На площадке {mins} мин.")
+        lines.append(f"{mins} мин на площадке")
 
     shots = []
     if int(game.get("fga") or 0):
-        shots.append(f"с игры {int(game['fgm'])}/{int(game['fga'])}")
+        shots.append(f"С игры {int(game['fgm'])}/{int(game['fga'])}")
     if int(game.get("tpa") or 0):
-        shots.append(f"трёхочковые {int(game['tpm'])}/{int(game['tpa'])}")
+        shots.append(f"Трёхочковые {int(game['tpm'])}/{int(game['tpa'])}")
     if int(game.get("fta") or 0):
-        shots.append(f"штрафные {int(game['ftm'])}/{int(game['fta'])}")
+        shots.append(f"Штрафные {int(game['ftm'])}/{int(game['fta'])}")
     if shots:
-        lines.append("Броски: " + ", ".join(shots) + ".")
+        lines += ["", "🎯 <b>Броски</b>", " · ".join(shots)]
 
     fp = fantasy_stats.fantasy_points(game)
-    lines.append("")
+    lines += ["", f"⚡️ <b>Фэнтези: {fp:g}</b>"]
     if base:
         base_fp = sum(fantasy_stats.fantasy_points(r) for r in base) / len(base)
         diff = round(fp - base_fp, 1)
-        mark = "выше" if diff > 0 else "ниже" if diff < 0 else "как"
-        lines.append(f"Фэнтези-очки за игру: {fp:g} — это {mark} твоего среднего "
-                     f"за последние {len(base)} игр ({base_fp:.1f}).")
+        if diff > 0:
+            lines.append(f"На {diff:g} выше твоего среднего за {len(base)} игр "
+                         f"({base_fp:.1f})")
+        elif diff < 0:
+            lines.append(f"На {abs(diff):g} ниже твоего среднего за {len(base)} игр "
+                         f"({base_fp:.1f})")
+        else:
+            lines.append(f"Ровно твой средний за {len(base)} игр")
     else:
-        lines.append(f"Фэнтези-очки за игру: {fp:g}. Это первая игра в базе — "
-                     "сравнивать пока не с чем.")
+        lines.append("Первая игра в базе — сравнивать пока не с чем")
 
     if base:
-        deltas = []
+        better, worse = [], []
         for k, title, higher_better in LINE_METRICS:
             now = float(game.get(k) or 0)
             was = sum(float(r.get(k) or 0) for r in base) / len(base)
             delta = round(now - was, 1)
             if abs(delta) < 1:
                 continue
-            good = (delta > 0) == higher_better
-            deltas.append((abs(delta), f"{'📈' if good else '📉'} {title} "
-                                       f"{'+' if delta > 0 else ''}{delta:g}"))
-        if deltas:
-            deltas.sort(key=lambda x: -x[0])
-            lines += ["", "Против своего обычного: "
-                          + ", ".join(t for _, t in deltas[:4]) + "."]
+            text = f"{title} {'+' if delta > 0 else '−'}{abs(delta):g}"
+            (better if (delta > 0) == higher_better else worse).append((abs(delta), text))
+        better.sort(key=lambda x: -x[0])
+        worse.sort(key=lambda x: -x[0])
+        if better or worse:
+            lines.append("")
+            if better:
+                lines.append("📈 Лучше обычного: "
+                             + ", ".join(t for _, t in better[:3]))
+            if worse:
+                lines.append("📉 Хуже обычного: "
+                             + ", ".join(t for _, t in worse[:3]))
 
-    lines += ["", f"Лига: {source_title}. Настройки — «📊 Моя статистика»."]
+    lines += ["", "<i>Как часто присылать — «📊 Моя статистика» → уведомления.</i>"]
     return "\n".join(lines)
 
 

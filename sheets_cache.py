@@ -430,6 +430,26 @@ CREATE TABLE IF NOT EXISTS fantasy_game_scores (
 CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_season ON fantasy_game_scores(season_id, game_date);
 CREATE INDEX IF NOT EXISTS idx_fantasy_game_scores_user ON fantasy_game_scores(season_id, user_id, game_date);
 
+-- История движения цен: кто куда переехал после конкретной игры. Раньше
+-- пересчёт возвращал изменения вызывающему и забывал их, поэтому «почему у
+-- меня упала цена» было не на чем показать. ФИО не храним — только строка
+-- листа и ссылка карточки, имя подставляется при показе.
+CREATE TABLE IF NOT EXISTS price_history (
+    source      TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    game_date   TEXT NOT NULL DEFAULT '',
+    player_row  INTEGER NOT NULL,
+    ref         TEXT NOT NULL DEFAULT '',
+    old_price   INTEGER NOT NULL DEFAULT 0,
+    new_price   INTEGER NOT NULL DEFAULT 0,
+    old_rank    TEXT NOT NULL DEFAULT '',
+    new_rank    TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    changed_at  TEXT NOT NULL,
+    PRIMARY KEY (source, game_id, player_row)
+);
+CREATE INDEX IF NOT EXISTS idx_price_history_date ON price_history(game_date DESC);
+
 -- Привязка «Telegram id -> id игрока в лиге». Человек присылает ссылку на свой
 -- профиль, бот достаёт из неё числовой id: искать по фамилии нельзя (однофамильцы
 -- и опечатки подмешают чужие игры). ФИО тут нет — только идентификаторы.

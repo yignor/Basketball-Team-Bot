@@ -848,6 +848,45 @@ def _period_bounds(period: str, scopes: Any,
     return None, None, "за всё время"
 
 
+async def handle_history(request: web.Request) -> web.Response:
+    """Что случилось с ценами после каждой игры — свежие первыми.
+
+    ФИО в price_history нет, поэтому имена подставляем из пула: он и так
+    собран в памяти, а на диске имён у нас не бывает."""
+    import fantasy_prices
+    season = _season(request)
+    rows = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: fantasy_prices.history(20))
+    pool = await build_pool(season=season)
+    by_ref = {p["ref"]: p for p in pool}
+    by_row: Dict[int, Dict[str, Any]] = {}
+    prices = sheets_cache.get_player_prices()
+    for card in pool:
+        pr = _lookup_price(card.get("name", ""), prices)
+        if pr.get("row"):
+            by_row.setdefault(int(pr["row"]), card)
+
+    games = []
+    for g in rows:
+        changes = []
+        for ch in g["changes"]:
+            card = by_ref.get(ch["ref"]) or by_row.get(ch["row"])
+            name = (card or {}).get("name") or ""
+            changes.append({**ch, "name": name})
+        games.append({**g, "changes": changes,
+                      "title": _history_title(g)})
+    return web.json_response({"games": games})
+
+
+def _history_title(game: Dict[str, Any]) -> str:
+    """«02.08 · SLPRO · PullUp Farm — Атланты 78:75»."""
+    league = "SLPRO" if game["source"] == "slpro" else "Инфобаскет"
+    when = f"{game['date'][8:10]}.{game['date'][5:7]}" if len(game["date"]) >= 10 else ""
+    who = " — ".join(x for x in (game.get("home"), game.get("guest")) if x)
+    tail = " ".join(x for x in (who, game.get("score")) if x)
+    return " · ".join(x for x in (when, league, tail) if x)
+
+
 async def handle_top(request: web.Request) -> web.Response:
     """Топ игроков команды по фэнтези-очкам за период. Имена берём из пула —
     транзитно из публичных API лиг, у себя ФИО не храним."""
@@ -888,13 +927,18 @@ async def handle_top(request: web.Request) -> web.Response:
     # тот же период. Считается из тех же снимков по играм.
     # Топ угадавших + чей состав играл: ФИО подставляем из пула (у себя не
     # храним), а если игрока в пуле уже нет — показываем его номер из ссылки.
-    guessers = fantasy.top_participants(season["id"], d_from, d_to) if season else []
+    # Каждому режиму — своя таблица: правила разные, и общий список был бы
+    # топом режима, а не людей (решение 30.07, см. fantasy-scoring-invariant).
+    by_mode = fantasy.top_participants_by_mode(season["id"], d_from, d_to) if season else []
     by_ref = {p["ref"]: p for p in await build_pool(season=season)}
-    for g in guessers:
-        for pick in g.get("picks") or []:
-            pick["players"] = [_ref_title(r, by_ref) for r in pick.pop("refs", [])]
+    for block in by_mode:
+        for g in block["rows"]:
+            for pick in g.get("picks") or []:
+                pick["players"] = [_ref_title(r, by_ref) for r in pick.pop("refs", [])]
+    guessers = by_mode[0]["rows"] if by_mode else []
     return web.json_response({"period": period, "title": title,
-                              "top": rows[:30], "guessers": guessers})
+                              "top": rows[:30], "guessers": guessers,
+                              "guessers_by_mode": by_mode})
 
 
 def _ref_title(ref: str, by_ref: Dict[str, Any]) -> str:
@@ -1632,6 +1676,7 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/me", handle_me),
         web.get("/fantasy/standings", handle_standings),
         web.get("/fantasy/top", handle_top),
+        web.get("/fantasy/history", handle_history),
         web.get("/fantasy/admin", handle_admin_state),
         web.post("/fantasy/admin", handle_admin_action),
         web.get("/health", lambda r: web.json_response({"ok": True})),
