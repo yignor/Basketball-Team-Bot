@@ -36,6 +36,11 @@ PLAYERS_TG_ID_HEADER = "Числовой TG ID"
 # Ведёт тренер — бот только читает, как и всё остальное на этом листе.
 PLAYERS_PRICE_HEADER = "Стоимость"
 PLAYERS_TIER_HEADER = "Уровень"
+# Сколько игрок ДОЛЖЕН заплатить — ведёт тренер в листе «Игроки». Сами платежи
+# живут отдельно (лист «Оплаты» и таблица payments): лист «Игроки» — про
+# требования, а не про историю.
+PLAYERS_PAY_SEASON_HEADER = "Оплата сезона"
+PLAYERS_PAY_GAME_HEADER = "Оплата игры"
 ATTEND_SHEET_NAME = "Посещаемость"
 SERVICE_SHEET_NAME = "Сервисный"
 BOT_USERS_SHEET_NAME = "Пользователи бота"
@@ -67,6 +72,8 @@ CREATE TABLE IF NOT EXISTS players (
     notes         TEXT NOT NULL DEFAULT '',
     price         INTEGER NOT NULL DEFAULT 0,   -- «Стоимость» из листа (фэнтези)
     tier          TEXT NOT NULL DEFAULT '',     -- «Уровень»: Платина/Золото/…
+    pay_season    INTEGER NOT NULL DEFAULT 0,   -- «Оплата сезона»: сколько должен
+    pay_game      INTEGER NOT NULL DEFAULT 0,   -- «Оплата игры»: цена одной игры
     synced_at     TEXT NOT NULL
 );
 
@@ -509,6 +516,37 @@ CREATE TABLE IF NOT EXISTS player_merges (
     fetched_at  TEXT NOT NULL
 );
 
+-- Платежи игроков (раздел тренера). Источник истины — здесь, лист «Оплаты»
+-- лишь читаемая копия: Google может быть недоступен в момент, когда тренер
+-- вносит платёж, а деньги терять нельзя.
+-- ФИО тут нет: платёж привязан к строке листа «Игроки». От СМС остаётся
+-- только отпечаток (sha256) — по нему ловим повторную вставку того же текста.
+CREATE TABLE IF NOT EXISTS payments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_row  INTEGER NOT NULL,           -- строка листа «Игроки»
+    amount      INTEGER NOT NULL,           -- рубли
+    kind        TEXT NOT NULL,              -- 'game' | 'season'
+    games       INTEGER NOT NULL DEFAULT 0, -- сколько игр покрывает
+    paid_at     TEXT NOT NULL,              -- дата платежа (ISO)
+    bank        TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT '',
+    added_by    TEXT NOT NULL DEFAULT '',   -- tg id того, кто внёс
+    created_at  TEXT NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE,
+    pushed      INTEGER NOT NULL DEFAULT 0  -- выгружен ли в лист «Оплаты»
+);
+CREATE INDEX IF NOT EXISTS idx_payments_player ON payments(player_row);
+
+-- Какие разборы игр уже ушли тренерам в личку. Без этой отметки фоновый цикл
+-- слал бы один и тот же отчёт каждые пять минут.
+CREATE TABLE IF NOT EXISTS coach_report_sent (
+    source      TEXT NOT NULL,
+    team_id     TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    sent_at     TEXT NOT NULL,
+    PRIMARY KEY (source, team_id, game_id)
+);
+
 -- Зеркало справочника команд/турниров лиги: id, название, стадия. Название
 -- команды — не персональные данные, его храним. Сюда же складываем то, что
 -- раньше резолвилось живым запросом на каждый показ (team_contexts).
@@ -605,6 +643,8 @@ def init_db() -> None:
         _ensure_column(conn, "player_jokes", "game_label", "TEXT NOT NULL", "''")
         _ensure_column(conn, "player_jokes", "used_at", "TEXT NOT NULL", "''")
         _ensure_column(conn, "player_jokes", "game_date", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "players", "pay_season", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "players", "pay_game", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
@@ -681,6 +721,8 @@ def sync_players(spreadsheet) -> None:
                     str(r.get("Примечания", "")),
                     _to_int(r.get(PLAYERS_PRICE_HEADER)),
                     str(r.get(PLAYERS_TIER_HEADER, "")).strip(),
+                    _to_int(r.get(PLAYERS_PAY_SEASON_HEADER)),
+                    _to_int(r.get(PLAYERS_PAY_GAME_HEADER)),
                     now,
                 ))
             conn.execute("BEGIN")
@@ -688,8 +730,8 @@ def sync_players(spreadsheet) -> None:
             conn.executemany(
                 """
                 INSERT INTO players
-                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1241,15 +1283,34 @@ def free_player_rows() -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def coach_report_sent(source: str, team_id: str, game_id: str) -> bool:
+    init_db()
+    with _connection() as conn:
+        return bool(conn.execute(
+            "SELECT 1 FROM coach_report_sent WHERE source=? AND team_id=? AND game_id=?",
+            (str(source), str(team_id), str(game_id))).fetchone())
+
+
+def mark_coach_report(source: str, team_id: str, game_id: str) -> None:
+    init_db()
+    with _connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO coach_report_sent (source, team_id, game_id, sent_at) "
+            "VALUES (?, ?, ?, ?)",
+            (str(source), str(team_id), str(game_id), _now_iso()))
+        conn.commit()
+
+
 # ─────────────── Доступ к закрытым разделам ─────────────────────────────────
 #
-# Два вида: 'personal' — личная статистика игрока, 'team' — прогресс команды.
+# Два вида: 'personal' — личная статистика игрока, 'team' — раздел тренера
+# (разбор игр и учёт оплат).
 # Даются независимо: тренеру может быть нужна команда без личной, игроку —
 # наоборот. Админу оба открыты и без записи в таблице.
 
 ACCESS_TEAM = "team"
 ACCESS_PERSONAL = "personal"
-ACCESS_TITLES = {ACCESS_TEAM: "Прогресс команды", ACCESS_PERSONAL: "Личная статистика"}
+ACCESS_TITLES = {ACCESS_TEAM: "Раздел тренера", ACCESS_PERSONAL: "Личная статистика"}
 
 
 def _clean_nick(username: str) -> str:

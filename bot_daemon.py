@@ -11,10 +11,11 @@ import io
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -356,6 +357,7 @@ def _can_see_personal(user) -> bool:
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
 PROGRESS_KEYBOARD_LABEL = "📈 Прогресс команды"
 MYSTATS_KEYBOARD_LABEL = "📊 Моя статистика"
+COACH_KEYBOARD_LABEL = "🧑‍🏫 Тренер"
 FANTASY_KEYBOARD_LABEL = "🏀 Фэнтези"
 FEEDBACK_KEYBOARD_LABEL = "💬 Написать админам"
 MENU_KEYBOARD_LABEL = "☰ Меню"
@@ -387,7 +389,9 @@ def _bottom_keyboard(payload: str = "", is_admin: bool = False,
     if with_personal:
         closed.append(KeyboardButton(MYSTATS_KEYBOARD_LABEL))
     if with_reports:
-        closed.append(KeyboardButton(PROGRESS_KEYBOARD_LABEL))
+        # Раздел тренера вместо отдельной кнопки прогресса: разбор игр теперь
+        # внутри него, рядом с оплатами.
+        closed.append(KeyboardButton(COACH_KEYBOARD_LABEL))
     if closed:
         rows.append(closed)
     if is_admin:
@@ -505,6 +509,11 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat = update.effective_chat
     if not user or not chat or chat.type != "private":
         return
+
+    # /start обещан как выход из любого незаконченного ввода — в том числе из
+    # недовведённого платежа.
+    _awaiting_payment.discard(user.id)
+    _pay_draft.pop(user.id, None)
 
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
@@ -2006,11 +2015,12 @@ async def _prog_body() -> Tuple[List[str], List[List[InlineKeyboardButton]]]:
     return lines, rows
 
 
-async def _render_prog_list(is_admin: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
+async def _render_prog_list(is_admin: bool = False,
+                            back: str = "admin:menu:main") -> Tuple[str, InlineKeyboardMarkup]:
     lines, rows = await _prog_body()
     if is_admin:
         lines += ["", "Кому открыт этот раздел — в «🔑 Доступы» главного меню."]
-    rows.append(_back_button())
+    rows.append(_back_button(back))
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -2078,13 +2088,17 @@ async def _prog_opp_names(source: str, opp_id: str, comp_id: str = "") -> Dict[s
     return {k.split(":", 1)[1]: v for k, v in known.items() if k.startswith(f"{src_db}:")}
 
 
-async def _prog_send(message, source: str, team_id: str) -> None:
-    """Короткая сводка в чат + подробный разбор файлом.
+REPORT_FILE_CAPTION = ("Открой файл и листай вниз: сезон, последняя игра, "
+                       "динамика, состав с тренировками, лига, лидеры "
+                       "соперника. В самом конце — готовый промт для ИИ.")
 
-    В сообщение помещается «что случилось в игре» на пять строк; сезон,
-    тренды и сравнения — это таблицы и графики, в тексте они нечитаемы."""
+
+async def _prog_build(source: str, team_id: str) -> Tuple[str, Dict[str, Any]]:
+    """Сводка текстом и данные подробного разбора.
+
+    Отдельно от отправки: один и тот же разбор нужен и по кнопке, и сам собой
+    в личку тренеру после игры."""
     import team_progress
-    import team_report_html
 
     teams = await _prog_teams()
     title = next((t["name"] for t in teams
@@ -2100,20 +2114,32 @@ async def _prog_send(message, source: str, team_id: str) -> None:
     detail = await asyncio.to_thread(team_progress.detailed_report,
                                      team_id, source, title, names,
                                      standings, team_names, opp_names)
-    await message.reply_text(team_progress.short_summary(rep, detail),
+    return team_progress.short_summary(rep, detail), detail
+
+
+def _prog_file(detail: Dict[str, Any], team_id: str) -> io.BytesIO:
+    import team_report_html
+    page = team_report_html.build(detail)
+    buf = io.BytesIO(page.encode("utf-8"))
+    buf.name = f"razbor-{team_id}-{detail['series'][-1]['game_date']}.html"
+    return buf
+
+
+async def _prog_send(message, source: str, team_id: str) -> None:
+    """Короткая сводка в чат + подробный разбор файлом.
+
+    В сообщение помещается «что случилось в игре» на пять строк; сезон,
+    тренды и сравнения — это таблицы и графики, в тексте они нечитаемы."""
+    summary, detail = await _prog_build(source, team_id)
+    await message.reply_text(summary,
                              reply_markup=InlineKeyboardMarkup(
                                  [[InlineKeyboardButton("⬅️ К командам",
                                                         callback_data="prog:list")]]))
     if not detail.get("ok"):
         return
     try:
-        page = await asyncio.to_thread(team_report_html.build, detail)
-        buf = io.BytesIO(page.encode("utf-8"))
-        buf.name = f"razbor-{team_id}-{detail['series'][-1]['game_date']}.html"
-        await message.reply_document(
-            buf, caption="Открой файл и листай вниз: сезон, последняя игра, "
-                         "динамика, состав с тренировками, лига, лидеры соперника. "
-                         "В самом конце — готовый промт для ИИ.")
+        buf = await asyncio.to_thread(_prog_file, detail, team_id)
+        await message.reply_document(buf, caption=REPORT_FILE_CAPTION)
     except Exception as e:
         log.error(f"HTML-разбор не собрался: {e}")
         await message.reply_text("⚠️ Подробный файл собрать не вышло, "
@@ -2544,14 +2570,421 @@ async def handle_mystats_button(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_progress_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопка «📈 Прогресс команды» на нижней клавиатуре — для тренеров."""
+    """Кнопка «📈 Прогресс команды» на нижней клавиатуре — для тренеров.
+
+    Кнопки в клавиатуре больше нет (её место занял раздел тренера), но у тех,
+    кто не нажимал /start после обновления, она ещё висит — обработчик оставлен
+    ради них."""
     msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
     if not msg or not user or not chat or chat.type != "private":
         return
     if not _can_see_reports(user):
         return
-    text, markup = await _render_prog_list(is_admin=_is_admin(user))
+    text, markup = await _render_prog_list(is_admin=_is_admin(user), back="coach:main")
     await msg.reply_text(text, reply_markup=markup)
+    raise ApplicationHandlerStop
+
+
+# ─────────────────────────── Раздел тренера ────────────────────────────────
+#
+# Отдельная кнопка под чатом для тренера и тех, кому открыт «team»-доступ.
+# Внутри — разбор игр (он же приходит в личку сам после матча) и учёт оплат:
+# тренеру на телефон падает СМС о поступлении, он вставляет её сюда, а бот
+# разбирает сумму с отправителем и пишет платёж в базу и лист «Оплаты».
+
+COACH_TEXT = ("🧑‍🏫 Раздел тренера\n\n"
+              "Разбор игр приходит сюда сам после каждого матча — здесь его "
+              "можно открыть в любой момент.\n"
+              "Оплаты: вставь СМС от банка, остальное сделаю я.")
+
+# Черновики платежей: {tg id тренера: разобранная СМС + выбор}. В памяти —
+# незаконченный ввод переживать рестарт не должен, а ФИО отправителя из СМС
+# на диск не попадает.
+_pay_draft: Dict[int, Dict[str, Any]] = {}
+_awaiting_payment: set = set()
+
+PAY_ASK = ("💳 Вставь СМС от банка целиком — я вытащу сумму и отправителя.\n\n"
+           "Можно и руками: «Фамилия 900».\n\n"
+           "Передумал — /start.")
+
+PLAYERS_PER_PAGE = 8
+
+
+def _coach_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
+        [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
+        [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe")],
+        [InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
+    ])
+
+
+async def handle_coach_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «🧑‍🏫 Тренер» на нижней клавиатуре."""
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    if not _can_see_reports(user):
+        return
+    await msg.reply_text(COACH_TEXT, reply_markup=_coach_markup())
+    raise ApplicationHandlerStop
+
+
+def _pay_players_markup(page: int = 0, query: str = "") -> InlineKeyboardMarkup:
+    """Выбор игрока списком. Страницами: тридцать кнопок разом Telegram
+    покажет, но попасть в нужную пальцем уже нельзя."""
+    import coach_payments
+    people = [p for p in coach_payments.players() if p["active"]]
+    if query:
+        found = coach_payments.match_player(query)
+        if found:
+            people = found + [p for p in people if p not in found]
+    pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(p["title"][:60], callback_data=f"coach:pick:{p['row']}")]
+            for p in chunk]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"coach:page:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="coach:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"coach:page:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _pay_confirm(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_payments
+    player = coach_payments.player_by_row(draft["row"])
+    title = player["title"] if player else f"строка {draft['row']}"
+    kind, games = draft["kind"], draft["games"]
+    price = coach_payments.game_price(player)
+    lines = ["💳 Проверь и подтверди", "",
+             f"Кто: {title}",
+             f"Сумма: {draft['amount']} ₽"]
+    if kind == coach_payments.KIND_GAME:
+        lines.append(f"За что: {coach_payments.games_word(games)} (по {price} ₽)")
+    else:
+        lines.append("За что: взнос за сезон")
+    lines.append(f"Дата: {coach_payments._human_date(draft['paid_at'])}")
+    if draft.get("bank"):
+        lines.append(f"Банк: {draft['bank']}")
+    if draft.get("outgoing"):
+        lines += ["", "⚠️ Похоже на списание, а не на поступление. "
+                      "Если это всё-таки оплата — записывай."]
+    other = ("взнос за сезон" if kind == coach_payments.KIND_GAME else "оплату игр")
+    rows = [[InlineKeyboardButton("✅ Записать", callback_data="coach:save")],
+            [InlineKeyboardButton(f"🔀 Это {other}", callback_data="coach:kind")],
+            [InlineKeyboardButton("👤 Другой игрок", callback_data="coach:who")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="coach:main")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _pay_owe_text() -> str:
+    import coach_payments
+    rows = coach_payments.balances()
+    if not rows:
+        return ("📒 В листе «Игроки» пока никого нет.\n\n"
+                "Проверь синхронизацию таблицы.")
+    lines = ["📒 Кто сколько внёс", ""]
+    debtors = [r for r in rows if r["pay_season"] and r["debt"] > 0]
+    closed = [r for r in rows if r["season_done"]]
+    # Кому взнос не проставлен — отдельно: у них не «оплачено», а «не с чем
+    # сравнивать», и мешать их с закрывшими сезон нельзя.
+    no_plan = [r for r in rows if not r["pay_season"]]
+    if debtors:
+        lines.append("Не хватает за сезон:")
+        for r in debtors:
+            lines.append(f"• {r['title']} — {r['debt']} ₽ "
+                         f"(внёс {r['paid_season']} из {r['pay_season']})")
+        lines.append("")
+    if closed:
+        lines.append("Сезон закрыт:")
+        for r in closed:
+            games = f", {coach_payments.games_word(r['paid_games'])}" if r["paid_games"] else ""
+            lines.append(f"• {r['title']} — {r['paid_season']} ₽{games}")
+        lines.append("")
+    if no_plan:
+        lines.append(f"Взнос за сезон не проставлен "
+                     f"({coach_payments.plural(len(no_plan), 'игрок', 'игрока', 'игроков')}):")
+        for r in no_plan:
+            if r["paid_games"] or r["paid_season"]:
+                paid_sum = r["paid_season"] + r["paid_game_amount"]
+                games = (f", {coach_payments.games_word(r['paid_games'])}"
+                         if r["paid_games"] else "")
+                lines.append(f"• {r['title']} — внёс {paid_sum} ₽{games}")
+            else:
+                lines.append(f"• {r['title']} — платежей нет")
+        lines.append("")
+        lines.append("Долг считаю по столбцу «Оплата сезона» в листе «Игроки» — "
+                     "проставь там суммы, и я начну следить.")
+    return "\n".join(lines).rstrip()
+
+
+def _pay_last_text() -> str:
+    import coach_payments
+    rows = coach_payments.recent(12)
+    if not rows:
+        return "🧾 Платежей ещё не было."
+    lines = ["🧾 Последние платежи", ""]
+    for r in rows:
+        what = (coach_payments.games_word(r["games"])
+                if r["kind"] == coach_payments.KIND_GAME else "сезон")
+        bank = f" · {r['bank']}" if r["bank"] else ""
+        lines.append(f"• {coach_payments._human_date(r['paid_at'])} — {r['title']}: "
+                     f"{r['amount']} ₽ ({what}){bank}")
+    return "\n".join(lines)
+
+
+async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    import coach_payments
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not _can_see_reports(user):
+        if query:
+            await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else "main"
+    back = [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]
+
+    try:
+        if what == "main":
+            _awaiting_payment.discard(user.id)
+            _pay_draft.pop(user.id, None)
+            await query.edit_message_text(COACH_TEXT, reply_markup=_coach_markup())
+
+        elif what == "prog":
+            text, markup = await _render_prog_list(is_admin=_is_admin(user),
+                                                   back="coach:main")
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "pay":
+            _awaiting_payment.add(user.id)
+            _pay_draft.pop(user.id, None)
+            await query.edit_message_text(PAY_ASK)
+
+        elif what == "owe":
+            text = await asyncio.to_thread(_pay_owe_text)
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([back]))
+
+        elif what == "last":
+            text = await asyncio.to_thread(_pay_last_text)
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([back]))
+
+        elif what in ("who", "page"):
+            draft = _pay_draft.get(user.id)
+            if not draft:
+                await query.edit_message_text(COACH_TEXT, reply_markup=_coach_markup())
+                return
+            page = int(parts[2]) if what == "page" and len(parts) > 2 else 0
+            draft["stage"] = "who"
+            _pay_draft[user.id] = draft
+            _awaiting_payment.add(user.id)
+            markup = await asyncio.to_thread(_pay_players_markup, page,
+                                             draft.get("sender", ""))
+            await query.edit_message_text(
+                f"👤 Кому засчитать {draft['amount']} ₽?\n\n"
+                "Выбери из списка или просто напиши фамилию.", reply_markup=markup)
+
+        elif what == "pick" and len(parts) > 2:
+            draft = _pay_draft.get(user.id)
+            if not draft:
+                await query.edit_message_text(COACH_TEXT, reply_markup=_coach_markup())
+                return
+            player = await asyncio.to_thread(coach_payments.player_by_row, int(parts[2]))
+            if not player:
+                await query.edit_message_text("Такого игрока в листе больше нет — "
+                                              "открой список заново.",
+                                              reply_markup=_coach_markup())
+                return
+            draft["row"] = player["row"]
+            draft.pop("stage", None)
+            _awaiting_payment.discard(user.id)
+            # Цена игры бывает личной, поэтому тип платежа пересчитываем уже
+            # под конкретного человека: 1350 у одного — сезон, у другого — игра.
+            draft["kind"], draft["games"] = await asyncio.to_thread(
+                coach_payments.classify, draft["amount"], player)
+            _pay_draft[user.id] = draft
+            text, markup = _pay_confirm(draft)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "kind":
+            draft = _pay_draft.get(user.id)
+            if not draft:
+                await query.edit_message_text(COACH_TEXT, reply_markup=_coach_markup())
+                return
+            player = await asyncio.to_thread(coach_payments.player_by_row, draft["row"])
+            price = coach_payments.game_price(player)
+            if draft["kind"] == coach_payments.KIND_GAME:
+                draft.update(kind=coach_payments.KIND_SEASON, games=0)
+            else:
+                draft.update(kind=coach_payments.KIND_GAME,
+                             games=max(1, draft["amount"] // price) if price else 1)
+            _pay_draft[user.id] = draft
+            text, markup = _pay_confirm(draft)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "save":
+            draft = _pay_draft.pop(user.id, None)
+            if not draft:
+                await query.edit_message_text(COACH_TEXT, reply_markup=_coach_markup())
+                return
+            await query.edit_message_text("⏳ Записываю…")
+            rec = await asyncio.to_thread(
+                coach_payments.record, draft["row"], draft["amount"], draft["kind"],
+                draft["games"], draft["paid_at"], draft.get("bank", ""), "",
+                str(user.id), draft.get("fp", ""))
+            text = await asyncio.to_thread(_pay_saved_text, rec)
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Внести ещё", callback_data="coach:pay")],
+                back]))
+
+        elif what == "noop":
+            return
+
+    except Exception as e:
+        log.error(f"Раздел тренера ({what}): {e}")
+        await query.edit_message_text(f"⚠️ Не получилось: {e}",
+                                      reply_markup=InlineKeyboardMarkup([back]))
+
+
+def _pay_saved_text(rec: Dict[str, Any]) -> str:
+    """Итог записи + выгрузка в лист. Лист — не хранилище: в базе платёж уже
+    лежит, поэтому недоступный Google меняет только приписку внизу."""
+    import coach_payments
+    player = coach_payments.player_by_row(rec["player_row"])
+    title = player["title"] if player else f"строка {rec['player_row']}"
+    if rec.get("duplicate"):
+        return (f"🔁 Такой платёж уже записан: {title}, {rec['amount']} ₽ "
+                f"от {coach_payments._human_date(rec['paid_at'])}.\n\n"
+                "Дважды одно и то же не провожу. Если это правда другой "
+                "перевод — подожди минуту и введи руками: «Фамилия сумма».")
+    what = (coach_payments.games_word(rec["games"])
+            if rec["kind"] == coach_payments.KIND_GAME else "взнос за сезон")
+    lines = [f"✅ Записал: {title} — {rec['amount']} ₽ ({what}).", ""]
+    if player:
+        bal = next((b for b in coach_payments.balances(only_active=False)
+                    if b["row"] == player["row"]), None)
+        if bal and bal["pay_season"]:
+            lines.append(f"Сезон: {bal['paid_season']} из {bal['pay_season']} ₽"
+                         + (f", не хватает {bal['debt']} ₽" if bal["debt"] else " — закрыт"))
+        if bal and bal["paid_games"]:
+            lines.append(f"Оплачено: {coach_payments.games_word(bal['paid_games'])}")
+    try:
+        pushed = coach_payments.push_pending(_get_spreadsheet())
+        lines.append("")
+        lines.append(f"В лист «Оплаты» ушло строк: {pushed}." if pushed
+                     else "Лист «Оплаты» обновлю следующим заходом.")
+    except Exception as e:
+        log.warning(f"Лист «Оплаты» не обновился: {e}")
+        lines += ["", "Платёж записан, но в лист «Оплаты» пока не попал — "
+                      "допишу его при следующей записи."]
+    return "\n".join(lines)
+
+
+_MANUAL_RE = re.compile(r"^\s*([А-ЯЁа-яё\-]{3,})\s+(\d{2,7})\s*$|"
+                        r"^\s*(\d{2,7})\s+([А-ЯЁа-яё\-]{3,})\s*$")
+
+
+async def _pay_ask_who(msg, user_id: int, draft: Dict[str, Any], head: str) -> None:
+    """Просит выбрать игрока — кнопками или фамилией с клавиатуры.
+
+    Держим ввод открытым: тренеру с телефона набрать «Дроздов» быстрее, чем
+    листать список, а спецификация раздела допускает оба пути."""
+    draft["stage"] = "who"
+    _pay_draft[user_id] = draft
+    _awaiting_payment.add(user_id)
+    markup = await asyncio.to_thread(_pay_players_markup, 0, draft.get("sender", ""))
+    await msg.reply_text(f"💳 {draft['amount']} ₽. {head}\n\n"
+                         "Можно и просто написать фамилию.", reply_markup=markup)
+
+
+async def _pay_show_confirm(msg, user_id: int, draft: Dict[str, Any],
+                            player: Dict[str, Any]) -> None:
+    import coach_payments
+    draft["row"] = player["row"]
+    draft.pop("stage", None)
+    # Цена игры бывает личной, поэтому тип платежа уточняем под конкретного
+    # человека: 1350 у одного — сезон, у другого — игра.
+    draft["kind"], draft["games"] = await asyncio.to_thread(
+        coach_payments.classify, draft["amount"], player)
+    _pay_draft[user_id] = draft
+    _awaiting_payment.discard(user_id)
+    text_out, markup = _pay_confirm(draft)
+    await msg.reply_text(text_out, reply_markup=markup)
+
+
+async def handle_payment_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Текст после «Внести оплату»: СМС от банка, «Фамилия 900» или фамилия."""
+    import coach_payments
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_payment:
+        return
+    if not _can_see_reports(user):
+        _awaiting_payment.discard(user.id)
+        return
+    _awaiting_payment.discard(user.id)
+    text = (msg.text or "").strip()
+
+    # Ждём фамилию к уже разобранной сумме.
+    draft = _pay_draft.get(user.id)
+    if draft and draft.get("stage") == "who":
+        found = await asyncio.to_thread(coach_payments.match_player, text)
+        if len(found) == 1:
+            await _pay_show_confirm(msg, user.id, draft, found[0])
+        else:
+            draft["sender"] = text
+            head = (f"Под «{text}» подходят {len(found)} — выбери, кто это."
+                    if found else f"Не нашёл «{text}» в составе. Выбери из списка.")
+            await _pay_ask_who(msg, user.id, draft, head)
+        raise ApplicationHandlerStop
+
+    manual = _MANUAL_RE.match(text)
+    if manual:
+        surname = manual.group(1) or manual.group(4)
+        amount = int(manual.group(2) or manual.group(3))
+        parsed = {"amount": amount, "sender": surname, "paid_at": "",
+                  "bank": "", "outgoing": False, "fingerprint": ""}
+    else:
+        parsed = await asyncio.to_thread(coach_payments.parse_sms, text)
+
+    if not parsed["amount"]:
+        _awaiting_payment.add(user.id)
+        await msg.reply_text(
+            "Не нашёл в этом тексте сумму. Пришли СМС целиком или напиши "
+            "коротко: «Фамилия 900».")
+        raise ApplicationHandlerStop
+
+    dup = await asyncio.to_thread(coach_payments.already_recorded,
+                                  parsed.get("fingerprint", ""))
+    if dup:
+        await msg.reply_text(await asyncio.to_thread(
+            _pay_saved_text, {**dup, "duplicate": True, "games": 0}),
+            reply_markup=_coach_markup())
+        raise ApplicationHandlerStop
+
+    kind, games = await asyncio.to_thread(coach_payments.classify, parsed["amount"])
+    draft = {"amount": parsed["amount"], "sender": parsed["sender"],
+             "paid_at": parsed["paid_at"] or date.today().isoformat(),
+             "bank": parsed["bank"], "outgoing": parsed.get("outgoing", False),
+             "fp": parsed.get("fingerprint", ""), "kind": kind, "games": games}
+    _pay_draft[user.id] = draft
+
+    found = await asyncio.to_thread(coach_payments.match_player, parsed["sender"])
+    if len(found) == 1:
+        await _pay_show_confirm(msg, user.id, draft, found[0])
+        raise ApplicationHandlerStop
+
+    who = (f"«{parsed['sender']}»" if parsed["sender"] else "отправителя")
+    head = (f"Нашёл {coach_payments.plural(len(found), 'подходящего', 'подходящих', 'подходящих')}"
+            " — выбери, кто это."
+            if found else f"Не понял, кто платил ({who}). Выбери из списка.")
+    await _pay_ask_who(msg, user.id, draft, head)
     raise ApplicationHandlerStop
 
 
@@ -2859,6 +3292,88 @@ async def _sync_leagues() -> None:
         log.warning(f"Справочники лиг не обновились: {e}")
 
 
+# Разбор старше этого срока в личку не шлём. Первый прогон иначе вывалит
+# тренеру отчёты по всем играм, которые уже лежат в базе, — так уже было с
+# записями матчей из VK.
+COACH_REPORT_MAX_AGE_DAYS = 3
+
+
+def _coach_recipients() -> List[str]:
+    """Кому уходит разбор: админы и все, кому открыт раздел тренера.
+
+    Доступ выдаётся по @нику, а числовой id проставляется при первом входе —
+    у кого его ещё нет, тому и слать некуда."""
+    ids = [str(a) for a in ADMIN_USER_IDS]
+    try:
+        for row in sheets_cache.access_list(sheets_cache.ACCESS_TEAM):
+            uid = str(row.get("tg_user_id") or "").strip()
+            if uid:
+                ids.append(uid)
+    except Exception as e:
+        log.warning(f"Список тренеров не собрался: {e}")
+    return list(dict.fromkeys(ids))
+
+
+async def _coach_reports(app: Application) -> None:
+    """Разбор последней игры — сам в личку тренеру, без нажатия кнопки.
+
+    Раньше отчёт существовал только по кнопке «Прогресс команды»: тренер
+    узнавал о разборе, только если сам за ним пришёл. Отправляем, когда
+    статистика игры уже лежит в базе (иначе разбирать нечего), один раз на
+    игру."""
+    import team_progress
+    recipients = await asyncio.to_thread(_coach_recipients)
+    if not recipients:
+        return
+    today = date.today()
+    for team in await _prog_teams():
+        source, team_id = team["source"], team["team_id"]
+        try:
+            games = await asyncio.to_thread(team_progress.team_games, team_id, source, 3)
+            last = next((g for g in games if team_progress.is_real_game(g)), None)
+            if not last:
+                continue
+            game_id = str(last["game_id"])
+            if await asyncio.to_thread(sheets_cache.coach_report_sent,
+                                       source, team_id, game_id):
+                continue
+            try:
+                age = (today - date.fromisoformat(str(last["date"])[:10])).days
+            except ValueError:
+                age = 0
+            if age > COACH_REPORT_MAX_AGE_DAYS:
+                # Старое помечаем отправленным молча: это не новость, но и
+                # спотыкаться о неё каждый тик незачем.
+                await asyncio.to_thread(sheets_cache.mark_coach_report,
+                                        source, team_id, game_id)
+                continue
+
+            summary, detail = await _prog_build(source, team_id)
+            if not detail.get("ok"):
+                continue
+            buf = await asyncio.to_thread(_prog_file, detail, team_id)
+            page = buf.getvalue()
+            sent = 0
+            for uid in recipients:
+                try:
+                    await app.bot.send_message(chat_id=int(uid), text=summary)
+                    doc = io.BytesIO(page)
+                    doc.name = buf.name
+                    await app.bot.send_document(chat_id=int(uid), document=doc,
+                                                caption=REPORT_FILE_CAPTION)
+                    sent += 1
+                except Exception as e:
+                    log.warning(f"Разбор не доставлен {uid}: {e}")
+            # Помечаем в любом случае: не дошло — значит человек закрыл личку
+            # или заблокировал бота, и повторять это каждые пять минут незачем.
+            await asyncio.to_thread(sheets_cache.mark_coach_report,
+                                    source, team_id, game_id)
+            log.info(f"Разбор игры {source}:{game_id} ушёл тренерам: {sent} из "
+                     f"{len(recipients)}")
+        except Exception as e:
+            log.error(f"Разбор для {source}:{team_id} не отправлен: {e}")
+
+
 async def _warm_fantasy_pool(force: bool = False) -> None:
     global _pool_warm_at
     if not (FANTASY_API_ENABLED and BOT_TOKEN):
@@ -2912,6 +3427,7 @@ async def _background_loop(app: Application) -> None:
             await asyncio.to_thread(_refresh_db_cache)
             await asyncio.to_thread(_periodic_push_local_changes)
             await _sync_leagues()
+            await _coach_reports(app)
             await _warm_fantasy_pool()
             await _keep_funnel_warm()
             # Адрес Cloudflare-туннеля меняется при его рестарте (независимо от
@@ -2941,6 +3457,20 @@ async def on_startup(app: Application) -> None:
     _refresh_poll_cache()
     _refresh_db_cache()
     _periodic_push_local_changes()
+    # Столбцы оплат в листе «Игроки» — один раз при старте, а не в ответ
+    # человеку: это поход в Google, и в обработчике он был бы задержкой.
+    try:
+        import coach_payments
+        added = await asyncio.to_thread(coach_payments.ensure_payment_columns,
+                                        _get_spreadsheet())
+        if added:
+            log.info(f"Лист «Игроки»: добавлены столбцы {', '.join(added)}")
+        # Платежи, не дошедшие до листа в прошлый раз (Google был недоступен).
+        left = await asyncio.to_thread(coach_payments.push_pending, _get_spreadsheet())
+        if left:
+            log.info(f"Лист «Оплаты»: дописано отложенных строк — {left}")
+    except Exception as e:
+        log.warning(f"Столбцы оплат не проверены: {e}")
     # Список команд у игрока и у админа разный: личная статистика и админка —
     # скрытые функции, и в меню обычного игрока их быть не должно.
     try:
@@ -3048,6 +3578,8 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Text([ADMIN_KEYBOARD_LABEL]), handle_admin_button))
     app.add_handler(MessageHandler(filters.Text([PROGRESS_KEYBOARD_LABEL]),
                                    handle_progress_button))
+    app.add_handler(MessageHandler(filters.Text([COACH_KEYBOARD_LABEL]),
+                                   handle_coach_button))
     app.add_handler(MessageHandler(filters.Text([MYSTATS_KEYBOARD_LABEL]),
                                    handle_mystats_button))
     app.add_handler(MessageHandler(filters.Text([FEEDBACK_KEYBOARD_LABEL]), handle_feedback_button))
@@ -3077,10 +3609,14 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_profile_link), group=3)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_payment_text), group=5)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
 
     log.info("Запуск polling...")
     app.run_polling(
