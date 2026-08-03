@@ -316,9 +316,13 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
                       until_day=today + timedelta(days=COLLECT_BEFORE_DAYS)):
         ref = f"{game['source']}:{game['game_id']}"
         left = (game["date"] - today).days
-        if left == COLLECT_BEFORE_DAYS:
+        # Не «ровно за три дня», а «как только до игры осталось три дня или
+        # меньше»: игру в лиге могут открыть и за два дня до неё, и тогда
+        # точное совпадение просто не сработало бы. Событие помечается
+        # выполненным, поэтому запрос уходит один раз.
+        if 0 <= left <= COLLECT_BEFORE_DAYS:
             out.append((f"game:{ref}:collect", game, "collect"))
-        elif left == 0 and now.hour >= 9:
+        if left == 0 and now.hour >= 9:
             out.append((f"game:{ref}:coach_day", game, "coach_day"))
         elif left == -1 and now.hour >= 9:
             out.append((f"game:{ref}:coach_next", game, "coach_next"))

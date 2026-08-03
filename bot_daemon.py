@@ -2614,10 +2614,35 @@ def _coach_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
+        [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games")],
         [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
         [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe")],
         [InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
     ])
+
+
+def _games_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Ближайшие игры — чтобы собрать состав, не дожидаясь напоминания.
+    Игру в лиге открывают когда угодно, а состав тренеру бывает нужен раньше."""
+    import game_roster
+    today = date.today()
+    upcoming = game_roster.games(from_day=today - timedelta(days=1),
+                                 until_day=today + timedelta(days=21))
+    if not upcoming:
+        return ("👥 Ближайших игр не вижу.\n\nОпрос на игру бот заводит, когда "
+                "она появляется в лиге — тогда же можно собрать состав.",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ В раздел", callback_data="coach:main")]]))
+    lines = ["👥 Состав на игру", "", "Выбери игру:"]
+    rows = []
+    for g in upcoming:
+        picked = len(game_roster.roster(g["source"], g["game_id"]))
+        mark = f" · в составе {picked}" if picked else ""
+        rows.append([InlineKeyboardButton(
+            f"{game_roster.game_label(g)}{mark}"[:60],
+            callback_data=f"rost:show:{g['source']}:{g['game_id']}")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup]:
@@ -2926,6 +2951,9 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
     try:
         if what == "add":
             await asyncio.to_thread(game_roster.add, source, game_id, row, str(user.id))
+            _drop_pending(user.id)
+        elif what == "skip":
+            _drop_pending(user.id)
         elif what == "del":
             await asyncio.to_thread(game_roster.remove, source, game_id, row)
         elif what == "paid":
@@ -2942,11 +2970,26 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
             await _post_roster(query, source, game_id, user)
             return
 
+        # Спорные фамилии из списка разбираем подряд, не возвращая тренера
+        # каждый раз к общему экрану.
+        question = _next_roster_question(user.id, source, game_id)
+        if question and what in ("add", "skip"):
+            text, markup = question
+            await query.edit_message_text(text, reply_markup=markup)
+            return
         text, markup = await asyncio.to_thread(_roster_screen, source, game_id)
         await query.edit_message_text(text, reply_markup=markup)
     except Exception as e:
         log.error(f"Состав ({what}): {e}")
         await query.edit_message_text(f"⚠️ Не получилось: {e}")
+
+
+def _drop_pending(user_id: int) -> None:
+    queue = _roster_pending.get(user_id)
+    if queue:
+        queue.pop(0)
+        if not queue:
+            _roster_pending.pop(user_id, None)
 
 
 async def _post_roster(query, source: str, game_id: str, user) -> None:
@@ -2980,8 +3023,40 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
     await query.edit_message_text(note + "\n\n" + screen, reply_markup=markup)
 
 
+# Спорные фамилии из списка: {tg id: [{query, options}]}. Разбираем их ПОСЛЕ
+# того, как прошли весь список, — тренер пишет состав одной строкой и не
+# должен останавливаться на каждом однофамильце.
+_roster_pending: Dict[int, List[Dict[str, Any]]] = {}
+
+
+def _split_names(text: str) -> List[str]:
+    """«Дроздов, Романов; Катюргин» -> три фамилии. Опрос бывает пустым (лига
+    ещё не открыла игру), и тогда состав приходит списком в одном сообщении."""
+    return [p.strip() for p in re.split(r"[,;\n]+", text or "") if p.strip()]
+
+
+def _next_roster_question(user_id: int, source: str, game_id: str
+                          ) -> Optional[Tuple[str, InlineKeyboardMarkup]]:
+    """Экран для следующей неоднозначной фамилии, если такие остались."""
+    queue = _roster_pending.get(user_id) or []
+    if not queue:
+        _roster_pending.pop(user_id, None)
+        return None
+    item = queue[0]
+    rows = [[InlineKeyboardButton(p["title"][:60],
+                                  callback_data=f"rost:add:{source}:{game_id}:{p['row']}")]
+            for p in item["options"]]
+    rows.append([InlineKeyboardButton("⏭ Пропустить",
+                                      callback_data=f"rost:skip:{source}:{game_id}")])
+    left = f" (осталось уточнить: {len(queue)})" if len(queue) > 1 else ""
+    return (f"Кто из них «{item['query']}»?{left}", InlineKeyboardMarkup(rows))
+
+
 async def handle_roster_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Фамилия (или её часть) от тренера, который собирает состав."""
+    """Фамилии от тренера: одна или списком через запятую.
+
+    Однозначных добавляем сразу, спорных и ненайденных копим и разбираем в
+    конце — иначе длинный список рвётся на первом же однофамильце."""
     import game_roster
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _roster_focus:
@@ -2990,24 +3065,39 @@ async def handle_roster_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _roster_focus.pop(user.id, None)
         return
     source, game_id = _roster_focus[user.id]
-    text = (msg.text or "").strip()
-    found = await asyncio.to_thread(game_roster.search, text)
-    if not found:
-        await msg.reply_text(f"Никого похожего на «{text}» в листе «Игроки» нет.")
+    names = _split_names(msg.text or "")
+    if not names:
+        return
+
+    added: List[str] = []
+    missing: List[str] = []
+    pending: List[Dict[str, Any]] = []
+    for name in names:
+        found = await asyncio.to_thread(game_roster.search, name)
+        if len(found) == 1:
+            await asyncio.to_thread(game_roster.add, source, game_id,
+                                    found[0]["row"], str(user.id))
+            added.append(found[0]["title"])
+        elif found:
+            pending.append({"query": name, "options": found})
+        else:
+            missing.append(name)
+    _roster_pending[user.id] = pending
+
+    head = []
+    if added:
+        head.append("➕ Добавил: " + ", ".join(added))
+    if missing:
+        head.append("Не нашёл в листе «Игроки»: " + ", ".join(missing))
+    question = _next_roster_question(user.id, source, game_id)
+    if question:
+        text, markup = question
+        await msg.reply_text(("\n".join(head) + "\n\n" if head else "") + text,
+                             reply_markup=markup)
         raise ApplicationHandlerStop
-    if len(found) == 1:
-        await asyncio.to_thread(game_roster.add, source, game_id, found[0]["row"],
-                                str(user.id))
-        screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
-        await msg.reply_text(f"➕ {found[0]['title']}\n\n" + screen, reply_markup=markup)
-        raise ApplicationHandlerStop
-    rows = [[InlineKeyboardButton(p["title"][:60],
-                                  callback_data=f"rost:add:{source}:{game_id}:{p['row']}")]
-            for p in found]
-    rows.append([InlineKeyboardButton("⬅️ К составу",
-                                      callback_data=f"rost:show:{source}:{game_id}")])
-    await msg.reply_text(f"Кого из них добавить в состав?",
-                         reply_markup=InlineKeyboardMarkup(rows))
+    screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
+    await msg.reply_text(("\n".join(head) + "\n\n" if head else "") + screen,
+                         reply_markup=markup)
     raise ApplicationHandlerStop
 
 
@@ -3039,6 +3129,10 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _awaiting_payment.add(user.id)
             _pay_draft.pop(user.id, None)
             await query.edit_message_text(PAY_ASK)
+
+        elif what == "games":
+            text, markup = await asyncio.to_thread(_games_screen)
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "train":
             period = parts[2] if len(parts) > 2 else ""
