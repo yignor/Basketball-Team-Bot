@@ -2790,7 +2790,7 @@ def _pay_players_markup(page: int = 0, query: str = "") -> InlineKeyboardMarkup:
     # Все из листа: за игру может заплатить и тот, кто сейчас не тренируется.
     people = coach_payments.players()
     if query:
-        found = coach_payments.match_player(query)
+        found = coach_payments.match_player(query) or coach_payments.search_players(query)
         if found:
             people = found + [p for p in people if p not in found]
     pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
@@ -3333,7 +3333,11 @@ async def handle_payment_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Ждём фамилию к уже разобранной сумме.
     draft = _pay_draft.get(user.id)
     if draft and draft.get("stage") == "who":
-        found = await asyncio.to_thread(coach_payments.match_player, text)
+        # Тренер печатает фамилию (часто часть) — ищем как везде в боте, и
+        # только если ничего, пробуем разобрать это как подпись из СМС.
+        found = await asyncio.to_thread(coach_payments.search_players, text)
+        if not found:
+            found = await asyncio.to_thread(coach_payments.match_player, text)
         if len(found) == 1:
             await _pay_show_confirm(msg, user.id, draft, found[0])
         else:

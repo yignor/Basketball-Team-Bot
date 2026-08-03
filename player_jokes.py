@@ -43,25 +43,12 @@ def _norm(text: str) -> str:
 def find_player(name: str) -> List[Dict[str, Any]]:
     """Кандидаты из листа «Игроки» по тому, что человек ввёл руками.
 
-    Ищем по фамилии, а не по полному совпадению: «Дроздов» должно находить
-    «Дроздов Даниил». Возвращаем всех подходящих — выбирать будет человек,
-    иначе однофамильцы молча получат чужую шутку."""
-    key = _norm(name)
-    if not key:
-        return []
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        rows = [dict(r) for r in conn.execute(
-            "SELECT row_index, surname, name FROM players WHERE surname != '' OR name != ''")]
-    exact, partial = [], []
-    for r in rows:
-        full = _norm(f"{r['surname']} {r['name']}")
-        sur = _norm(r["surname"])
-        if full == key or sur == key:
-            exact.append(r)
-        elif key and (sur.startswith(key) or full.startswith(key)):
-            partial.append(r)
-    return exact or partial
+    Поиск общий на весь бот (player_search): понимает часть фамилии и имя.
+    Возвращаем всех подходящих — выбирать будет человек, иначе однофамильцы
+    молча получат чужую шутку."""
+    import player_search
+    return [{"row_index": p["row"], "surname": p["surname"], "name": p["name"]}
+            for p in player_search.find(name)]
 
 
 def validate(text: str) -> Optional[str]:

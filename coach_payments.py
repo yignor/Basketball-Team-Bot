@@ -409,6 +409,22 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def search_players(query: str, limit: int = 8) -> List[Dict[str, Any]]:
+    """Игроки по части фамилии или имени — общим поиском бота.
+
+    Отдельно от match_player: тот разбирает подпись из банковской СМС («Иван
+    И.»), а этот — то, что тренер набрал руками, когда бот не понял, кто
+    платил."""
+    import player_search
+    by_row = {p["row"]: p for p in players()}
+    out = []
+    for hit in player_search.find(query, limit=limit):
+        card = by_row.get(hit["row"])
+        if card:
+            out.append(card)
+    return out
+
+
 def match_player(sender: str) -> List[Dict[str, Any]]:
     """Кандидаты по имени отправителя, лучшие — первыми.
 

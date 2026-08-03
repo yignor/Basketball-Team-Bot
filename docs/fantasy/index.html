@@ -295,6 +295,9 @@
   let seasonId = null, seasons = [];
 
   const $ = id => document.getElementById(id);
+  // Поиск везде в боте не различает регистр и «ё» — в приложении так же,
+  // иначе «Алёшин» не находится по «алешин».
+  const norm = t => (t || '').toLowerCase().replace(/ё/g, 'е').trim();
   function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
 
   // Тупиковый экран: кроме сообщения показывать нечего. Вкладки и фильтры
@@ -480,7 +483,7 @@
     if (p.excluded) return false;
     // Выбранных всегда показываем, чтобы не терять свой состав из виду.
     if (counts[p.ref]) return true;
-    if (search && p.name.toLowerCase().indexOf(search) < 0) return false;
+    if (search && norm(p.name).indexOf(search) < 0) return false;
     if (playedOnly && !(p.st && p.st.games)) return false;
     if (tierFilter.size && !tierFilter.has(p.tier)) return false;
     if (affordable && (p.price || 0) > budget() - spent()) return false;
@@ -1883,7 +1886,7 @@
     $('lockBanner').classList.toggle('hidden', !locked);
     msg('');
     $('sort').onchange = renderPool;
-    $('search').oninput = e => { search = (e.target.value || '').trim().toLowerCase(); renderPool(); };
+    $('search').oninput = e => { search = norm(e.target.value); renderPool(); };
     renderPool(); renderStandings();
     syncButton();
   }

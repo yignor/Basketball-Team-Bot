@@ -192,22 +192,18 @@ def mark_posted(source: str, game_id: str) -> None:
 
 
 def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
-    """Игроки по началу или куску фамилии. Регистр и «ё» не важны.
+    """Игроки по части фамилии или имени — общим поиском бота.
 
-    В Python, а не в SQL: sqlite-функция lower() кириллицу не трогает, и
-    «дроздов» не нашёл бы «Дроздов»."""
-    needle = coach_payments._norm(query)
-    if len(needle) < 2:
-        return []
-    starts, inside = [], []
-    for p in coach_payments.players():
-        surname = coach_payments._norm(p["surname"])
-        full = coach_payments._norm(p["title"])
-        if surname.startswith(needle):
-            starts.append(p)
-        elif needle in full:
-            inside.append(p)
-    return (starts + inside)[:limit]
+    Отдаём полные карточки (с суммами оплат), а не голые строки: состав потом
+    идёт в расчёт долгов, и цена игры у людей разная."""
+    import player_search
+    by_row = {p["row"]: p for p in coach_payments.players()}
+    out = []
+    for hit in player_search.find(query, limit=limit):
+        card = by_row.get(hit["row"])
+        if card:
+            out.append(card)
+    return out
 
 
 def post_text(game: Dict[str, Any], people: List[Dict[str, Any]]) -> str:
