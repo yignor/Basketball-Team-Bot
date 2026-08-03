@@ -590,8 +590,9 @@ CREATE TABLE IF NOT EXISTS game_roster_state (
     PRIMARY KEY (source, game_id)
 );
 
--- Что бот уже разослал по расписанию оплат: один ключ — одно событие.
--- Без этой отметки фоновый цикл слал бы напоминание каждые полминуты.
+-- Что бот уже разослал по расписанию: один ключ — одно событие. Оплаты
+-- («train:…», «game:…») и личные разборы игр («pers:…»). Без этой отметки
+-- фоновый цикл слал бы одно и то же каждые полминуты.
 CREATE TABLE IF NOT EXISTS pay_events (
     event_key   TEXT PRIMARY KEY,           -- 'train:2026-09:coach_pre' и т.п.
     sent_at     TEXT NOT NULL,

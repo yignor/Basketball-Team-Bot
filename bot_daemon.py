@@ -3920,6 +3920,36 @@ async def _remind_players(app: Application, period: str) -> Dict[str, List[str]]
     return stat
 
 
+async def _personal_digests(app: Application) -> None:
+    """«Присылать после каждой игры» — настройка была, отправки не было.
+
+    Ждём, пока протокол игры окажется в базе (иначе разбирать нечего), и шлём
+    короткий разбор в личку. Одна игра — одно сообщение, повторов нет."""
+    import personal_game
+    try:
+        todo = await asyncio.to_thread(personal_game.pending)
+    except Exception as e:
+        log.warning(f"Личные разборы: список не собрался: {e}")
+        return
+    for item in todo:
+        try:
+            text = await asyncio.to_thread(
+                personal_game.digest, item["source"], item["title"],
+                item["player_id"], item["game"])
+            if not text:
+                await asyncio.to_thread(personal_game.mark_sent, item["key"], "пусто")
+                continue
+            await app.bot.send_message(chat_id=int(item["uid"]), text=text)
+            await asyncio.to_thread(personal_game.mark_sent, item["key"], "отправлено")
+            log.info(f"Личный разбор игры {item['source']}:{item['game']['game_id']} "
+                     f"ушёл {item['uid']}")
+        except Exception as e:
+            # Заблокировал бота или закрыл личку — помечаем, чтобы не долбиться
+            # в закрытую дверь каждые полминуты.
+            log.info(f"Личный разбор не доставлен {item['uid']}: {e}")
+            await asyncio.to_thread(personal_game.mark_sent, item["key"], f"ошибка: {e}")
+
+
 async def _refresh_pay_summary() -> None:
     global _pay_sheet_at
     now = time.time()
@@ -3991,6 +4021,7 @@ async def _background_loop(app: Application) -> None:
             await _coach_reports(app)
             await _pay_schedule(app)
             await _game_schedule(app)
+            await _personal_digests(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()
             await _keep_funnel_warm()
