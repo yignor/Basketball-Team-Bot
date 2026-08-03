@@ -854,6 +854,13 @@ async def handle_history(request: web.Request) -> web.Response:
     ФИО в price_history нет, поэтому имена подставляем из пула: он и так
     собран в памяти, а на диске имён у нас не бывает."""
     import fantasy_prices
+    # Тот же пропуск, что и у остальных экранов: подпись initData обязательна.
+    # Без неё эндпоинт торчал бы наружу открытым — а туннель публичный.
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
     rows = await asyncio.get_running_loop().run_in_executor(
         None, lambda: fantasy_prices.history(20))
