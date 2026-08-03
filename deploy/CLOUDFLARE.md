@@ -48,21 +48,42 @@ sudo systemctl enable --now cloudflared-api
 curl -s https://api.one4two.ru/health | grep -o 'error code: [0-9]*'
 ```
 
-- **1033** — Cloudflare не нашёл туннель для этого имени. Сам туннель при этом
-  может быть в полном порядке (`Registered tunnel connection` в логе, запросы
-  до него просто не доходят). Значит DNS-запись `api.one4two.ru` смотрит на
-  ДРУГОЙ туннель — например, пересоздали туннель, а CNAME остался со старым
-  UUID. Лечится повторной привязкой имени (нужен `~/.cloudflared/cert.pem`,
-  он появляется после `cloudflared tunnel login`):
+- **1033** — у Cloudflare нет маршрута для этого имени. Коварство в том, что
+  туннель при этом выглядит живым: в логе `Registered tunnel connection`,
+  соединения переподключаются, UUID в логе совпадает с CNAME в DNS. Смотреть
+  надо на страницу туннеля в панели: **Status: Down, Active replicas: 0** при
+  живом логе на сервере — это и есть диагноз.
+
+  Причина (03.08.2026): туннель `pullup-api` заведён В ПАНЕЛИ, а такой туннель
+  управляется оттуда — маршруты хранятся у Cloudflare, и коннектор обязан
+  подключаться **токеном**. С парой `config.yml` + `credentials-file` коннектор
+  подключается к edge, но панель его не видит и маршрут не применяется.
+
+  Лечение — перевести сервис на токен:
 
   ```bash
-  sudo cloudflared tunnel list                       # какой UUID у pullup-api
-  sudo cloudflared tunnel route dns --overwrite-dns pullup-api api.one4two.ru
-  sudo systemctl restart cloudflared-api
+  # 1. Токен: панель -> Networking -> Tunnels -> pullup-api -> команда установки,
+  #    оттуда длинная строка eyJhIjoi... Скопировать её ТОЛЬКО на сервер.
+  sudo install -m 600 /dev/null /etc/cloudflared/token
+  sudo nano /etc/cloudflared/token       # одна строка: TUNNEL_TOKEN=eyJhIjoi...
+
+  # 2. Юнит уже умеет читать этот файл
+  sudo cp /opt/basketball-bot/deploy/cloudflared-api.service /etc/systemd/system/
+  sudo systemctl daemon-reload && sudo systemctl restart cloudflared-api
   ```
 
-  То же самое руками: в панели Cloudflare DNS → `api` → CNAME →
-  `<UUID>.cfargotunnel.com`, Proxied (оранжевое облако).
+  Проверить на вкладке **Routes** страницы туннеля, что `api.one4two.ru`
+  указывает на `http://localhost:8081`. Через полминуты панель должна показать
+  Status: Healthy и Active replicas: 1.
+
+  Если туннель, наоборот, локальный (создан через `cloudflared tunnel create`),
+  то 1033 значит, что DNS смотрит на другой UUID, и лечится это так:
+
+  ```bash
+  sudo cloudflared tunnel route dns --overwrite-dns pullup-api api.one4two.ru
+  ```
+
+  (нужен `~/.cloudflared/cert.pem` — появляется после `cloudflared tunnel login`).
 
 - **1016 / «no recent network activity»** в логе cloudflared — не проходит QUIC
   (UDP/7844). В конфиге для этого стоит `protocol: http2`: тот же TCP/443, что

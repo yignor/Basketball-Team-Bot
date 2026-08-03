@@ -5,10 +5,22 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-# Именованный туннель, в отличие от quick: адрес постоянный и живёт в DNS
-# Cloudflare, поэтому кнопка в чате не может указать на «вчерашний» туннель.
-# Именно из-за сменного адреса quick-туннель был выкинут 30.07.2026.
-ExecStart=/usr/local/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run
+# Туннель pullup-api заведён В ПАНЕЛИ Cloudflare, а такой туннель управляется
+# оттуда же: маршруты (api.one4two.ru -> http://localhost:8081) живут на
+# стороне Cloudflare, а коннектор должен подключаться ТОКЕНОМ. С файлом
+# credentials он тоже подключается — в логе честные «Registered tunnel
+# connection», — но панель показывает Status: Down, Active replicas: 0, а
+# домен отдаёт 1033 «Cloudflare Tunnel error»: маршрутизировать запрос
+# некуда. Диагноз 03.08.2026, до этого сутки искали проблему не там.
+#
+# Токен лежит в /etc/cloudflared/token (root:root, 600) строкой
+#   TUNNEL_TOKEN=eyJhIjoi...
+# Взять его: панель -> Networking -> Tunnels -> pullup-api -> команда установки.
+# В юните его держать нельзя: файл юнита читается всеми.
+EnvironmentFile=/etc/cloudflared/token
+# --protocol http2: QUIC (UDP/7844) у провайдера не живёт, туннель
+# регистрируется и тут же отваливается с «no recent network activity».
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --protocol http2 tunnel run
 Restart=always
 RestartSec=5
 User=root
