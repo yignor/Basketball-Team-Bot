@@ -470,8 +470,13 @@ def already_recorded(fp: str) -> Optional[Dict[str, Any]]:
 
 def record(player_row: int, amount: int, kind: str, games: int,
            paid_at: str = "", bank: str = "", note: str = "",
-           added_by: str = "", fp: str = "") -> Dict[str, Any]:
-    """Кладёт платёж в базу. Возвращает запись (или прошлую, если это повтор)."""
+           added_by: str = "", fp: str = "", period: str = "",
+           game_ref: str = "", by_coach: bool = False) -> Dict[str, Any]:
+    """Кладёт платёж в базу. Возвращает запись (или прошлую, если это повтор).
+
+    period — месяц взноса за тренировки (YYYY-MM), game_ref — «источник:игра»
+    для оплаты игры: без них платёж есть, а вот за что он — непонятно, и
+    напоминания начинают жить своей жизнью. Пусто — проставим по дате."""
     dup = already_recorded(fp) if fp else None
     if dup:
         dup["duplicate"] = True
@@ -481,6 +486,9 @@ def record(player_row: int, amount: int, kind: str, games: int,
         # одно и то же дважды подряд по ошибке.
         fp = fingerprint(f"manual|{player_row}|{amount}|{paid_at}|{datetime.now():%Y-%m-%dT%H:%M}")
     paid_at = paid_at or date.today().isoformat()
+    # Взнос без явного месяца считаем за тот месяц, когда он пришёл.
+    if kind == KIND_SEASON and not period:
+        period = paid_at[:7]
     now = datetime.now().isoformat(timespec="seconds")
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
@@ -488,10 +496,12 @@ def record(player_row: int, amount: int, kind: str, games: int,
             cur = conn.execute(
                 """INSERT INTO payments
                    (player_row, amount, kind, games, paid_at, bank, note,
-                    added_by, created_at, fingerprint, pushed)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    added_by, created_at, fingerprint, pushed, period,
+                    game_ref, by_coach)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
                 (int(player_row), int(amount), kind, int(games), paid_at,
-                 bank, note, str(added_by), now, fp))
+                 bank, note, str(added_by), now, fp, period, game_ref,
+                 1 if by_coach else 0))
             conn.commit()
         except sqlite3.IntegrityError:
             # Тот же отпечаток уже в базе: двойное нажатие «Записать» или
@@ -503,7 +513,8 @@ def record(player_row: int, amount: int, kind: str, games: int,
         pid = cur.lastrowid
     return {"id": pid, "player_row": int(player_row), "amount": int(amount),
             "kind": kind, "games": int(games), "paid_at": paid_at,
-            "bank": bank, "note": note, "duplicate": False}
+            "bank": bank, "note": note, "period": period,
+            "game_ref": game_ref, "by_coach": by_coach, "duplicate": False}
 
 
 def delete(payment_id: int) -> bool:

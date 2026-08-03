@@ -562,9 +562,41 @@ CREATE TABLE IF NOT EXISTS payments (
     added_by    TEXT NOT NULL DEFAULT '',   -- tg id того, кто внёс
     created_at  TEXT NOT NULL,
     fingerprint TEXT NOT NULL UNIQUE,
-    pushed      INTEGER NOT NULL DEFAULT 0  -- выгружен ли в лист «Оплаты»
+    pushed      INTEGER NOT NULL DEFAULT 0, -- выгружен ли в лист «Оплаты»
+    period      TEXT NOT NULL DEFAULT '',   -- 'YYYY-MM' для тренировок
+    game_ref    TEXT NOT NULL DEFAULT '',   -- 'source:game_id' для игры
+    by_coach    INTEGER NOT NULL DEFAULT 0  -- отмечено тренером без СМС
 );
 CREATE INDEX IF NOT EXISTS idx_payments_player ON payments(player_row);
+
+-- Состав на игру: кого тренер заявил. Именно с этого списка ждём оплату игры —
+-- не с проголосовавших и не со всей команды. ФИО нет, только строки листа.
+CREATE TABLE IF NOT EXISTS game_rosters (
+    source      TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    player_row  INTEGER NOT NULL,
+    added_by    TEXT NOT NULL DEFAULT '',   -- tg id тренера
+    added_at    TEXT NOT NULL,
+    PRIMARY KEY (source, game_id, player_row)
+);
+
+-- Состояние сбора состава: черновик, отправлен ли в чат, когда.
+CREATE TABLE IF NOT EXISTS game_roster_state (
+    source      TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    game_date   TEXT NOT NULL DEFAULT '',
+    opponent    TEXT NOT NULL DEFAULT '',
+    posted_at   TEXT NOT NULL DEFAULT '',   -- пусто = ещё не отправляли в топик
+    PRIMARY KEY (source, game_id)
+);
+
+-- Что бот уже разослал по расписанию оплат: один ключ — одно событие.
+-- Без этой отметки фоновый цикл слал бы напоминание каждые полминуты.
+CREATE TABLE IF NOT EXISTS pay_events (
+    event_key   TEXT PRIMARY KEY,           -- 'train:2026-09:coach_pre' и т.п.
+    sent_at     TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT ''
+);
 
 -- Кого бот уже научился узнавать в СМС. Ключ — sha256 от имени отправителя,
 -- не само имя: спрашивать «кто это?» второй раз не нужно, а ФИО из банковской
@@ -687,6 +719,9 @@ def init_db() -> None:
         _ensure_column(conn, "players", "pay_season", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "pay_game", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "active_mark", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "payments", "period", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "payments", "game_ref", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "payments", "by_coach", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:

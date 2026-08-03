@@ -15,7 +15,7 @@ import re
 import signal
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -2614,9 +2614,68 @@ def _coach_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
+        [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
         [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe")],
         [InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
     ])
+
+
+def _train_screen(period: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    """Взносы за месяц: кто не заплатил + кнопки «отметить оплату».
+
+    Отметка нужна, когда деньги пришли мимо бота (наличными, чек не прислали):
+    без неё человек до конца месяца висел бы в должниках."""
+    import training_dues
+    period = period or training_dues.period_of(date.today())
+    rows = training_dues.status(period)
+    title = training_dues.month_title(period)
+    if not training_dues.counts(period):
+        text = (f"🏋️ {title}\n\nВзносы считаем с "
+                f"{training_dues.month_title_gen(training_dues.FIRST_PERIOD)} — "
+                "более ранние месяцы тренер считает закрытыми.")
+        return text, InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data="coach:main")]])
+
+    debt = [r for r in rows if r["need"] and not r["ok"]]
+    ok = [r for r in rows if r["ok"]]
+    no_sum = [r for r in rows if not r["need"]]
+    lines = [f"🏋️ Взносы за тренировки — {title}", ""]
+    if debt:
+        lines.append(f"Не оплатили ({len(debt)}):")
+        for r in debt:
+            got = f", внёс {r['paid']}" if r["paid"] else ""
+            lines.append(f"• {r['title']} — {r['debt']} ₽{got}")
+        lines.append("")
+    if ok:
+        lines.append(f"Оплатили ({len(ok)}): " + ", ".join(r["title"] for r in ok))
+        lines.append("")
+    if no_sum:
+        lines.append("Не проставлена сумма в «Оплате сезона»: "
+                     + ", ".join(r["title"] for r in no_sum))
+        lines.append("")
+    if not (debt or ok or no_sum):
+        lines.append("Никого не ждём: ни у кого нет отметки в «Активности».")
+    else:
+        lines.append("Кнопка = «деньги были, чек не присылали».")
+
+    buttons = [[InlineKeyboardButton(f"✔ {r['title']}"[:60],
+                                     callback_data=f"coach:trmark:{r['row']}:{period}")]
+               for r in debt[:20]]
+    prev = training_dues.period_of(date(int(period[:4]), int(period[5:7]), 1)
+                                   - timedelta(days=1))
+    nav = []
+    # За месяцы до старта учёта листать некуда — там всё закрыто по договорённости.
+    if training_dues.counts(prev):
+        nav.append(InlineKeyboardButton(f"⬅️ {training_dues.month_title(prev)}",
+                                        callback_data=f"coach:train:{prev}"))
+    nxt = training_dues.next_period(period)
+    if nxt <= training_dues.period_of(date.today()):
+        nav.append(InlineKeyboardButton(f"{training_dues.month_title(nxt)} ➡️",
+                                        callback_data=f"coach:train:{nxt}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(buttons)
 
 
 async def handle_coach_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2800,6 +2859,22 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _awaiting_payment.add(user.id)
             _pay_draft.pop(user.id, None)
             await query.edit_message_text(PAY_ASK)
+
+        elif what == "train":
+            period = parts[2] if len(parts) > 2 else ""
+            text, markup = await asyncio.to_thread(_train_screen, period)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "trmark" and len(parts) > 3:
+            import training_dues
+            row, period = int(parts[2]), parts[3]
+            rec = await asyncio.to_thread(training_dues.mark_paid, row, period,
+                                          str(user.id))
+            player = await asyncio.to_thread(coach_payments.player_by_row, row)
+            await query.answer(f"Отметил: {(player or {}).get('title', '')}"
+                               if not rec.get("duplicate") else "Уже отмечено")
+            text, markup = await asyncio.to_thread(_train_screen, period)
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "owe":
             text = await asyncio.to_thread(_pay_owe_text)
@@ -3436,6 +3511,76 @@ async def _coach_reports(app: Application) -> None:
             log.error(f"Разбор для {source}:{team_id} не отправлен: {e}")
 
 
+async def _pay_schedule(app: Application) -> None:
+    """Напоминания об оплате тренировок по календарю.
+
+    Что и когда — в training_dues.due_events(); здесь только отправка. Каждое
+    событие помечается в pay_events, поэтому фоновый цикл, который тикает раз
+    в полминуты, не превращает напоминание в спам."""
+    import training_dues
+    for key, period, kind in training_dues.due_events():
+        if await asyncio.to_thread(training_dues.event_done, key):
+            continue
+        try:
+            if kind in ("coach_end", "coach_warn"):
+                when = "end" if kind == "coach_end" else "warn"
+                text = await asyncio.to_thread(training_dues.coach_report, period, when)
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "🏋️ Отметить оплату", callback_data=f"coach:train:{period}")]])
+                sent = await _tell_coaches(app, text, markup)
+                await asyncio.to_thread(training_dues.mark_event, key,
+                                        f"тренерам: {sent}")
+                log.info(f"Взносы {period}: {kind} ушло тренерам ({sent})")
+            else:
+                stat = await _remind_players(app, period)
+                report = await asyncio.to_thread(
+                    training_dues.delivery_report, period, stat["sent"],
+                    stat["failed"], stat["unknown"])
+                await _tell_coaches(app, report)
+                await asyncio.to_thread(
+                    training_dues.mark_event, key,
+                    f"дошло {len(stat['sent'])}, не дошло "
+                    f"{len(stat['failed']) + len(stat['unknown'])}")
+                log.info(f"Взносы {period}: напоминание игрокам — дошло "
+                         f"{len(stat['sent'])}, не дошло "
+                         f"{len(stat['failed']) + len(stat['unknown'])}")
+        except Exception as e:
+            log.error(f"Напоминание об оплате ({key}) не ушло: {e}")
+
+
+async def _tell_coaches(app: Application, text: str,
+                        markup: Optional[InlineKeyboardMarkup] = None) -> int:
+    """Сообщение тренерскому штабу — ТОЛЬКО в личку, никогда в общий чат."""
+    sent = 0
+    for uid in await asyncio.to_thread(_coach_recipients):
+        try:
+            await app.bot.send_message(chat_id=int(uid), text=text,
+                                       reply_markup=markup)
+            sent += 1
+        except Exception as e:
+            log.warning(f"Тренеру {uid} не доставлено: {e}")
+    return sent
+
+
+async def _remind_players(app: Application, period: str) -> Dict[str, List[str]]:
+    """Напоминание должникам. Возвращает, кому дошло, а кому нет и почему."""
+    import training_dues
+    stat: Dict[str, List[str]] = {"sent": [], "failed": [], "unknown": []}
+    for row in await asyncio.to_thread(training_dues.debtors, period):
+        uid = await asyncio.to_thread(training_dues.chat_id_of, row["row"])
+        if not uid:
+            stat["unknown"].append(row["title"])
+            continue
+        try:
+            await app.bot.send_message(chat_id=int(uid),
+                                       text=training_dues.player_reminder(row))
+            stat["sent"].append(row["title"])
+        except Exception as e:
+            log.info(f"Напоминание {row['title']} не доставлено: {e}")
+            stat["failed"].append(row["title"])
+    return stat
+
+
 async def _refresh_pay_summary() -> None:
     global _pay_sheet_at
     now = time.time()
@@ -3505,6 +3650,7 @@ async def _background_loop(app: Application) -> None:
             await asyncio.to_thread(_periodic_push_local_changes)
             await _sync_leagues()
             await _coach_reports(app)
+            await _pay_schedule(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()
             await _keep_funnel_warm()
