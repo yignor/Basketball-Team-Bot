@@ -412,8 +412,17 @@ class GameSystemManager:
         self.team_name_keywords = sorted(keyword_sources)
     
     def _resolve_team_name(self, team_id: Optional[int], fallback: Optional[str] = None) -> Optional[str]:
+        """Название нашей команды для сообщений.
+
+        Имя из лиги идёт ПЕРВЫМ: в столбце «Альтернативное имя» тренер держит
+        название турнира («Летняя лига · Группа 4»), и опрос получался
+        «Летняя лига · Группа 4 против 30 FPS». Лига знает, как называется
+        команда, а alt_name остаётся запасным вариантом — на случай, когда
+        лига имени не дала."""
         if team_id is None:
             return fallback
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback.strip()
         config = self.team_configs.get(team_id) if isinstance(self.team_configs, dict) else None
         if isinstance(config, dict):
             alt_name = config.get('alt_name')

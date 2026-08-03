@@ -2620,6 +2620,75 @@ def _coach_markup() -> InlineKeyboardMarkup:
     ])
 
 
+def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Сбор состава на игру: кто вызвался, кто уже в составе, кого дописали."""
+    import game_roster
+    game = next((g for g in game_roster.games()
+                 if g["source"] == source and g["game_id"] == str(game_id)), None)
+    if not game:
+        return ("Игру не нашёл — возможно, опрос по ней уже удалён.",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ В раздел", callback_data="coach:main")]]))
+    game_roster.ensure_state(game)
+    picked = game_roster.roster(source, game_id)
+    picked_rows = {p["row"] for p in picked}
+    ready = game_roster.voters(str(game_id))
+
+    lines = [f"🏀 Состав на игру: {game_roster.game_label(game)}", ""]
+    if picked:
+        lines.append(f"В составе ({len(picked)}):")
+        lines += [f"• {p['title']}" for p in picked]
+        lines.append("")
+    waiting = [v for v in ready if v["row"] not in picked_rows]
+    if waiting:
+        lines.append("Отметились «Готов», но пока не в составе:")
+        for v in waiting:
+            lines.append(f"• {v['title']}" + ("" if v["linked"] else " (нет в листе)"))
+        lines.append("")
+    if not ready and not picked:
+        lines.append("По опросу пока никто не отметился.")
+        lines.append("")
+    lines.append("Добавить любого — просто напиши фамилию или её часть.")
+    if game_roster.is_posted(source, game_id):
+        lines.append("Состав уже отправлен в чат — можно поправить и отправить снова.")
+
+    rows: List[List[InlineKeyboardButton]] = []
+    for v in waiting[:10]:
+        if v["linked"]:
+            rows.append([InlineKeyboardButton(
+                f"➕ {v['title']}"[:60],
+                callback_data=f"rost:add:{source}:{game_id}:{v['row']}")])
+    for p in picked[:16]:
+        rows.append([InlineKeyboardButton(
+            f"➖ {p['title']}"[:60],
+            callback_data=f"rost:del:{source}:{game_id}:{p['row']}")])
+    if picked:
+        rows.append([InlineKeyboardButton(
+            "📣 Отправить состав в чат",
+            callback_data=f"rost:post:{source}:{game_id}")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(rows)
+
+
+def _game_debt_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто из состава не заплатил за игру."""
+    import game_roster
+    game = next((g for g in game_roster.games()
+                 if g["source"] == source and g["game_id"] == str(game_id)), None)
+    if not game:
+        return ("Игру не нашёл.", InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ В раздел", callback_data="coach:main")]]))
+    rows = game_roster.debtors(source, game_id)
+    text = game_roster.coach_debt_text(game, rows)
+    buttons = [[InlineKeyboardButton(f"✔ {p['title']}"[:60],
+                                     callback_data=f"rost:paid:{source}:{game_id}:{p['row']}")]
+               for p in rows[:20]]
+    buttons.append([InlineKeyboardButton("👥 Состав",
+                                         callback_data=f"rost:show:{source}:{game_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return text, InlineKeyboardMarkup(buttons)
+
+
 def _train_screen(period: str = "") -> Tuple[str, InlineKeyboardMarkup]:
     """Взносы за месяц: кто не заплатил + кнопки «отметить оплату».
 
@@ -2829,6 +2898,117 @@ def _pay_last_text() -> str:
         lines.append(f"• {coach_payments._human_date(r['paid_at'])} — {r['title']}: "
                      f"{r['amount']} ₽ ({what}){bank}")
     return "\n".join(lines)
+
+
+# Кого тренер сейчас набирает: {tg id: (source, game_id)}. В памяти —
+# незаконченный набор состава переживать рестарт не обязан, сам состав уже
+# в базе.
+_roster_focus: Dict[int, Tuple[str, str]] = {}
+
+
+async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки состава на игру. Только для тренерского доступа."""
+    import game_roster
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not _can_see_reports(user):
+        if query:
+            await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else ""
+    source = parts[2] if len(parts) > 2 else ""
+    game_id = parts[3] if len(parts) > 3 else ""
+    row = int(parts[4]) if len(parts) > 4 else 0
+    _roster_focus[user.id] = (source, game_id)
+
+    try:
+        if what == "add":
+            await asyncio.to_thread(game_roster.add, source, game_id, row, str(user.id))
+        elif what == "del":
+            await asyncio.to_thread(game_roster.remove, source, game_id, row)
+        elif what == "paid":
+            await asyncio.to_thread(game_roster.mark_paid, row, source, game_id,
+                                    str(user.id))
+            text, markup = await asyncio.to_thread(_game_debt_screen, source, game_id)
+            await query.edit_message_text(text, reply_markup=markup)
+            return
+        elif what == "debt":
+            text, markup = await asyncio.to_thread(_game_debt_screen, source, game_id)
+            await query.edit_message_text(text, reply_markup=markup)
+            return
+        elif what == "post":
+            await _post_roster(query, source, game_id, user)
+            return
+
+        text, markup = await asyncio.to_thread(_roster_screen, source, game_id)
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception as e:
+        log.error(f"Состав ({what}): {e}")
+        await query.edit_message_text(f"⚠️ Не получилось: {e}")
+
+
+async def _post_roster(query, source: str, game_id: str, user) -> None:
+    """Отправка состава в общий чат — единственное тренерское сообщение,
+    которое туда уходит, и только по кнопке."""
+    import game_roster
+    game = next((g for g in await asyncio.to_thread(game_roster.games)
+                 if g["source"] == source and g["game_id"] == str(game_id)), None)
+    people = await asyncio.to_thread(game_roster.roster, source, game_id)
+    if not game or not people:
+        await query.answer("Состав пуст", show_alert=True)
+        return
+    text = game_roster.post_text(game, people)
+    gsm = await asyncio.to_thread(_game_manager)
+    topic = getattr(gsm, "game_poll_topic_id", None)
+    sent = 0
+    for chat_id in _result_chat_ids(gsm):
+        kwargs = {"chat_id": chat_id, "text": text}
+        if topic is not None:
+            kwargs["message_thread_id"] = topic
+        try:
+            await query.get_bot().send_message(**kwargs)
+            sent += 1
+        except Exception as e:
+            log.warning(f"Состав не ушёл в чат {chat_id}: {e}")
+    if sent:
+        await asyncio.to_thread(game_roster.mark_posted, source, game_id)
+    screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
+    note = (f"📣 Состав отправлен ({len(people)} чел.)." if sent
+            else "⚠️ Не смог отправить состав в чат.")
+    await query.edit_message_text(note + "\n\n" + screen, reply_markup=markup)
+
+
+async def handle_roster_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фамилия (или её часть) от тренера, который собирает состав."""
+    import game_roster
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _roster_focus:
+        return
+    if not _can_see_reports(user):
+        _roster_focus.pop(user.id, None)
+        return
+    source, game_id = _roster_focus[user.id]
+    text = (msg.text or "").strip()
+    found = await asyncio.to_thread(game_roster.search, text)
+    if not found:
+        await msg.reply_text(f"Никого похожего на «{text}» в листе «Игроки» нет.")
+        raise ApplicationHandlerStop
+    if len(found) == 1:
+        await asyncio.to_thread(game_roster.add, source, game_id, found[0]["row"],
+                                str(user.id))
+        screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
+        await msg.reply_text(f"➕ {found[0]['title']}\n\n" + screen, reply_markup=markup)
+        raise ApplicationHandlerStop
+    rows = [[InlineKeyboardButton(p["title"][:60],
+                                  callback_data=f"rost:add:{source}:{game_id}:{p['row']}")]
+            for p in found]
+    rows.append([InlineKeyboardButton("⬅️ К составу",
+                                      callback_data=f"rost:show:{source}:{game_id}")])
+    await msg.reply_text(f"Кого из них добавить в состав?",
+                         reply_markup=InlineKeyboardMarkup(rows))
+    raise ApplicationHandlerStop
 
 
 async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3548,6 +3728,71 @@ async def _pay_schedule(app: Application) -> None:
             log.error(f"Напоминание об оплате ({key}) не ушло: {e}")
 
 
+async def _game_schedule(app: Application) -> None:
+    """Состав на игру и напоминания об оплате игр — по календарю матчей.
+
+    За три дня тренер собирает состав, в день игры и на следующий получает
+    список должников, вечером следующего дня их дёргает уже бот."""
+    import game_roster
+    import training_dues
+    for key, game, kind in await asyncio.to_thread(game_roster.due_events):
+        if await asyncio.to_thread(training_dues.event_done, key):
+            continue
+        source, gid = game["source"], game["game_id"]
+        try:
+            if kind == "collect":
+                await asyncio.to_thread(game_roster.ensure_state, game)
+                text, markup = await asyncio.to_thread(_roster_screen, source, gid)
+                sent = await _tell_coaches(
+                    app, f"🗓 Через {game_roster.COLLECT_BEFORE_DAYS} дня игра — "
+                         f"собери состав.\n\n{text}", markup)
+                await asyncio.to_thread(training_dues.mark_event, key, f"тренерам: {sent}")
+                log.info(f"Состав на {source}:{gid} запрошен у тренеров ({sent})")
+            elif kind in ("coach_day", "coach_next"):
+                rows = await asyncio.to_thread(game_roster.debtors, source, gid)
+                if not rows:
+                    await asyncio.to_thread(training_dues.mark_event, key, "должников нет")
+                    continue
+                text, markup = await asyncio.to_thread(_game_debt_screen, source, gid)
+                sent = await _tell_coaches(app, text, markup)
+                await asyncio.to_thread(training_dues.mark_event, key,
+                                        f"должников {len(rows)}, тренерам {sent}")
+                log.info(f"Долги за игру {source}:{gid}: {len(rows)}, тренерам {sent}")
+            elif kind == "player_next":
+                stat = await _remind_game_debtors(app, game)
+                report = await asyncio.to_thread(
+                    training_dues.delivery_report,
+                    game["date"].strftime("%Y-%m"), stat["sent"], stat["failed"],
+                    stat["unknown"])
+                await _tell_coaches(
+                    app, f"💰 Напомнил про оплату игры {game_roster.game_label(game)}.\n\n"
+                         + report.split("\n", 2)[-1])
+                await asyncio.to_thread(training_dues.mark_event, key,
+                                        f"дошло {len(stat['sent'])}")
+        except Exception as e:
+            log.error(f"Событие по игре ({key}) не отработало: {e}")
+
+
+async def _remind_game_debtors(app: Application, game: Dict[str, Any]) -> Dict[str, List[str]]:
+    import game_roster
+    import training_dues
+    stat: Dict[str, List[str]] = {"sent": [], "failed": [], "unknown": []}
+    rows = await asyncio.to_thread(game_roster.debtors, game["source"], game["game_id"])
+    for p in rows:
+        uid = await asyncio.to_thread(training_dues.chat_id_of, p["row"])
+        if not uid:
+            stat["unknown"].append(p["title"])
+            continue
+        try:
+            await app.bot.send_message(chat_id=int(uid),
+                                       text=game_roster.player_debt_text(game, p))
+            stat["sent"].append(p["title"])
+        except Exception as e:
+            log.info(f"Напоминание об игре {p['title']} не доставлено: {e}")
+            stat["failed"].append(p["title"])
+    return stat
+
+
 async def _tell_coaches(app: Application, text: str,
                         markup: Optional[InlineKeyboardMarkup] = None) -> int:
     """Сообщение тренерскому штабу — ТОЛЬКО в личку, никогда в общий чат."""
@@ -3651,6 +3896,7 @@ async def _background_loop(app: Application) -> None:
             await _sync_leagues()
             await _coach_reports(app)
             await _pay_schedule(app)
+            await _game_schedule(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()
             await _keep_funnel_warm()
@@ -3849,11 +4095,15 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_payment_text), group=5)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_roster_text), group=6)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
+    app.add_handler(CallbackQueryHandler(handle_roster_callback, pattern=r"^rost:"))
 
     log.info("Запуск polling...")
     app.run_polling(
