@@ -44,7 +44,7 @@ from report_common import (
     apply_formatting,
 )
 
-ATTEND_SHEET  = "Посещаемость"
+ATTEND_SHEET  = "Логи посещаемости"   # см. sheets_cache.SHEET_RENAMES
 REPORT_SHEET  = "Тренировки"
 PLAYERS_SHEET = "Игроки"
 
@@ -55,7 +55,7 @@ PLAYERS_SHEET = "Игроки"
 # ─────────────────────────── Data loading ────────────────────────────────────
 
 def load_votes(spreadsheet) -> List[Dict]:
-    """Загружает все голоса из листа Посещаемость."""
+    """Загружает все голоса из листа «Логи посещаемости»."""
     try:
         ws = spreadsheet.worksheet(ATTEND_SHEET)
     except gspread.WorksheetNotFound:

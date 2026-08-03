@@ -4,7 +4,7 @@
 
 Запускается каждый час через GitHub Actions.
 Читает poll_answer updates, определяет кто пришёл/пропустил,
-сохраняет в лист "Посещаемость". Обрабатывает переголосования.
+сохраняет в лист "Логи посещаемости". Обрабатывает переголосования.
 
 Запуск:
   python collect_votes.py
@@ -49,7 +49,7 @@ VOTE_ABSENT_WORDS = {"нет", "не приду", "no", "не могу", "не �
 VOTE_GAME_COACH_WORDS  = {"тренер", "coach"}
 VOTE_GAME_ABSENT_WORDS = {"нет", "не могу", "не приду", "no"}
 
-ATTEND_SHEET  = "Посещаемость"
+ATTEND_SHEET  = "Логи посещаемости"   # см. sheets_cache.SHEET_RENAMES
 ATTEND_HEADER = [
     "TG_POLL_ID", "USER_ID", "USERNAME", "ИМЯ", "ФАМИЛИЯ",
     "ОТВЕТ", "ТИП", "ДАТА_ТРЕНИРОВКИ", "CONFIG_POLL_ID", "ОБНОВЛЕНО", "ПЕРЕГОЛОСОВАНИЙ",

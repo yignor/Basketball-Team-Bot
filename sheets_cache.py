@@ -41,10 +41,21 @@ PLAYERS_TIER_HEADER = "Уровень"
 # требования, а не про историю.
 PLAYERS_PAY_SEASON_HEADER = "Оплата сезона"
 PLAYERS_PAY_GAME_HEADER = "Оплата игры"
-ATTEND_SHEET_NAME = "Посещаемость"
+# Листы-логи: сырые записи, которые ведёт бот. Названы «Логи …», чтобы их не
+# путали с отчётами — те строит человек и читает глазами.
+ATTEND_SHEET_NAME = "Логи посещаемости"
 SERVICE_SHEET_NAME = "Сервисный"
 BOT_USERS_SHEET_NAME = "Пользователи бота"
 ERRORS_SHEET_NAME = "Ошибки"
+
+# Старые названия листов -> новые. Переименовываем сами при старте: лист
+# «Оплаты» стал сводкой по игрокам, а сырые записи ушли в «Логи оплаты», и
+# путаница «где отчёт, где лог» стоила бы дороже одной операции в Google.
+SHEET_RENAMES = {
+    "Посещаемость": ATTEND_SHEET_NAME,
+    "Посещаемость игр": "Логи игр",
+    "Оплаты": "Логи оплаты",
+}
 
 ACTIVITY_TYPES = [
     "ОПРОС_ГОЛОСОВАНИЕ",
@@ -536,6 +547,18 @@ CREATE TABLE IF NOT EXISTS payments (
     pushed      INTEGER NOT NULL DEFAULT 0  -- выгружен ли в лист «Оплаты»
 );
 CREATE INDEX IF NOT EXISTS idx_payments_player ON payments(player_row);
+
+-- Кого бот уже научился узнавать в СМС. Ключ — sha256 от имени отправителя,
+-- не само имя: спрашивать «кто это?» второй раз не нужно, а ФИО из банковской
+-- СМС на диск не кладём. Точное совпадение строки — ровно то, что нужно:
+-- банк присылает одну и ту же подпись при каждом переводе.
+CREATE TABLE IF NOT EXISTS payment_senders (
+    sender_hash TEXT PRIMARY KEY,
+    player_row  INTEGER NOT NULL,
+    seen        INTEGER NOT NULL DEFAULT 1,   -- сколько раз пригодилось
+    first_at    TEXT NOT NULL,
+    last_at     TEXT NOT NULL
+);
 
 -- Какие разборы игр уже ушли тренерам в личку. Без этой отметки фоновый цикл
 -- слал бы один и тот же отчёт каждые пять минут.
@@ -1283,6 +1306,37 @@ def free_player_rows() -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def rename_legacy_sheets(spreadsheet) -> List[str]:
+    """Приводит названия листов к нынешним (см. SHEET_RENAMES).
+
+    Идемпотентно: переименовываем, только если старый лист есть, а нового ещё
+    нет. Если оба существуют — не трогаем ничего и говорим об этом в лог:
+    сливать два листа автоматически нельзя, это данные."""
+    if spreadsheet is None:
+        return []
+    try:
+        titles = {ws.title: ws for ws in spreadsheet.worksheets()}
+    except Exception as e:
+        logger.warning("Не смог перечислить листы для переименования: %s", e)
+        return []
+    done = []
+    for old, new in SHEET_RENAMES.items():
+        if old not in titles:
+            continue
+        if new in titles:
+            logger.warning("Листы «%s» и «%s» существуют оба — переименование "
+                           "пропущено, разберись руками", old, new)
+            continue
+        try:
+            titles[old].update_title(new)
+            titles[new] = titles.pop(old)
+            done.append(f"{old} -> {new}")
+            logger.info("Лист переименован: «%s» -> «%s»", old, new)
+        except Exception as e:
+            logger.warning("Лист «%s» не переименовался: %s", old, e)
+    return done
+
+
 def coach_report_sent(source: str, team_id: str, game_id: str) -> bool:
     init_db()
     with _connection() as conn:
@@ -1689,7 +1743,7 @@ def upsert_vote_local(
 
 
 def push_attendance(spreadsheet, batch_size: int = 500) -> Dict[str, Any]:
-    """Выгружает накопленные dirty=1 голоса в лист 'Посещаемость'. Один
+    """Выгружает накопленные dirty=1 голоса в лист 'Логи посещаемости'. Один
     объёмный get_all_values() строит индекс существующих строк по
     (tg_poll_id, user_id) вместо ws.find() на каждую запись — голосов за
     сезон может быть заметно больше, чем строк в 'Сервисный'."""
@@ -1825,14 +1879,13 @@ def upsert_game_vote_local(
     return "updated" if existing else "new"
 
 
-GAME_ATTEND_SHEET_NAME = "Посещаемость игр"
+GAME_ATTEND_SHEET_NAME = "Логи игр"
 GAME_ATTEND_HEADER = ["TG_POLL_ID", "USER_ID", "USERNAME", "ИМЯ", "ФАМИЛИЯ",
                        "ОТВЕТ", "ТИП", "GAME_ID", "ДАТА_ИГРЫ", "ОБНОВЛЕНО", "ПЕРЕГОЛОСОВАНИЙ"]
 
 
 def push_game_votes(spreadsheet, batch_size: int = 500) -> Dict[str, Any]:
-    """Выгружает накопленные dirty=1 голоса за игры в лист 'Посещаемость
-    игр' (создаётся при необходимости) — по образцу push_attendance()."""
+    """Выгружает накопленные dirty=1 голоса за игры в лист 'Логи игр' (создаётся при необходимости) — по образцу push_attendance()."""
     init_db()
     with _connection() as conn:
         dirty_rows = conn.execute(

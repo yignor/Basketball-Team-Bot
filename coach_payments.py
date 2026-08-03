@@ -2,19 +2,23 @@
 
 Тренеру на телефон приходит СМС о поступлении — он вставляет её текст в бота.
 Дальше всё делает бот: достаёт сумму, дату и отправителя, ищет игрока, решает,
-игра это или сезон, и кладёт платёж в базу + в лист «Оплаты».
+игра это или сезон, и кладёт платёж в базу и в листы.
 
 Где что живёт:
   • лист «Игроки», столбцы «Оплата сезона» и «Оплата игры» — сколько игрок
     ДОЛЖЕН. Их ведёт тренер руками, бот только читает.
   • таблица payments (SQLite) — история платежей, источник истины для бота.
-  • лист «Оплаты» — та же история глазами человека. Пишем туда следом за базой;
-    если Google недоступен, платёж всё равно записан (см. push_pending).
+  • лист «Логи оплаты» — та же история строчка за строчкой. Пишем туда следом
+    за базой; недоступный Google означает отложенную строку (push_pending).
+  • лист «Оплаты» — сводка: сколько кто внёс всего и по месяцам, отдельно
+    игры. Он собирается заново из базы (build_summary_sheet), править его
+    руками бессмысленно — перезапишется.
 
 ФИО в базе не храним ([[legal-data-invariant]]): платёж привязан к номеру
 строки в листе «Игроки». Имя отправителя из СМС нужно ровно на время
 сопоставления и в базу не попадает — от него остаётся только отпечаток
-(sha256), чтобы одну и ту же СМС нельзя было провести дважды.
+(sha256): по одному ловим повторную вставку той же СМС, по другому узнаём
+человека в следующий раз (payment_senders).
 """
 
 from __future__ import annotations
@@ -31,8 +35,11 @@ import sheets_cache
 
 logger = logging.getLogger(__name__)
 
+# Сырой журнал платежей — «Логи оплаты». Лист «Оплаты» теперь про сводку:
+# сколько внесено всего и по месяцам (build_summary_sheet).
+PAYMENTS_LOG_SHEET_NAME = "Логи оплаты"
 PAYMENTS_SHEET_NAME = "Оплаты"
-PAYMENTS_SHEET_HEADER = ["Дата", "Игрок", "Сумма", "Тип", "Игр", "Банк",
+PAYMENTS_LOG_HEADER = ["Дата", "Игрок", "Сумма", "Тип", "Игр", "Банк",
                          "Примечание", "Записано"]
 
 # Цена игры по умолчанию — на случай, если столбец «Оплата игры» ещё не
@@ -42,7 +49,12 @@ DEFAULT_GAME_PRICE = 900
 
 KIND_GAME = "game"
 KIND_SEASON = "season"
+KIND_UNKNOWN = ""            # не угадали — спрашиваем тренера
 KIND_TITLES = {KIND_GAME: "игра", KIND_SEASON: "сезон"}
+
+# Больше трёх игр одним переводом не бывает — дальше сумма скорее случайно
+# кратна цене игры, чем действительно за игры (правило тренера).
+MAX_GAMES_PER_PAYMENT = 3
 
 
 # ─────────────────────────── Разбор СМС ────────────────────────────────────
@@ -275,12 +287,107 @@ def game_price(player: Optional[Dict[str, Any]] = None) -> int:
     return DEFAULT_GAME_PRICE
 
 
+def season_price(player: Optional[Dict[str, Any]] = None) -> int:
+    """Взнос за сезон (он же за тренировки): свой у игрока, иначе частый по команде."""
+    if player and int(player.get("pay_season") or 0) > 0:
+        return int(player["pay_season"])
+    prices = [p["pay_season"] for p in players() if p["pay_season"] > 0]
+    if prices:
+        return Counter(prices).most_common(1)[0][0]
+    return 0
+
+
 def classify(amount: int, player: Optional[Dict[str, Any]] = None) -> Tuple[str, int]:
-    """(тип платежа, сколько игр покрывает). Кратно цене игры → это игры."""
-    price = game_price(player)
-    if amount > 0 and price > 0 and amount % price == 0:
-        return KIND_GAME, amount // price
-    return KIND_SEASON, 0
+    """(тип платежа, сколько игр покрывает). KIND_UNKNOWN — когда не понять.
+
+    Правила тренера: сумма, кратная «Оплате игры» и покрывающая не больше
+    трёх игр, — это игры; сумма ровно как в «Оплате сезона» — сезон. Всё
+    остальное бот не угадывает, а спрашивает: людей, которые переводят
+    произвольные суммы, хватает, и молча записать такое не туда — хуже, чем
+    задать один вопрос.
+
+    Совпало и то и другое (взнос за сезон равен цене двух игр) — тоже вопрос:
+    выбор тут за тренером, а не за ботом."""
+    gprice, sprice = game_price(player), season_price(player)
+    as_games = (amount > 0 and gprice > 0 and amount % gprice == 0
+                and 1 <= amount // gprice <= MAX_GAMES_PER_PAYMENT)
+    as_season = amount > 0 and sprice > 0 and amount == sprice
+    if as_games and not as_season:
+        return KIND_GAME, amount // gprice
+    if as_season and not as_games:
+        return KIND_SEASON, 0
+    return KIND_UNKNOWN, 0
+
+
+# ────────────────── Кого бот уже узнаёт в СМС ──────────────────────────────
+
+def _sender_key(sender: str) -> str:
+    """Отпечаток подписи отправителя. Не имя: в базе лежит только хеш."""
+    key = _norm(sender)
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] if key else ""
+
+
+def known_sender(sender: str) -> Optional[Dict[str, Any]]:
+    """Кому засчитывали платежи с такой подписью раньше."""
+    key = _sender_key(sender)
+    if not key:
+        return None
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT player_row, seen FROM payment_senders WHERE sender_hash = ?",
+            (key,)).fetchone()
+    if not row:
+        return None
+    player = player_by_row(int(row["player_row"]))
+    if player:
+        player = {**player, "seen": int(row["seen"] or 1)}
+    return player
+
+
+def remember_sender(sender: str, player_row: int) -> bool:
+    """Запоминает связку «подпись в СМС -> игрок».
+
+    Второй раз бот уже не спрашивает, кто это. Если тренер засчитал платёж
+    другому человеку — связка переезжает на него: последнее решение тренера
+    всегда важнее прошлого."""
+    key = _sender_key(sender)
+    if not key:
+        return False
+    now = _now()
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO payment_senders (sender_hash, player_row, seen, first_at, last_at)
+               VALUES (?, ?, 1, ?, ?)
+               ON CONFLICT(sender_hash) DO UPDATE SET
+                   player_row = excluded.player_row,
+                   seen = payment_senders.seen + 1,
+                   last_at = excluded.last_at""",
+            (key, int(player_row), now, now))
+        conn.commit()
+    return True
+
+
+def forget_sender(sender: str) -> bool:
+    key = _sender_key(sender)
+    if not key:
+        return False
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute("DELETE FROM payment_senders WHERE sender_hash = ?", (key,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def known_senders_count() -> int:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM payment_senders").fetchone()[0])
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def match_player(sender: str) -> List[Dict[str, Any]]:
@@ -404,8 +511,8 @@ def push_pending(spreadsheet, limit: int = 50) -> int:
     if not rows:
         return 0
     by_row = {p["row"]: p for p in players()}
-    ws = sheets_cache._get_or_create_ws(spreadsheet, PAYMENTS_SHEET_NAME,
-                                        PAYMENTS_SHEET_HEADER)
+    ws = sheets_cache._get_or_create_ws(spreadsheet, PAYMENTS_LOG_SHEET_NAME,
+                                        PAYMENTS_LOG_HEADER)
     lines, ids = [], []
     for r in rows:
         p = by_row.get(int(r["player_row"]))
@@ -445,10 +552,7 @@ def ensure_payment_columns(spreadsheet) -> List[str]:
         return []
     # Лист заведён ровно под свои столбцы, и записи в тринадцатый Google
     # отвечает «exceeds grid limits» — сетку надо сначала расширить.
-    need = len(header) + len(missing)
-    have = int(getattr(ws, "col_count", 0) or 0)
-    if have and need > have:
-        ws.add_cols(need - have)
+    _grow(ws, 1, len(header) + len(missing))
     added = []
     for title in missing:
         header.append(title)
@@ -457,6 +561,123 @@ def ensure_payment_columns(spreadsheet) -> List[str]:
     if added:
         logger.info("В листе «Игроки» добавлены столбцы: %s", ", ".join(added))
     return added
+
+
+def by_month() -> Dict[int, Dict[str, Dict[str, int]]]:
+    """{строка игрока: {'2026-08': {season, games, game_amount, total}}}."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT player_row, substr(paid_at, 1, 7) AS ym, kind,
+                      SUM(amount) AS amount, SUM(games) AS games
+               FROM payments WHERE paid_at != ''
+               GROUP BY player_row, ym, kind""").fetchall()
+    out: Dict[int, Dict[str, Dict[str, int]]] = {}
+    for r in rows:
+        cell = out.setdefault(int(r["player_row"]), {}).setdefault(
+            str(r["ym"]), {"season": 0, "games": 0, "game_amount": 0, "total": 0})
+        amount = int(r["amount"] or 0)
+        cell["total"] += amount
+        if r["kind"] == KIND_GAME:
+            cell["games"] += int(r["games"] or 0)
+            cell["game_amount"] += amount
+        else:
+            cell["season"] += amount
+    return out
+
+
+def months_seen() -> List[str]:
+    """Месяцы от первого платежа до текущего — сплошным рядом, без дыр."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        first = conn.execute(
+            "SELECT MIN(substr(paid_at, 1, 7)) FROM payments WHERE paid_at != ''"
+        ).fetchone()[0]
+    today = date.today()
+    if not first:
+        return [f"{today:%Y-%m}"]
+    y, m = int(first[:4]), int(first[5:7])
+    out = []
+    while (y, m) <= (today.year, today.month):
+        out.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+MONTH_TITLES = ["янв", "фев", "мар", "апр", "май", "июн",
+                "июл", "авг", "сен", "окт", "ноя", "дек"]
+
+
+def _month_title(ym: str) -> str:
+    try:
+        return f"{MONTH_TITLES[int(ym[5:7]) - 1]} {ym[:4]}"
+    except (ValueError, IndexError):
+        return ym
+
+
+def build_summary_sheet(spreadsheet) -> int:
+    """Перерисовывает лист «Оплаты»: итоги, деньги по месяцам, игры по месяцам.
+
+    Лист собирается целиком из базы одним batch_update — дописывать по строке
+    нельзя: игрок мог появиться, платёж — уехать в другой месяц задним числом.
+    Возвращает число строк игроков."""
+    if spreadsheet is None:
+        return 0
+    people = [p for p in players() if p["active"]]
+    if not people:
+        return 0
+    paid, monthly, months = totals(), by_month(), months_seen()
+    titles = [_month_title(m) for m in months]
+
+    rows: List[List[Any]] = []
+    stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    rows.append([f"Оплаты — сводка. Собрана ботом {stamp}, править руками "
+                 "бесполезно: перезапишется."])
+    rows.append([])
+
+    rows.append(["ИТОГО ПО ИГРОКАМ"])
+    rows.append(["Игрок", "Всего ₽", "Сезон внёс", "Сезон надо", "Долг ₽",
+                 "За игры ₽", "Игр оплачено", "Последний платёж"])
+    for p in people:
+        t = paid.get(p["row"], {"season": 0, "games": 0, "game_amount": 0, "last": ""})
+        debt = max(0, p["pay_season"] - t["season"]) if p["pay_season"] else 0
+        rows.append([p["title"], t["season"] + t["game_amount"], t["season"],
+                     p["pay_season"] or "", debt or "", t["game_amount"],
+                     t["games"] or "", _human_date(t["last"]) if t["last"] else ""])
+    rows.append([])
+
+    rows.append(["ДЕНЬГИ ПО МЕСЯЦАМ, ₽"])
+    rows.append(["Игрок"] + titles + ["Итого"])
+    for p in people:
+        cells = [monthly.get(p["row"], {}).get(m, {}).get("total", 0) for m in months]
+        rows.append([p["title"]] + [c or "" for c in cells] + [sum(cells) or ""])
+    rows.append([])
+
+    rows.append(["ОПЛАЧЕНО ИГР ПО МЕСЯЦАМ, шт."])
+    rows.append(["Игрок"] + titles + ["Итого"])
+    for p in people:
+        cells = [monthly.get(p["row"], {}).get(m, {}).get("games", 0) for m in months]
+        rows.append([p["title"]] + [c or "" for c in cells] + [sum(cells) or ""])
+
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+
+    ws = sheets_cache._get_or_create_ws(spreadsheet, PAYMENTS_SHEET_NAME,
+                                        ["Оплаты"])
+    _grow(ws, len(rows) + 10, width)
+    ws.clear()
+    ws.update(values=rows, range_name="A1")
+    return len(people)
+
+
+def _grow(ws, rows_needed: int, cols_needed: int) -> None:
+    """Расширяет сетку листа под нужный размер (Google не пишет за границу)."""
+    have_rows = int(getattr(ws, "row_count", 0) or 0)
+    have_cols = int(getattr(ws, "col_count", 0) or 0)
+    if have_rows and rows_needed > have_rows:
+        ws.add_rows(rows_needed - have_rows)
+    if have_cols and cols_needed > have_cols:
+        ws.add_cols(cols_needed - have_cols)
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
