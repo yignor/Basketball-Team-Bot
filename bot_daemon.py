@@ -2634,7 +2634,8 @@ def _pay_players_markup(page: int = 0, query: str = "") -> InlineKeyboardMarkup:
     """Выбор игрока списком. Страницами: тридцать кнопок разом Telegram
     покажет, но попасть в нужную пальцем уже нельзя."""
     import coach_payments
-    people = [p for p in coach_payments.players() if p["active"]]
+    # Все из листа: за игру может заплатить и тот, кто сейчас не тренируется.
+    people = coach_payments.players()
     if query:
         found = coach_payments.match_player(query)
         if found:
@@ -2709,22 +2710,26 @@ def _pay_confirm(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
 
 
 def _pay_owe_text() -> str:
+    """Кто сколько внёс. Взнос за сезон спрашиваем только с тех, у кого стоит
+    отметка в «Активности»; оплата игр приходит от всех, кто был в составе."""
     import coach_payments
     rows = coach_payments.balances()
     if not rows:
         return ("📒 В листе «Игроки» пока никого нет.\n\n"
                 "Проверь синхронизацию таблицы.")
     lines = ["📒 Кто сколько внёс", ""]
-    debtors = [r for r in rows if r["pay_season"] and r["debt"] > 0]
+    debtors = [r for r in rows if r["need_season"] and r["debt"] > 0]
     closed = [r for r in rows if r["season_done"]]
-    # Кому взнос не проставлен — отдельно: у них не «оплачено», а «не с чем
-    # сравнивать», и мешать их с закрывшими сезон нельзя.
-    no_plan = [r for r in rows if not r["pay_season"]]
+    # Не тренируется — взноса с него не ждём, но платежи за игры показываем.
+    resting = [r for r in rows if not r["pays_season"]]
+    # Тренируется, а сумма взноса в листе не проставлена — тут нечего считать.
+    no_plan = [r for r in rows if r["pays_season"] and not r["pay_season"]]
+
     if debtors:
         lines.append("Не хватает за сезон:")
         for r in debtors:
             lines.append(f"• {r['title']} — {r['debt']} ₽ "
-                         f"(внёс {r['paid_season']} из {r['pay_season']})")
+                         f"(внёс {r['paid_season']} из {r['need_season']})")
         lines.append("")
     if closed:
         lines.append("Сезон закрыт:")
@@ -2732,17 +2737,20 @@ def _pay_owe_text() -> str:
             games = f", {coach_payments.games_word(r['paid_games'])}" if r["paid_games"] else ""
             lines.append(f"• {r['title']} — {r['paid_season']} ₽{games}")
         lines.append("")
+    if resting:
+        lines.append(f"Взнос не ждём — не тренируются "
+                     f"({coach_payments.plural(len(resting), 'игрок', 'игрока', 'игроков')}):")
+        for r in resting:
+            paid_sum = r["paid_season"] + r["paid_game_amount"]
+            games = (f", {coach_payments.games_word(r['paid_games'])}"
+                     if r["paid_games"] else "")
+            lines.append(f"• {r['title']}" + (f" — за игры {paid_sum} ₽{games}"
+                                              if paid_sum else ""))
+        lines.append("")
     if no_plan:
-        lines.append(f"Взнос за сезон не проставлен "
-                     f"({coach_payments.plural(len(no_plan), 'игрок', 'игрока', 'игроков')}):")
-        for r in no_plan:
-            if r["paid_games"] or r["paid_season"]:
-                paid_sum = r["paid_season"] + r["paid_game_amount"]
-                games = (f", {coach_payments.games_word(r['paid_games'])}"
-                         if r["paid_games"] else "")
-                lines.append(f"• {r['title']} — внёс {paid_sum} ₽{games}")
-            else:
-                lines.append(f"• {r['title']} — платежей нет")
+        lines.append(f"Тренируются, но сумма взноса не проставлена "
+                     f"({coach_payments.plural(len(no_plan), 'игрок', 'игрока', 'игроков')}): "
+                     + ", ".join(r["title"] for r in no_plan))
         lines.append("")
         lines.append("Долг считаю по столбцу «Оплата сезона» в листе «Игроки» — "
                      "проставь там суммы, и я начну следить.")
@@ -2906,7 +2914,7 @@ def _pay_saved_text(rec: Dict[str, Any]) -> str:
             if rec["kind"] == coach_payments.KIND_GAME else "взнос за сезон")
     lines = [f"✅ Записал: {title} — {rec['amount']} ₽ ({what}).", ""]
     if player:
-        bal = next((b for b in coach_payments.balances(only_active=False)
+        bal = next((b for b in coach_payments.balances()
                     if b["row"] == player["row"]), None)
         if bal and bal["pay_season"]:
             lines.append(f"Сезон: {bal['paid_season']} из {bal['pay_season']} ₽"
@@ -3540,6 +3548,9 @@ async def on_startup(app: Application) -> None:
         added = await asyncio.to_thread(coach_payments.ensure_player_columns, sheet)
         if added:
             log.info(f"Лист «Игроки»: добавлены столбцы {', '.join(added)}")
+        moved = await asyncio.to_thread(coach_payments.migrate_active_marks, sheet)
+        if moved:
+            log.info(f"«Активность»: отметок переписано на «1» — {moved}")
         # Платежи, не дошедшие до листа в прошлый раз (Google был недоступен).
         left = await asyncio.to_thread(coach_payments.push_pending, sheet)
         if left:

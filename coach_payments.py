@@ -250,9 +250,9 @@ def players() -> List[Dict[str, Any]]:
             "active_mark FROM players ORDER BY surname, name").fetchall()
     people = [r for r in rows if (r["surname"] or "").strip()
               or (r["name"] or "").strip()]
-    # Пока «+» не стоит НИ У КОГО, столбцом просто не пользуются — считаем
-    # активными всех. Иначе появление пустого столбца молча выключило бы учёт
-    # оплат всей команде. Появился хоть один «+» — правило работает буквально.
+    # Пока отметка не стоит НИ У КОГО, столбцом просто не пользуются — ждём
+    # взнос со всех. Иначе появление пустого столбца молча отменило бы оплату
+    # тренировок всей команде. Появилась хоть одна — правило работает буквально.
     marks = [str(r["active_mark"] or "").strip() for r in people]
     column_in_use = any(marks)
     out = []
@@ -269,8 +269,10 @@ def players() -> List[Dict[str, Any]]:
             "pay_season": int(r["pay_season"] or 0),
             "pay_game": int(r["pay_game"] or 0),
             "active_mark": mark,
-            "active": (mark == sheets_cache.PLAYERS_ACTIVE_MARK) if column_in_use
-                      else _is_active_by_status(r["status"]),
+            # Ждём ли с человека взнос за сезон (он же за тренировки). К оплате
+            # игр отношения не имеет: за игры платят те, кто был в составе.
+            "pays_season": sheets_cache.is_active_mark(mark) if column_in_use
+                           else _is_active_by_status(r["status"]),
         })
     return out
 
@@ -283,10 +285,10 @@ def _is_active_by_status(status: Any) -> bool:
 
 
 def active_stats() -> Dict[str, int]:
-    """Сколько в обойме и сколько временно вне — для экранов и лога."""
+    """Сколько человек в листе и с кого ждём взнос за тренировки."""
     people = players()
     return {"all": len(people),
-            "active": sum(1 for p in people if p["active"]),
+            "pays_season": sum(1 for p in people if p["pays_season"]),
             "marked": sum(1 for p in people if p["active_mark"])}
 
 
@@ -434,8 +436,8 @@ def match_player(sender: str) -> List[Dict[str, Any]]:
         # «И. Иванов» — наоборот.
         if surname and surname in words and name and name[:1] in initials:
             score += 4
-        if score and not p["active"]:
-            score -= 3
+        if score and not p["pays_season"]:
+            score -= 1        # чуть ниже: платит реже, но платить может
         if score > 0:
             scored.append((score, p))
     scored.sort(key=lambda x: (-x[0], x[1]["title"]))
@@ -585,6 +587,38 @@ def ensure_player_columns(spreadsheet) -> List[str]:
     return added
 
 
+def migrate_active_marks(spreadsheet) -> int:
+    """Переписывает старые отметки «+» на «1» — так попросил тренер.
+
+    Читать бот умеет обе (sheets_cache.is_active_mark), но в листе должно
+    стоять одно, иначе через месяц никто не вспомнит, чем «+» отличался от
+    «1». Возвращает число переписанных ячеек."""
+    if spreadsheet is None:
+        return 0
+    import gspread.utils as gutils
+    ws = spreadsheet.worksheet(sheets_cache.PLAYERS_SHEET_NAME)
+    header = ws.row_values(1)
+    if sheets_cache.PLAYERS_ACTIVE_HEADER not in header:
+        return 0
+    col = header.index(sheets_cache.PLAYERS_ACTIVE_HEADER) + 1
+    values = ws.get_all_values()
+    letter = gutils.rowcol_to_a1(1, col).rstrip("0123456789")
+    column, last, changed = [], 0, 0
+    for i, row in enumerate(values[1:], start=2):
+        cell = (row[col - 1] if len(row) >= col else "").strip()
+        if cell in sheets_cache.PLAYERS_ACTIVE_LEGACY:
+            cell = sheets_cache.PLAYERS_ACTIVE_MARK
+            changed += 1
+        column.append([cell])
+        last = i
+    if not changed:
+        return 0
+    ws.update(values=column, range_name=f"{letter}2:{letter}{last}")
+    logger.info("«Активность»: старые отметки переписаны на «%s» (%s)",
+                sheets_cache.PLAYERS_ACTIVE_MARK, changed)
+    return changed
+
+
 def _prefill_active(ws, col: int) -> int:
     """Ставит «+» всем, кто уже есть в листе, в момент создания столбца.
 
@@ -671,9 +705,9 @@ def build_summary_sheet(spreadsheet) -> int:
     Возвращает число строк игроков."""
     if spreadsheet is None:
         return 0
-    everyone = players()
-    people = [p for p in everyone if p["active"]]
-    aside = [p for p in everyone if not p["active"]]
+    # В сводке ВСЕ из листа: за игры платят по составу на игру, а не по
+    # отметке в «Активности» — она только про взнос за тренировки.
+    people = players()
     if not people:
         return 0
     paid, monthly, months = totals(), by_month(), months_seen()
@@ -686,14 +720,17 @@ def build_summary_sheet(spreadsheet) -> int:
     rows.append([])
 
     rows.append(["ИТОГО ПО ИГРОКАМ"])
-    rows.append(["Игрок", "Всего ₽", "Сезон внёс", "Сезон надо", "Долг ₽",
-                 "За игры ₽", "Игр оплачено", "Последний платёж"])
+    rows.append(["Игрок", "Тренируется", "Всего ₽", "Сезон внёс", "Сезон надо",
+                 "Долг ₽", "За игры ₽", "Игр оплачено", "Последний платёж"])
     for p in people:
         t = paid.get(p["row"], {"season": 0, "games": 0, "game_amount": 0, "last": ""})
-        debt = max(0, p["pay_season"] - t["season"]) if p["pay_season"] else 0
-        rows.append([p["title"], t["season"] + t["game_amount"], t["season"],
-                     p["pay_season"] or "", debt or "", t["game_amount"],
-                     t["games"] or "", _human_date(t["last"]) if t["last"] else ""])
+        need = p["pay_season"] if p["pays_season"] else 0
+        debt = max(0, need - t["season"]) if need else 0
+        rows.append([p["title"],
+                     sheets_cache.PLAYERS_ACTIVE_MARK if p["pays_season"] else "",
+                     t["season"] + t["game_amount"], t["season"], need or "",
+                     debt or "", t["game_amount"], t["games"] or "",
+                     _human_date(t["last"]) if t["last"] else ""])
     rows.append([])
 
     rows.append(["ДЕНЬГИ ПО МЕСЯЦАМ, ₽"])
@@ -709,12 +746,12 @@ def build_summary_sheet(spreadsheet) -> int:
         cells = [monthly.get(p["row"], {}).get(m, {}).get("games", 0) for m in months]
         rows.append([p["title"]] + [c or "" for c in cells] + [sum(cells) or ""])
 
-    # Кто без «+» — в сводке не считается, но и молча пропадать не должен:
-    # иначе «а куда делся человек» превращается в поиск ошибки в боте.
+    aside = [p for p in people if not p["pays_season"]]
     if aside:
         rows.append([])
-        rows.append([f"Временно вне обоймы (нет «+» в «Активности»), "
-                     f"в сводку не попали: {', '.join(p['title'] for p in aside)}"])
+        rows.append([f"Взнос за тренировки не ждём (пусто в «Активности»): "
+                     f"{', '.join(p['title'] for p in aside)}. За игры платят "
+                     "по составу на игру — эти платежи учтены выше."])
 
     width = max(len(r) for r in rows)
     rows = [r + [""] * (width - len(r)) for r in rows]
@@ -783,22 +820,25 @@ def totals() -> Dict[int, Dict[str, int]]:
     return out
 
 
-def balances(only_active: bool = True) -> List[Dict[str, Any]]:
+def balances() -> List[Dict[str, Any]]:
     """Сводка по каждому: сколько должен за сезон, сколько внёс, чего не хватает.
+
+    В списке ВСЕ из листа: платёж за игру может прийти от кого угодно, кто был
+    в составе. Долг за сезон считаем только с тех, у кого стоит отметка в
+    «Активности» — с не тренирующегося взнос не спрашивают.
 
     Игры считаем в штуках, а не в рублях: «оплачено 3 игры» тренеру понятнее,
     чем «2700 ₽», а цена игры у людей может отличаться."""
     paid = totals()
     out = []
     for p in players():
-        if only_active and not p["active"]:
-            continue
         t = paid.get(p["row"], {"season": 0, "games": 0, "game_amount": 0, "last": ""})
-        debt = max(0, p["pay_season"] - t["season"]) if p["pay_season"] else 0
+        need = p["pay_season"] if p["pays_season"] else 0
+        debt = max(0, need - t["season"]) if need else 0
         out.append({**p, "paid_season": t["season"], "paid_games": t["games"],
                     "paid_game_amount": t["game_amount"], "last": t["last"],
-                    "debt": debt,
-                    "season_done": bool(p["pay_season"] and debt == 0)})
+                    "need_season": need, "debt": debt,
+                    "season_done": bool(need and debt == 0)})
     out.sort(key=lambda x: (-x["debt"], x["title"]))
     return out
 
