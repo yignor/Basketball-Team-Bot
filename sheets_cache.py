@@ -41,6 +41,11 @@ PLAYERS_TIER_HEADER = "Уровень"
 # требования, а не про историю.
 PLAYERS_PAY_SEASON_HEADER = "Оплата сезона"
 PLAYERS_PAY_GAME_HEADER = "Оплата игры"
+# «+» в этом столбце — человек в обойме: ждём оплату за тренировки, поздравляем
+# с днём рождения, считаем в сводках. Пусто — временно не с нами (в отличие от
+# листа «Ушедшие», откуда не возвращаются).
+PLAYERS_ACTIVE_HEADER = "Активность"
+PLAYERS_ACTIVE_MARK = "+"
 # Листы-логи: сырые записи, которые ведёт бот. Названы «Логи …», чтобы их не
 # путали с отчётами — те строит человек и читает глазами.
 ATTEND_SHEET_NAME = "Логи посещаемости"
@@ -85,6 +90,7 @@ CREATE TABLE IF NOT EXISTS players (
     tier          TEXT NOT NULL DEFAULT '',     -- «Уровень»: Платина/Золото/…
     pay_season    INTEGER NOT NULL DEFAULT 0,   -- «Оплата сезона»: сколько должен
     pay_game      INTEGER NOT NULL DEFAULT 0,   -- «Оплата игры»: цена одной игры
+    active_mark   TEXT NOT NULL DEFAULT '',     -- «Активность»: «+» или пусто
     synced_at     TEXT NOT NULL
 );
 
@@ -668,6 +674,7 @@ def init_db() -> None:
         _ensure_column(conn, "player_jokes", "game_date", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "pay_season", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "players", "pay_game", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "players", "active_mark", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
@@ -746,6 +753,7 @@ def sync_players(spreadsheet) -> None:
                     str(r.get(PLAYERS_TIER_HEADER, "")).strip(),
                     _to_int(r.get(PLAYERS_PAY_SEASON_HEADER)),
                     _to_int(r.get(PLAYERS_PAY_GAME_HEADER)),
+                    str(r.get(PLAYERS_ACTIVE_HEADER, "")).strip(),
                     now,
                 ))
             conn.execute("BEGIN")
@@ -753,8 +761,8 @@ def sync_players(spreadsheet) -> None:
             conn.executemany(
                 """
                 INSERT INTO players
-                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, active_mark, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

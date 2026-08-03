@@ -238,6 +238,7 @@ class PlayersManager:
                         'telegram_id': record.get('Telegram ID', ''),
                         'birthday': record.get('Дата рождения', ''),
                         'status': record.get('Статус', 'Активный'),
+                        'active_mark': str(record.get('Активность', '')).strip(),
                         'team': record.get('Команда', ''),
                         'added_date': record.get('Дата добавления', ''),
                         'notes': record.get('Примечания', '')
@@ -252,8 +253,18 @@ class PlayersManager:
             return []
     
     def get_active_players(self) -> List[Dict[str, Any]]:
-        """Получает только активных игроков"""
+        """Только те, кто сейчас в обойме.
+
+        Признак — «+» в столбце «Активность» листа «Игроки»: человек может
+        временно выпасть (учёба, травма, командировка), и тогда его не ждут
+        на тренировках, не считают в оплатах и не поздравляют с днём
+        рождения. Пока «+» не стоит НИ У КОГО, столбцом просто не пользуются —
+        считаем активными всех, иначе появление пустого столбца молча
+        отменило бы поздравления всей команде."""
         all_players = self.get_all_players()
+        column_in_use = any(p.get('active_mark') for p in all_players)
+        if column_in_use:
+            return [p for p in all_players if p.get('active_mark') == '+']
         return [p for p in all_players if p.get('status', '').lower() == 'активный']
     
     def get_players_with_birthdays_today(self) -> List[Dict[str, Any]]:

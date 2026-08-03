@@ -3537,7 +3537,7 @@ async def on_startup(app: Application) -> None:
         renamed = await asyncio.to_thread(sheets_cache.rename_legacy_sheets, sheet)
         if renamed:
             log.info(f"Листы переименованы: {'; '.join(renamed)}")
-        added = await asyncio.to_thread(coach_payments.ensure_payment_columns, sheet)
+        added = await asyncio.to_thread(coach_payments.ensure_player_columns, sheet)
         if added:
             log.info(f"Лист «Игроки»: добавлены столбцы {', '.join(added)}")
         # Платежи, не дошедшие до листа в прошлый раз (Google был недоступен).

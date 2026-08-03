@@ -246,14 +246,19 @@ def players() -> List[Dict[str, Any]]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            "SELECT row_index, surname, name, status, team, pay_season, pay_game "
-            "FROM players ORDER BY surname, name").fetchall()
+            "SELECT row_index, surname, name, status, team, pay_season, pay_game, "
+            "active_mark FROM players ORDER BY surname, name").fetchall()
+    people = [r for r in rows if (r["surname"] or "").strip()
+              or (r["name"] or "").strip()]
+    # Пока «+» не стоит НИ У КОГО, столбцом просто не пользуются — считаем
+    # активными всех. Иначе появление пустого столбца молча выключило бы учёт
+    # оплат всей команде. Появился хоть один «+» — правило работает буквально.
+    marks = [str(r["active_mark"] or "").strip() for r in people]
+    column_in_use = any(marks)
     out = []
-    for r in rows:
+    for r, mark in zip(people, marks):
         surname = (r["surname"] or "").strip()
         name = (r["name"] or "").strip()
-        if not (surname or name):
-            continue
         out.append({
             "row": int(r["row_index"]),
             "surname": surname,
@@ -263,14 +268,26 @@ def players() -> List[Dict[str, Any]]:
             "team": (r["team"] or "").strip(),
             "pay_season": int(r["pay_season"] or 0),
             "pay_game": int(r["pay_game"] or 0),
-            "active": _is_active(r["status"]),
+            "active_mark": mark,
+            "active": (mark == sheets_cache.PLAYERS_ACTIVE_MARK) if column_in_use
+                      else _is_active_by_status(r["status"]),
         })
     return out
 
 
-def _is_active(status: Any) -> bool:
+def _is_active_by_status(status: Any) -> bool:
+    """Старый признак — по столбцу «Статус». Остался запасным на время, пока
+    «Активность» не заполнена."""
     s = _norm(str(status or ""))
     return not any(w in s for w in ("неактив", "ушел", "архив", "выбыл", "заморож"))
+
+
+def active_stats() -> Dict[str, int]:
+    """Сколько в обойме и сколько временно вне — для экранов и лога."""
+    people = players()
+    return {"all": len(people),
+            "active": sum(1 for p in people if p["active"]),
+            "marked": sum(1 for p in people if p["active_mark"])}
 
 
 def game_price(player: Optional[Dict[str, Any]] = None) -> int:
@@ -535,19 +552,21 @@ def push_pending(spreadsheet, limit: int = 50) -> int:
     return len(ids)
 
 
-def ensure_payment_columns(spreadsheet) -> List[str]:
-    """Заводит в листе «Игроки» столбцы «Оплата сезона» и «Оплата игры».
+def ensure_player_columns(spreadsheet) -> List[str]:
+    """Заводит в листе «Игроки» столбцы, которые бот только читает.
 
-    Суммы в них ставит тренер, но сами столбцы должен создать бот: иначе
-    первый же разговор про оплату упирается в «а куда это писать». Пишем
-    только заголовки и только если их нет."""
+    «Оплата сезона», «Оплата игры» — суммы ставит тренер. «Активность» — «+»
+    у тех, кто в обойме. Сами столбцы должен создать бот: иначе первый же
+    разговор про оплату упирается в «а куда это писать». Пишем только
+    заголовки и только если их нет."""
     if spreadsheet is None:
         return []
     ws = spreadsheet.worksheet(sheets_cache.PLAYERS_SHEET_NAME)
     header = ws.row_values(1)
-    missing = [t for t in (sheets_cache.PLAYERS_PAY_SEASON_HEADER,
-                           sheets_cache.PLAYERS_PAY_GAME_HEADER)
-               if t not in header]
+    wanted = (sheets_cache.PLAYERS_PAY_SEASON_HEADER,
+              sheets_cache.PLAYERS_PAY_GAME_HEADER,
+              sheets_cache.PLAYERS_ACTIVE_HEADER)
+    missing = [t for t in wanted if t not in header]
     if not missing:
         return []
     # Лист заведён ровно под свои столбцы, и записи в тринадцатый Google
@@ -558,9 +577,38 @@ def ensure_payment_columns(spreadsheet) -> List[str]:
         header.append(title)
         ws.update_cell(1, len(header), title)
         added.append(title)
+    if sheets_cache.PLAYERS_ACTIVE_HEADER in missing:
+        marked = _prefill_active(ws, header.index(sheets_cache.PLAYERS_ACTIVE_HEADER) + 1)
+        logger.info("«Активность»: проставлен «+» всем, кто уже в листе (%s)", marked)
     if added:
         logger.info("В листе «Игроки» добавлены столбцы: %s", ", ".join(added))
     return added
+
+
+def _prefill_active(ws, col: int) -> int:
+    """Ставит «+» всем, кто уже есть в листе, в момент создания столбца.
+
+    Пустой столбец означал бы «неактивны все» — то есть ни поздравлений, ни
+    учёта оплат у целой команды из-за одного нового заголовка. Поэтому
+    фиксируем нынешнее положение дел: сейчас в листе «Игроки» активны все, а
+    ушедшие живут на отдельном листе. Тренеру останется снять «+» у тех, кто
+    временно вне обоймы."""
+    import gspread.utils as gutils
+    values = ws.get_all_values()
+    last = 0
+    for i, row in enumerate(values[1:], start=2):
+        if any((c or "").strip() for c in row[:2]):      # есть фамилия или имя
+            last = i
+    if last < 2:
+        return 0
+    letter = gutils.rowcol_to_a1(1, col).rstrip("0123456789")
+    marks = []
+    for i in range(2, last + 1):
+        row = values[i - 1]
+        filled = any((c or "").strip() for c in row[:2])
+        marks.append([sheets_cache.PLAYERS_ACTIVE_MARK if filled else ""])
+    ws.update(values=marks, range_name=f"{letter}2:{letter}{last}")
+    return sum(1 for m in marks if m[0])
 
 
 def by_month() -> Dict[int, Dict[str, Dict[str, int]]]:
@@ -623,7 +671,9 @@ def build_summary_sheet(spreadsheet) -> int:
     Возвращает число строк игроков."""
     if spreadsheet is None:
         return 0
-    people = [p for p in players() if p["active"]]
+    everyone = players()
+    people = [p for p in everyone if p["active"]]
+    aside = [p for p in everyone if not p["active"]]
     if not people:
         return 0
     paid, monthly, months = totals(), by_month(), months_seen()
@@ -658,6 +708,13 @@ def build_summary_sheet(spreadsheet) -> int:
     for p in people:
         cells = [monthly.get(p["row"], {}).get(m, {}).get("games", 0) for m in months]
         rows.append([p["title"]] + [c or "" for c in cells] + [sum(cells) or ""])
+
+    # Кто без «+» — в сводке не считается, но и молча пропадать не должен:
+    # иначе «а куда делся человек» превращается в поиск ошибки в боте.
+    if aside:
+        rows.append([])
+        rows.append([f"Временно вне обоймы (нет «+» в «Активности»), "
+                     f"в сводку не попали: {', '.join(p['title'] for p in aside)}"])
 
     width = max(len(r) for r in rows)
     rows = [r + [""] * (width - len(r)) for r in rows]
