@@ -281,6 +281,8 @@
     CF, FUNNEL,
   ])].filter(Boolean);
   let API = API_LIST[0] || '';
+  // Сколько ждём ответа на пробе двери, прежде чем идти к следующей.
+  const PROBE_TIMEOUT = 8000;
 
   let live = false, rosterSize = 3, maxPer = 3, locked = false, inherited = false;
   let seasonInfo = null;          // сезон целиком — правила берут веса отсюда
@@ -404,9 +406,10 @@
     $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
   }
 
-  async function fromApi() {
+  async function fromApi(timeoutMs) {
     const [p, r, s] = await Promise.all([
-      api('/fantasy/pool'), api('/fantasy/roster'), api('/fantasy/standings'),
+      api('/fantasy/pool', null, timeoutMs), api('/fantasy/roster', null, timeoutMs),
+      api('/fantasy/standings', null, timeoutMs),
     ]);
     if (!p.season) { msg('Сейчас нет активного сезона фэнтези.'); return false; }
     if (!p.member) { msg('Фэнтези доступна только игрокам команды.'); return false; }
@@ -1845,10 +1848,13 @@
       for (const base of API_LIST) {
         API = base;
         try {
-          // Первое обращение к спящему туннелю поднимает соединение и бывает
-          // медленным, поэтому одна повторная попытка после обрыва по времени.
+          // На ПРОБЕ ждём мало: одна из дверей бывает мигающей (у Cloudflare
+          // соединения с edge рвутся каждые пару минут), и 25 секунд ожидания
+          // на ней — это 25 секунд белого экрана вместо мгновенного перехода
+          // ко второй двери. Разбудить спящий канал даёт вторая попытка, уже
+          // с полным запасом времени.
           let ok;
-          try { ok = await fromApi(); }
+          try { ok = await fromApi(PROBE_TIMEOUT); }
           catch (e) {
             if (e.name !== 'AbortError') throw e;
             // Первая попытка разбудила канал — вторая обычно уже быстрая.
