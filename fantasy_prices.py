@@ -37,7 +37,7 @@
 """
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 BRONZE, SILVER, GOLD = "Бронза", "Серебро", "Золото"
@@ -321,8 +321,12 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
         fantasy_api.invalidate_pool()
         # Историю пишем только когда цены реально уехали в лист: иначе экран
         # «что изменилось после игры» показывал бы движения, которых не было.
+        # Ручной прогон (без игры) тоже записываем — иначе тренер жмёт кнопку,
+        # цены меняются, а экран истории остаётся пустым и выглядит сломанным.
         if source and game_id:
             _remember(source, str(game_id), changes)
+        else:
+            _remember(MANUAL_SOURCE, datetime.now().strftime("%Y%m%d%H%M"), changes)
     changes.sort(key=lambda c: abs(c["new"] - c["old"]), reverse=True)
     if not by_row:
         # Молчаливое «ничего не сделал» — худший исход: цены стоят, а никто не
@@ -339,15 +343,17 @@ def _remember(source: str, game_id: str, changes: List[Dict[str, Any]]) -> None:
     import sheets_cache
     if not changes:
         return
-    game_date = ""
+    # У ручного прогона игры нет — датой считаем сегодняшний день, иначе
+    # запись уедет в конец истории с пустой датой.
+    game_date = date.today().isoformat() if source == MANUAL_SOURCE else ""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
-        row = conn.execute(
+        row = None if source == MANUAL_SOURCE else conn.execute(
             "SELECT game_date FROM game_meta WHERE source = ? AND game_id = ?",
             (source, game_id)).fetchone()
         if row:
             game_date = str(row["game_date"] or "")
-        if not game_date:
+        if not game_date and source != MANUAL_SOURCE:
             row = conn.execute(
                 "SELECT game_date FROM game_player_stats WHERE source = ? AND game_id = ? LIMIT 1",
                 (source, game_id)).fetchone()
@@ -368,6 +374,10 @@ def _remember(source: str, game_id: str, changes: List[Dict[str, Any]]) -> None:
 # показываем, но честно говорим: изменения тогда не записывались. Восстановить
 # их нечем — старых цен у нас нигде не сохранилось.
 HISTORY_SINCE = "2026-08-03"
+
+# Ручной пересчёт из админки — не игра, но в истории ему место: иначе после
+# нажатия кнопки экран остаётся пустым, будто ничего не произошло.
+MANUAL_SOURCE = "manual"
 
 
 def history(teams: Optional[List[Tuple[str, str]]] = None,
@@ -397,8 +407,17 @@ def history(teams: Optional[List[Tuple[str, str]]] = None,
                    FROM price_history GROUP BY source, game_id
                    ORDER BY game_date DESC LIMIT ?""", (int(limit_games),)).fetchall()
 
+        seen = {(str(r["source"]), str(r["game_id"])) for r in rows}
+        extra = conn.execute(
+            """SELECT source, game_id, MAX(game_date) AS game_date
+               FROM price_history GROUP BY source, game_id
+               ORDER BY game_date DESC LIMIT ?""", (int(limit_games),)).fetchall()
+        rows = list(rows) + [r for r in extra
+                             if (str(r["source"]), str(r["game_id"])) not in seen]
+        rows.sort(key=lambda r: str(r["game_date"] or ""), reverse=True)
+
         out = []
-        for g in rows:
+        for g in rows[:limit_games]:
             src, gid = str(g["source"]), str(g["game_id"])
             changes = conn.execute(
                 """SELECT * FROM price_history WHERE source = ? AND game_id = ?

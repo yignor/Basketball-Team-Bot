@@ -947,6 +947,10 @@ async def handle_history(request: web.Request) -> web.Response:
 
 def _history_title(game: Dict[str, Any]) -> str:
     """«02.08 · SLPRO · PullUp Farm — Атланты 78:75»."""
+    import fantasy_prices
+    when0 = f"{game['date'][8:10]}.{game['date'][5:7]}" if len(game["date"]) >= 10 else ""
+    if game["source"] == fantasy_prices.MANUAL_SOURCE:
+        return " · ".join(x for x in (when0, "Ручной пересчёт") if x)
     league = "SLPRO" if game["source"] == "slpro" else "Инфобаскет"
     when = f"{game['date'][8:10]}.{game['date'][5:7]}" if len(game["date"]) >= 10 else ""
     who = " — ".join(x for x in (game.get("home"), game.get("guest")) if x)
