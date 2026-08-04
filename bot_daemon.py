@@ -1624,6 +1624,13 @@ def _fantasy_menu_markup() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("👥 Составы в пуле", callback_data="admin:fantasy:pool")])
         rows.append([InlineKeyboardButton("🎯 Турнир подсчёта", callback_data="admin:fantasy:scope")])
         rows.append([InlineKeyboardButton("📥 Пересчитать статистику", callback_data="admin:fantasy:ingest")])
+        # Цены двигаются сами после каждой игры. Эти две кнопки — на случай,
+        # когда нужно посмотреть или применить прямо сейчас: в чат-панели их
+        # не было, и тренер искал их именно здесь, а не в приложении.
+        rows.append([InlineKeyboardButton("👀 Показать пересчёт цен",
+                                          callback_data="admin:fantasy:pricesdry")])
+        rows.append([InlineKeyboardButton("💰 Пересчитать цены",
+                                          callback_data="admin:fantasy:prices")])
         end_label = "🏁 Завершить лигу…" if len(seasons) > 1 else "🏁 Завершить сезон"
         rows.append([InlineKeyboardButton(end_label, callback_data="admin:fantasy:end")])
     rows.append(_back_button())
@@ -2422,8 +2429,44 @@ def _check_already_run_today(data_types: List[str]) -> Optional[str]:
     return None
 
 
+def _prices_text(res: Dict[str, Any], dry: bool) -> str:
+    """Что сделал (или сделал бы) пересчёт цен."""
+    changes = res.get("changes") or []
+    head = ("👀 Пересчёт цен — предварительно, в таблицу ничего не записано."
+            if dry else f"💰 Цены пересчитаны: строк в листе обновлено {res.get('updated', 0)}.")
+    lines = [head, "", f"Проверено игроков: {res.get('checked', 0)}"]
+    if res.get("skipped"):
+        lines.append(f"Пропущено: {res['skipped']}")
+    if not changes:
+        lines.append("")
+        lines.append("Двигать некого — все цены уже соответствуют форме.")
+        return "\n".join(lines)
+    lines.append(f"Движений: {len(changes)}")
+    lines.append("")
+    for c in changes[:25]:
+        arrow = "▲" if c["new"] > c["old"] else "▼"
+        lines.append(f"{arrow} {c.get('name') or 'Игрок'}: {c['old']} → {c['new']}")
+        lines.append(f"    {c.get('reason', '')}")
+    if len(changes) > 25:
+        lines.append(f"… и ещё {len(changes) - 25}")
+    if dry:
+        lines += ["", "Применить — кнопка «💰 Пересчитать цены»."]
+    return "\n".join(lines)
+
+
 async def _handle_fantasy_action(query, action: str, arg: Optional[str] = None) -> None:
     import fantasy
+    if action in ("prices", "pricesdry"):
+        import fantasy_prices
+        dry = action == "pricesdry"
+        await query.edit_message_text("⏳ Считаю цены…")
+        res = await asyncio.to_thread(
+            fantasy_prices.recalc, fantasy.get_active_season(),
+            None if dry else _get_spreadsheet(), dry)
+        await query.edit_message_text(
+            _prices_text(res, dry),
+            reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:fantasy")]))
+        return
     if action == "end":
         seasons = fantasy.active_seasons()
         if arg is None and len(seasons) > 1:
