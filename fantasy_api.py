@@ -777,19 +777,24 @@ def _price_key(name: str) -> str:
     return " ".join((name or "").lower().replace("ё", "е").split())
 
 
-def _remember_price_ref(ref: str, row: int) -> None:
+def _remember_price_refs(pairs: List[Tuple[str, int]]) -> None:
+    """Пишет связки ОДНОЙ транзакцией: по отдельной на каждую — это фиксация
+    на диск за штуку, и на пуле в четыре десятка карточек уже заметно."""
+    if not pairs:
+        return
     try:
         sheets_cache.init_db()
+        now = sheets_cache.now_iso()
         with sheets_cache.get_connection() as conn:
-            conn.execute(
+            conn.executemany(
                 """INSERT INTO price_refs (ref, player_row, updated_at)
                    VALUES (?, ?, ?)
                    ON CONFLICT(ref) DO UPDATE SET player_row = excluded.player_row,
                                                   updated_at = excluded.updated_at""",
-                (str(ref), int(row), sheets_cache.now_iso()))
+                [(str(r), int(w), now) for r, w in pairs])
             conn.commit()
     except Exception as e:            # связка — удобство, а не обязательство
-        log.debug(f"связка цены для {ref} не сохранилась: {e}")
+        log.debug(f"связки цен не сохранились: {e}")
 
 
 def remember_price_refs(pool: List[Dict[str, Any]]) -> int:
@@ -798,13 +803,13 @@ def remember_price_refs(pool: List[Dict[str, Any]]) -> int:
     Зовётся демоном при прогреве: только у него тёплый реестр имён. Пересчёт
     цен живёт в кроне, где имён нет, и без этих связок он не находит никого."""
     prices = sheets_cache.get_player_prices()
-    done = 0
+    pairs = []
     for card in pool:
         pr = _lookup_price(card.get("name", ""), prices)
         if pr.get("row"):
-            _remember_price_ref(card["ref"], int(pr["row"]))
-            done += 1
-    return done
+            pairs.append((card["ref"], int(pr["row"])))
+    _remember_price_refs(pairs)
+    return len(pairs)
 
 
 def price_row_of(ref: str) -> int:
@@ -858,11 +863,10 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         lasts = [last[k] for k in keys if last.get(k)]
         last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
         pr = _lookup_price(p["name"], prices)
-        if pr.get("row"):
-            # Пока имена под рукой, запоминаем «карточка -> строка листа».
-            # В процессе крона реестр имён пуст, и без этой связки пересчёт
-            # цен после игры не находит никого (см. price_refs).
-            _remember_price_ref(p["ref"], int(pr["row"]))
+        # Связки «карточка -> строка» тут НЕ пишем: этот код выполняется на
+        # каждую загрузку пула, и запись по строке превращалась в 37 отдельных
+        # транзакций за запрос — приложение заметно тормозило. Их проставляет
+        # демон при прогреве, одним разом (remember_price_refs).
         # Уровень ВСЕГДА считаем от цены, а не читаем из таблицы: цена —
         # единственный источник правды, её правит тренер, и значок обязан
         # идти за ней сам. Столбец «Уровень» в листе — формула для глаз.
@@ -912,25 +916,31 @@ async def handle_history(request: web.Request) -> web.Response:
     teams = sorted({(fantasy_stats.parse_ref(one)[0], one.split(":")[1])
                     for p in pool for one in fantasy_stats.expand_refs([p["ref"]])
                     if len(one.split(":")) >= 3})
-    rows = await asyncio.get_running_loop().run_in_executor(
-        None, lambda: fantasy_prices.history(teams))
-    by_ref = {p["ref"]: p for p in pool}
-    by_row: Dict[int, Dict[str, Any]] = {}
-    prices = sheets_cache.get_player_prices()
-    for card in pool:
-        pr = _lookup_price(card.get("name", ""), prices)
-        if pr.get("row"):
-            by_row.setdefault(int(pr["row"]), card)
 
-    games = []
-    for g in rows:
-        changes = []
-        for ch in g["changes"]:
-            card = by_ref.get(ch["ref"]) or by_row.get(ch["row"])
-            name = (card or {}).get("name") or ""
-            changes.append({**ch, "name": name})
-        games.append({**g, "changes": changes,
-                      "title": _history_title(g)})
+    def collect() -> List[Dict[str, Any]]:
+        """Всё, что лезет в базу, — в отдельном потоке.
+
+        Раньше разбор шёл прямо в обработчике: с полусотней карточек и
+        поиском цены по каждой он ощутимо держал цикл событий, и медленным
+        становился ВЕСЬ бот, а не только этот экран."""
+        rows = fantasy_prices.history(teams)
+        prices = sheets_cache.get_player_prices()
+        by_row: Dict[int, Dict[str, Any]] = {}
+        for card in pool:
+            pr = _lookup_price(card.get("name", ""), prices)
+            if pr.get("row"):
+                by_row.setdefault(int(pr["row"]), card)
+        by_ref = {p["ref"]: p for p in pool}
+        out = []
+        for g in rows:
+            changes = []
+            for ch in g["changes"]:
+                card = by_ref.get(ch["ref"]) or by_row.get(ch["row"])
+                changes.append({**ch, "name": (card or {}).get("name") or ""})
+            out.append({**g, "changes": changes, "title": _history_title(g)})
+        return out
+
+    games = await asyncio.get_running_loop().run_in_executor(None, collect)
     return web.json_response({"games": games,
                               "since": fantasy_prices.HISTORY_SINCE})
 
