@@ -15,10 +15,12 @@ Infobasket это события типов 8/9 (`Widget/GetOnline`), у SLPRO �
   куска видео. Он есть примерно у четверти событий, остальные разносим
   линейной интерполяцией между соседними якорями.
 
-Ноль отсчёта — спорный мяч. Где спорный внутри записи ВК, протокол знать не
-может (трансляцию включают когда придётся), поэтому сдвиг задаётся руками
-один раз на игру и хранится в `game_video_sync`. Пока не задан, честно
-говорим, что счёт идёт от спорного.
+Ноль отсчёта в записи — момент, с которого включили трансляцию. Считаем, что
+её включают ко времени из расписания: тогда спорный мяч приходится на
+«протокольный старт минус время по расписанию» — обычно это 1–12 минут
+(команды опаздывают, предыдущая игра затягивается). Точнее из данных не
+узнать, поэтому под тайм-кодами честно висит приписка про возможное
+смещение.
 
 Имён здесь нет и не будет — только id игрока ([[legal-data-invariant]]).
 """
@@ -29,7 +31,7 @@ import asyncio
 import json
 import logging
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import sheets_cache
@@ -52,6 +54,17 @@ MIN_SHIFT_SECONDS = 10
 
 # Сколько дней назад ищем игры без разметки при фоновой дозагрузке.
 BACKFILL_DAYS = 30
+
+# Обе лиги играют по московскому времени, и расписание тоже московское.
+MSK = timezone(timedelta(hours=3))
+
+# Насколько поздно матч может начаться относительно расписания, чтобы в это
+# ещё верилось. Больше часа — значит расписание в кеше не про эту игру
+# (перенос, спаренный тур), и сдвиг лучше не выдумывать.
+MAX_LATE_START = 3600
+
+SHIFT_NOTE = ("<i>Время в записи считаем от начала трансляции по расписанию — "
+              "возможно смещение на минуту-другую.</i>")
 
 
 # ───────────────────────────── Infobasket ──────────────────────────────────
@@ -114,12 +127,12 @@ def _interpolate(anchors: List[Tuple[float, float]], clock: float) -> float:
     return r1 + (r2 - r1) * (clock - c1) / (c2 - c1)
 
 
-def _ib_shifts(game_id: str) -> List[Dict[str, Any]]:
+def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     data = _ib_fetch(str(game_id))
     plays = data.get("OnlinePlays") or []
     starts = data.get("OnlineStarts") or []
     if not plays:
-        return []
+        return [], None
 
     # StartID — номер заявки в этой игре; настоящий id игрока лежит в PersonID.
     person = {int(s.get("StartID") or 0): str(s.get("PersonID") or "")
@@ -143,7 +156,7 @@ def _ib_shifts(game_id: str) -> List[Dict[str, Any]]:
         items.sort()
     if not per_anchors:
         logger.info("Тайм-коды infobasket/%s: в протоколе нет привязки к видео", game_id)
-        return []
+        return [], None
     every = sorted(a for items in per_anchors.values() for a in items)
     # Ноль — старт первого периода (у него якорь есть всегда, событие типа 21).
     zero = per_anchors.get(1, every)[0][1]
@@ -166,10 +179,32 @@ def _ib_shifts(game_id: str) -> List[Dict[str, Any]]:
             "in": kind == IB_PLAY_IN,
             "order": int(p.get("PlaySortOrder") or 0),
         })
-    return _pair(events)
+    return _pair(events), _seconds_of_day(datetime.fromtimestamp(zero, MSK))
 
 
 # ─────────────────────────────── SLPRO ─────────────────────────────────────
+
+def _seconds_of_day(moment: datetime) -> int:
+    return moment.hour * 3600 + moment.minute * 60 + moment.second
+
+
+def _scheduled_seconds(game_time: Any) -> Optional[int]:
+    """Время из расписания в секундах от полуночи. Форматы у лиг разные:
+    SLPRO пишет «21:10:00», Infobasket — «20.00»."""
+    raw = str(game_time or "").strip().replace(".", ":")
+    if not raw:
+        return None
+    parts = raw.split(":")
+    try:
+        nums = [int(p) for p in parts[:3]]
+    except ValueError:
+        return None
+    if not nums or not (0 <= nums[0] < 24):
+        return None
+    while len(nums) < 3:
+        nums.append(0)
+    return nums[0] * 3600 + nums[1] * 60 + nums[2]
+
 
 def _slpro_time(value: Any) -> Optional[float]:
     try:
@@ -178,16 +213,16 @@ def _slpro_time(value: Any) -> Optional[float]:
         return None
 
 
-async def _slpro_shifts(client, game_id: str) -> List[Dict[str, Any]]:
+async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     game = await client.get_game(game_id)
     log = (game or {}).get("log") or []
     if not log:
-        return []
+        return [], None
 
     stamps = [t for t in (_slpro_time(e.get("date_add")) for e in log) if t]
     if not stamps:
         logger.info("Тайм-коды slpro/%s: в протоколе нет времени событий", game_id)
-        return []
+        return [], None
     zero = min(stamps)
 
     # game_time у SLPRO идёт на УБЫВАНИЕ (600 → 0) и считается внутри периода.
@@ -212,7 +247,8 @@ async def _slpro_shifts(client, game_id: str) -> List[Dict[str, Any]]:
             "in": int(e.get("value") or 0) == 1,
             "order": idx,
         })
-    return _pair(events)
+    # date_add секретаря — местное московское время, как и расписание.
+    return _pair(events), _seconds_of_day(datetime.fromtimestamp(zero))
 
 
 # ──────────────────────────── Общая сборка ─────────────────────────────────
@@ -300,19 +336,49 @@ async def refresh(source: str, game_id: Any, client=None) -> int:
     source = str(source)
     try:
         if source == "infobasket":
-            found = await asyncio.to_thread(_ib_shifts, str(game_id))
+            found, tipoff = await asyncio.to_thread(_ib_shifts, str(game_id))
         elif source == "slpro":
-            own = client is None
-            if own:
+            if client is None:
                 from slpro_client import SlproClient
                 client = SlproClient()
-            found = await _slpro_shifts(client, str(game_id))
+            found, tipoff = await _slpro_shifts(client, str(game_id))
         else:
             return 0
     except Exception as exc:  # сеть/формат — не роняем ingest из-за тайм-кодов
         logger.warning("Тайм-коды %s/%s: %s", source, game_id, exc)
         return 0
-    return store(source, game_id, found)
+    n = store(source, game_id, found)
+    if n:
+        sync_to_schedule(source, game_id, tipoff)
+    return n
+
+
+def sync_to_schedule(source: str, game_id: Any, tipoff_sec: Optional[int]) -> int:
+    """Считает, на какой секунде записи спорный мяч, и запоминает.
+
+    Трансляцию включают ко времени из расписания, а свисток дают позже:
+    команды опаздывают, предыдущая игра затягивается. Разница «протокольный
+    старт минус расписание» и есть искомый сдвиг — по нашим играм выходит от
+    минуты до двенадцати.
+
+    Отрицательная разница (в протоколе старт раньше расписания) означает, что
+    трансляцию включили позже назначенного, и тогда спорный — в самом начале
+    записи. Считаем сдвиг нулевым, а не отматываем в минус."""
+    if tipoff_sec is None:
+        return 0
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT game_time FROM game_meta WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    planned = _scheduled_seconds(row["game_time"]) if row else None
+    if planned is None:
+        return 0
+    shift = tipoff_sec - planned
+    if shift < 0 or shift > MAX_LATE_START:
+        shift = 0
+    set_offset(source, game_id, shift, "auto")
+    return shift
 
 
 def our_games(conn, extra_where: str = "", args: Optional[List[Any]] = None,
@@ -338,11 +404,34 @@ def our_games(conn, extra_where: str = "", args: Optional[List[Any]] = None,
     return [dict(r) for r in conn.execute(sql, ours + ours + list(args or []) + [int(limit)])]
 
 
+def player_games(identities: List[Tuple[str, Any]], limit: int = 8) -> List[Dict[str, Any]]:
+    """Игры с разметкой, где играл этот человек, свежие сначала.
+
+    identities — пары (источник, id игрока в лиге): у большинства их две,
+    основа и Farm."""
+    sheets_cache.init_db()
+    found: List[Dict[str, Any]] = []
+    with sheets_cache.get_connection() as conn:
+        for source, player_id in identities:
+            found += [dict(r, player_id=str(player_id)) for r in conn.execute(
+                """SELECT m.source, m.game_id, m.game_date, m.home_name,
+                          m.guest_name, m.video_vk, COUNT(*) AS shifts
+                     FROM game_shifts s
+                     JOIN game_meta m ON m.source = s.source AND m.game_id = s.game_id
+                    WHERE s.source = ? AND s.player_id = ?
+                    GROUP BY s.source, s.game_id
+                    ORDER BY m.game_date DESC LIMIT ?""",
+                (str(source), str(player_id), int(limit)))]
+    found.sort(key=lambda g: str(g["game_date"]), reverse=True)
+    return found[:limit]
+
+
 def games_without_shifts(limit: int = 20, days: int = BACKFILL_DAYS) -> List[Dict[str, Any]]:
-    """Наши сыгранные игры, у которых разметки ещё нет.
+    """Наши сыгранные игры, которым разметки не хватает.
 
     Ограничиваемся играми с записью ВК: тайм-коды без видео некуда
-    прикладывать."""
+    прикладывать. Берём и те, что размечены, но без привязки к записи, — так
+    игры, размеченные до появления авторасчёта сдвига, дотянутся сами."""
     sheets_cache.init_db()
     since_iso = datetime.fromordinal(
         datetime.now().date().toordinal() - days).date().isoformat()
@@ -350,8 +439,10 @@ def games_without_shifts(limit: int = 20, days: int = BACKFILL_DAYS) -> List[Dic
         return our_games(
             conn,
             extra_where=("AND m.game_date >= ? "
-                         "AND NOT EXISTS (SELECT 1 FROM game_shifts s "
-                         "                 WHERE s.source = m.source AND s.game_id = m.game_id) "
+                         "AND (NOT EXISTS (SELECT 1 FROM game_shifts s "
+                         "                  WHERE s.source = m.source AND s.game_id = m.game_id) "
+                         "  OR NOT EXISTS (SELECT 1 FROM game_video_sync v "
+                         "                  WHERE v.source = m.source AND v.game_id = m.game_id)) "
                          "AND EXISTS (SELECT 1 FROM game_player_stats p "
                          "             WHERE p.source = m.source AND p.game_id = m.game_id)"),
             args=[since_iso], limit=limit)
@@ -381,15 +472,6 @@ def offset(source: str, game_id: Any) -> int:
     return int(row["offset_sec"]) if row else 0
 
 
-def is_synced(source: str, game_id: Any) -> bool:
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM game_video_sync WHERE source = ? AND game_id = ?",
-            (source, str(game_id))).fetchone()
-    return bool(row)
-
-
 def set_offset(source: str, game_id: Any, seconds: int, who: Any = "") -> None:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
@@ -401,26 +483,6 @@ def set_offset(source: str, game_id: Any, seconds: int, who: Any = "") -> None:
                    set_by = excluded.set_by, set_at = excluded.set_at""",
             (source, str(game_id), int(seconds), str(who), sheets_cache.now_iso()))
         conn.commit()
-
-
-def parse_offset(text: str) -> Optional[int]:
-    """«3:20», «03:20», «1:05:30» или просто «200» → секунды."""
-    raw = str(text or "").strip().replace(",", ":").replace(".", ":")
-    if not raw:
-        return None
-    parts = raw.split(":")
-    try:
-        nums = [int(p) for p in parts if p != ""]
-    except ValueError:
-        return None
-    if len(nums) != len(parts) or not nums or len(nums) > 3:
-        return None
-    total = 0
-    for n in nums:
-        if n < 0:
-            return None
-        total = total * 60 + n
-    return total
 
 
 def hhmmss(seconds: int) -> str:
@@ -472,10 +534,16 @@ def format_block(source: str, game_id: Any, player_id: Any,
     # Считаем по показанным: заголовок «8 выходов» над списком из семи строк
     # выглядит как потерянная строка, а не как отброшенная секундная замена.
     count = len(shown)
-    lines = [f"⏱ <b>Ты на площадке</b> · {count} "
-             f"{'выход' if count % 10 == 1 and count != 11 else 'выхода' if count % 10 in (2, 3, 4) and count not in (12, 13, 14) else 'выходов'}"]
+    head = (f"⏱ <b>Ты на площадке</b> · {count} "
+            f"{'выход' if count % 10 == 1 and count != 11 else 'выхода' if count % 10 in (2, 3, 4) and count not in (12, 13, 14) else 'выходов'}")
+    if video_url:
+        head += f" · <a href=\"{video_url}\">запись</a>"
+    lines = [head]
     for t in shown[:max_items]:
         mark = f"{t['period']}-й период"
+        # Ссылка спрятана под время: в сообщении остаётся «0:00–8:02», а не
+        # простыня из vk.com/video-...?t=. Иначе блок из восьми выходов
+        # раздувает разбор так, что своей статистики уже не видно.
         if video_url:
             lines.append(f"• <a href=\"{t['link']}\">{t['label']}</a> · {mark}")
         else:
@@ -484,7 +552,5 @@ def format_block(source: str, game_id: Any, player_id: Any,
         lines.append(f"…и ещё {len(shown) - max_items}")
     if total:
         lines.append(f"Итого {total // 60} мин игрового времени")
-    if not is_synced(source, game_id):
-        lines.append("<i>Отсчёт от спорного мяча: если запись началась раньше, "
-                     "сдвиг задаст тренер.</i>")
+    lines.append(SHIFT_NOTE)
     return "\n".join(lines)
