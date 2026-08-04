@@ -1766,19 +1766,19 @@
   // открываются. Данные приходят по играм, а не общим списком: цена двигается
   // после конкретного матча, и «почему упал» без игры рядом не читается.
 
-  let historyLoaded = false;
-
+  // Историю НЕ кешируем на сеанс: цены двигаются после каждой игры и по
+  // кнопке в админке, а приложение живёт открытым часами. Один раз
+  // загруженный пустой список выглядел как «ничего не изменилось», хотя
+  // изменения уже были.
   async function loadHistory() {
     const el = $('historyBody');
-    if (historyLoaded) return;
     if (!live) {
       el.innerHTML = '<div class="banner">История цен доступна при связи с ботом.</div>';
       return;
     }
-    el.innerHTML = '<div class="banner">Загрузка…</div>';
+    if (!el.children.length) el.innerHTML = '<div class="banner">Загрузка…</div>';
     try {
       const d = await api('/fantasy/history');
-      historyLoaded = true;
       renderHistory(d.games || []);
     } catch (e) {
       el.innerHTML = '<div class="banner">Не удалось загрузить историю.</div>';
@@ -1859,7 +1859,6 @@
     $('topList').innerHTML = '';
     $('guessList').innerHTML = '';
     $('historyBody').innerHTML = '';
-    historyLoaded = false;
     guessBlocks = [];
     for (const k of Object.keys(topCache)) delete topCache[k];
     msg('Загрузка…');
