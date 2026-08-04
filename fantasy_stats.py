@@ -195,7 +195,12 @@ def _store_game_meta(conn, source: str, game_id: Any, meta: Dict[str, Any]) -> N
                home_name=excluded.home_name, guest_name=excluded.guest_name,
                home_score=excluded.home_score, guest_score=excluded.guest_score,
                quarters_json=excluded.quarters_json, arena=excluded.arena,
-               video_vk=excluded.video_vk, fetched_at=excluded.fetched_at""",
+               -- Ссылку на трансляцию НЕ затираем пустым значением: её кладёт
+               -- vk_video, часто ещё до игры, а бокс-скор про неё не знает.
+               -- Без этого перекачка игры молча стирала найденную трансляцию.
+               video_vk=CASE WHEN excluded.video_vk != '' THEN excluded.video_vk
+                             ELSE game_meta.video_vk END,
+               fetched_at=excluded.fetched_at""",
         # У старых игр arena/video приходят как null. `.get(k, "")` тут не
         # помогает: ключ есть, а значение None — колонки NOT NULL это роняло.
         (source, str(game_id), meta.get("game_date") or "", meta.get("game_time") or "",

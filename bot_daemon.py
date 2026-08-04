@@ -4099,6 +4099,31 @@ async def _personal_digests(app: Application) -> None:
             await asyncio.to_thread(personal_game.mark_sent, item["key"], f"ошибка: {e}")
 
 
+async def _watch_broadcasts(app: Application) -> None:
+    """Сторожит трансляции идущих матчей — тикает часто, работает редко.
+
+    Сначала спрашиваем локальное расписание: вне окна матча (за 15 минут до
+    начала и три часа после) не делаем ни одного запроса и не трогаем
+    GameSystemManager — он лезет в Google, и строить его каждые полминуты
+    было бы дороже самой задачи."""
+    import vk_video
+    try:
+        candidates = await asyncio.to_thread(vk_video.live_candidates)
+        if not candidates:
+            return
+        gsm = await asyncio.to_thread(_game_manager)
+        res = await vk_video.watch_live(
+            bot=_bot_of(gsm), chat_ids=_result_chat_ids(gsm),
+            topic_id=getattr(gsm, "game_announcement_topic_id", None))
+        if res["found"]:
+            log.info(f"VK: трансляций найдено {res['found']}, "
+                     f"оповещений {res['notified']}")
+        elif res["watching"]:
+            log.info(f"VK: смотрю трансляции по {res['watching']} игре(ам)")
+    except Exception as e:
+        log.warning(f"Сторож трансляций: {e}")
+
+
 async def _refresh_pay_summary() -> None:
     global _pay_sheet_at
     now = time.time()
@@ -4178,6 +4203,7 @@ async def _background_loop(app: Application) -> None:
             await _pay_schedule(app)
             await _game_schedule(app)
             await _personal_digests(app)
+            await _watch_broadcasts(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()
             await _keep_funnel_warm()

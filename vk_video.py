@@ -47,6 +47,13 @@ WALL_COUNT = 100
 # сохраняются, просто молча: в отчёте и в сообщении о результате они появятся.
 ANNOUNCE_MAX_AGE_DAYS = 3
 
+# Трансляция появляется в группе около начала матча, поэтому смотреть начинаем
+# заранее и продолжаем, пока игра идёт. Раньше бот искал только ЗАПИСИ уже
+# сыгранных игр — ссылка приходила на следующий день, когда смотреть незачем.
+LIVE_LEAD_MINUTES = 15          # за сколько до начала начинаем смотреть
+LIVE_TAIL_HOURS = 3             # сколько ещё смотрим после начала
+LIVE_SCAN_SECONDS = 180         # как часто дёргаем VK по одной игре
+
 
 def token() -> str:
     return (os.getenv("VK_TOKEN") or os.getenv("VK_SERVICE_TOKEN") or "").strip()
@@ -132,7 +139,9 @@ async def find_for_game(game_date: str, team_a: str, team_b: str,
     game_date — ISO. Названия команд — как их пишет лига; сравниваем нестрого
     (регистр, дефисы, ё), потому что в постах их сокращают."""
     import datetime as _dt
-    if not (game_date and team_a and team_b):
+    # team_b пустой — ищем по одному названию: у трансляции в посте часто
+    # только соперник и время, своего названия может не быть вовсе.
+    if not (game_date and (team_a or team_b)):
         return ""
     try:
         day = _dt.date.fromisoformat(game_date)
@@ -142,7 +151,7 @@ async def find_for_game(game_date: str, team_a: str, team_b: str,
                                   _dt.time.min).timestamp())
     hi = int(_dt.datetime.combine(day + _dt.timedelta(days=WINDOW_DAYS),
                                   _dt.time.max).timestamp())
-    want = (_norm(team_a), _norm(team_b))
+    want = tuple(w for w in (_norm(team_a), _norm(team_b)) if w)
 
     for g in ([group] if group else groups()):
         owner = g if str(g).lstrip("-").isdigit() else None
@@ -165,8 +174,13 @@ async def find_for_game(game_date: str, team_a: str, team_b: str,
     return ""
 
 
-def store(source: str, game_id: Any, link: str) -> bool:
-    """Кладёт ссылку в game_meta. Пустую не пишем и чужую не затираем."""
+def store(source: str, game_id: Any, link: str,
+          game_date: str = "", home: str = "", guest: str = "") -> bool:
+    """Кладёт ссылку в game_meta. Пустую не пишем и чужую не затираем.
+
+    Игра могла ещё не состояться — тогда строки в game_meta просто нет
+    (её заводит выкачка бокс-скора). Заводим заготовку с тем, что знаем из
+    расписания: иначе найденную трансляцию некуда положить."""
     if not link:
         return False
     sheets_cache.init_db()
@@ -175,6 +189,18 @@ def store(source: str, game_id: Any, link: str) -> bool:
             """UPDATE game_meta SET video_vk = ?
                WHERE source = ? AND game_id = ? AND video_vk = ''""",
             (link, source, str(game_id))).rowcount
+        if not n:
+            exists = conn.execute(
+                "SELECT 1 FROM game_meta WHERE source = ? AND game_id = ?",
+                (source, str(game_id))).fetchone()
+            if not exists:
+                conn.execute(
+                    """INSERT INTO game_meta (source, game_id, game_date,
+                                              home_name, guest_name, video_vk, fetched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (source, str(game_id), game_date, home, guest, link,
+                     sheets_cache.now_iso()))
+                n = 1
         conn.commit()
     return bool(n)
 
@@ -211,19 +237,22 @@ def is_fresh(game_date: str, today: Optional[Any] = None) -> bool:
     return 0 <= (now - day).days <= ANNOUNCE_MAX_AGE_DAYS
 
 
-def _announce_text(game: Dict[str, Any], link: str) -> str:
-    """Текст оповещения о появившейся записи."""
+def _announce_text(game: Dict[str, Any], link: str, live: bool = False) -> str:
+    """Текст оповещения. Трансляция и запись — разные новости."""
     d = str(game.get("game_date") or "")
     when = f"{d[8:10]}.{d[5:7]}" if len(d) >= 10 else d
-    return (f"📹 Появилась запись игры\n"
+    head = "📺 Идёт трансляция" if live else "📹 Появилась запись игры"
+    action = "Смотреть эфир" if live else "Смотреть"
+    return (f"{head}\n"
             f"🏀 {game.get('home_name')} — {game.get('guest_name')}"
             f"{f' · {when}' if when else ''}\n\n"
-            f"<a href=\"{link}\">Смотреть</a>")
+            f"<a href=\"{link}\">{action}</a>")
 
 
 async def announce(bot: Any, game: Dict[str, Any], link: str,
                    chat_ids: Optional[List[Any]] = None,
-                   topic_id: Optional[int] = None) -> Dict[str, int]:
+                   topic_id: Optional[int] = None,
+                   live: bool = False) -> Dict[str, int]:
     """Оповестить о найденной записи: чат команды и подписчики.
 
     Три адресата, и они не пересекаются по смыслу:
@@ -233,7 +262,7 @@ async def announce(bot: Any, game: Dict[str, Any], link: str,
         только если он в ЭТОЙ игре выходил на площадку.
     Кто попал сразу в две личные рассылки, получит одно сообщение."""
     import subscriptions
-    text = _announce_text(game, link)
+    text = _announce_text(game, link, live)
     out = {"chat": 0, "team": 0, "players": 0}
     for cid in (chat_ids or []):
         try:
@@ -253,6 +282,100 @@ async def announce(bot: Any, game: Dict[str, Any], link: str,
     # Тем, кто уже получил как подписчик команды, второй раз не шлём.
     only_players = [u for u in watchers if u not in set(team)]
     out["players"] = await subscriptions.deliver_to(bot, only_players, text)
+    return out
+
+
+# Когда последний раз смотрели VK по конкретной игре: {source:game_id: время}.
+# В памяти — после рестарта проверим заново, это дешевле, чем таблица.
+_live_seen: Dict[str, float] = {}
+
+
+def live_candidates(now: Optional[Any] = None) -> List[Dict[str, Any]]:
+    """Игры, у которых прямо сейчас может идти трансляция.
+
+    Берём из расписания (записи опросов), а не из game_meta: там игра
+    появляется только после выкачки бокс-скора, то есть уже сыгранной."""
+    import datetime as _dt
+    import game_roster
+    now = now or _dt.datetime.now()
+    today = now.date()
+    out = []
+    for g in game_roster.games(from_day=today - _dt.timedelta(days=1),
+                               until_day=today + _dt.timedelta(days=1)):
+        start = _game_start(g)
+        if not start:
+            continue
+        if not (start - _dt.timedelta(minutes=LIVE_LEAD_MINUTES) <= now
+                <= start + _dt.timedelta(hours=LIVE_TAIL_HOURS)):
+            continue
+        if link_of(g["source"], g["game_id"]):
+            continue                      # ссылка уже есть — искать нечего
+        out.append({"source": g["source"], "game_id": g["game_id"],
+                    "game_date": g["date"].isoformat(),
+                    "home_name": g.get("opponent") or "",
+                    "guest_name": g.get("title") or "",
+                    "opponent": g.get("opponent") or "", "start": start})
+    return out
+
+
+def _game_start(game: Dict[str, Any]) -> Optional[Any]:
+    """Дата и время начала матча из расписания. Без времени игру не сторожим:
+    сканировать сутки напролёт ради одной ссылки незачем."""
+    import datetime as _dt
+    raw = str(game.get("time") or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%H:%M:%S", "%H:%M", "%H.%M"):
+        try:
+            t = _dt.datetime.strptime(raw[:8] if len(raw) >= 8 else raw, fmt).time()
+        except ValueError:
+            continue
+        return _dt.datetime.combine(game["date"], t)
+    return None
+
+
+def link_of(source: str, game_id: Any) -> str:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT video_vk FROM game_meta WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    return str((row["video_vk"] if row else "") or "")
+
+
+async def watch_live(bot: Any = None, chat_ids: Optional[List[Any]] = None,
+                     topic_id: Optional[int] = None) -> Dict[str, int]:
+    """Сторожит трансляции идущих матчей. Зовётся из фонового цикла.
+
+    Сама решает, когда работать: вне окна матча не делает ни одного запроса,
+    а по одной игре дёргает VK не чаще, чем раз в LIVE_SCAN_SECONDS."""
+    import time as _time
+    out = {"watching": 0, "found": 0, "notified": 0}
+    if not (token() and groups()):
+        return out
+    now = _time.time()
+    for g in live_candidates():
+        key = f"{g['source']}:{g['game_id']}"
+        if now - _live_seen.get(key, 0) < LIVE_SCAN_SECONDS:
+            continue
+        _live_seen[key] = now
+        out["watching"] += 1
+        # Ищем по сопернику: своё название команды в постах группы лиги
+        # пишут не всегда, а соперника — почти обязательно.
+        link = await find_for_game(g["game_date"], g["opponent"], "")
+        if not link:
+            continue
+        if not store(g["source"], g["game_id"], link, g["game_date"],
+                     g["home_name"], g["guest_name"]):
+            continue
+        out["found"] += 1
+        print(f"📺 VK: трансляция {g['opponent']} ({g['game_date']}): {link}")
+        if bot is not None:
+            try:
+                res = await announce(bot, g, link, chat_ids, topic_id, live=True)
+                out["notified"] += res["chat"] + res["team"] + res["players"]
+            except Exception as e:
+                print(f"⚠️ VK: оповещение о трансляции не ушло — {e}")
     return out
 
 
