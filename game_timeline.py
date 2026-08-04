@@ -74,14 +74,15 @@ MAX_LATE_START = 3600
 # ссылка ведёт не на ту запись.
 MAX_STREAM_LEAD = 6 * 3600
 
-# Разметка, сделанная раньше этой отметки, пересчитывается заново. Причин было
-# две: сперва у SLPRO ноль отсчёта брался по первой записи протокола, а не по
-# началу игры; теперь — момент спорного нужно сохранить в game_video_sync,
-# иначе сдвиг нечем уточнить по эфиру, не выкачивая протокол снова.
+# Разметка, сделанная раньше этой отметки, пересчитывается заново. Причины
+# копились по мере проверок на реальных записях: ноль отсчёта у SLPRO брался по
+# первой записи протокола вместо начала игры; момент спорного не сохранялся, и
+# сдвиг нечем было уточнить по эфиру; замена вешалась на конец мёртвой пачки
+# событий вместо её середины.
 # Время — UTC, как и fetched_at (сервер живёт в UTC): с московской отметкой
 # условие оставалось бы верным ещё три часа, и каждый прогон ingest
 # перекачивал бы все протоколы заново.
-REDO_BEFORE = "2026-08-04T11:25:00"
+REDO_BEFORE = "2026-08-04T11:45:00"
 
 # Начинаем показывать чуть раньше самого выхода: попасть ровно в секунду
 # замены бесполезно — человек хочет увидеть, как он выходит, а не догонять
@@ -156,6 +157,24 @@ def _interpolate(anchors: List[Tuple[float, float]], clock: float) -> float:
     return r1 + (r2 - r1) * (clock - c1) / (c2 - c1)
 
 
+def _place(anchors: List[Tuple[float, float]], clock: float) -> float:
+    """Реальное время замены по игровым часам.
+
+    Замены всегда происходят при остановленных часах, и в протоколе целая
+    пачка событий стоит на ОДНОЙ отметке часов: фол, штрафные, замены, снова
+    штрафные. Реальное время есть не у всех, и линейная интерполяция вешала
+    замену на последний якорь пачки — то есть в конец простоя. На проверке по
+    видео это дало +25 секунд: игрок уже минуту как на площадке.
+
+    Поэтому: если на этой же отметке часов есть якоря, берём СЕРЕДИНУ их
+    промежутка — замены случаются между свистком и возобновлением игры.
+    Отметки нет — работает прежняя интерполяция между соседями."""
+    same = [real for c, real in anchors if abs(c - clock) < 1.0]
+    if same:
+        return (min(same) + max(same)) / 2.0
+    return _interpolate(anchors, clock)
+
+
 def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[int]]:
     data = _ib_fetch(str(game_id))
     plays = data.get("OnlinePlays") or []
@@ -204,7 +223,7 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Opt
             "player_id": pid,
             "period": period,
             "clock": clock,
-            "real": _interpolate(per_anchors.get(period) or every, clock) - zero,
+            "real": _place(per_anchors.get(period) or every, clock) - zero,
             "in": kind == IB_PLAY_IN,
             "order": int(p.get("PlaySortOrder") or 0),
         })
@@ -270,6 +289,22 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
                            and float(e.get("game_time") or per_len) < per_len) if t]
     zero = min(running) if running else min(stamps)
 
+    def _elapsed_of(e: Dict[str, Any]) -> float:
+        period = int(e.get("period") or 0)
+        return (period - 1) * per_len + (per_len - float(e.get("game_time") or 0))
+
+    # Якоря — ИГРОВЫЕ события (бросок, подбор, фол): их секретарь отмечает по
+    # ходу. Замену он вбивает когда успеет — до ближайшего игрового события
+    # медиана 19 секунд, максимум 50. Поэтому замену ставим не по её отметке, а
+    # по тому, что происходило на площадке в этот момент часов.
+    anchors: List[Tuple[float, float]] = []
+    for e in log:
+        stamp = _slpro_time(e.get("date_add"))
+        if stamp is None or str(e.get("action") or "") == "status":
+            continue
+        anchors.append((_elapsed_of(e), stamp))
+    anchors.sort()
+
     events: List[Dict[str, Any]] = []
     for idx, e in enumerate(log):
         if str(e.get("action") or "") != "status":
@@ -278,13 +313,15 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
         stamp = _slpro_time(e.get("date_add"))
         if not pid or stamp is None:
             continue
-        period = int(e.get("period") or 0)
-        elapsed = (period - 1) * per_len + (per_len - float(e.get("game_time") or 0))
+        elapsed = _elapsed_of(e)
+        real = _place(anchors, elapsed) if anchors else stamp
         events.append({
             "player_id": pid,
-            "period": period,
+            "period": int(e.get("period") or 0),
             "clock": elapsed,
-            "real": stamp - zero,
+            # Отметка секретаря остаётся крайним случаем: у стартовых пятёрок
+            # (часы ещё не шли) игровых событий на этой отметке нет.
+            "real": (real if anchors else stamp) - zero,
             "in": int(e.get("value") or 0) == 1,
             "order": idx,
         })
