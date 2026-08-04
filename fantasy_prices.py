@@ -36,6 +36,7 @@
 бы повышение в вечер, когда его даже не было в зале.
 """
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -286,8 +287,17 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
                 for one in fantasy_stats.expand_refs([card["ref"]])):
             continue                       # в этой игре не играл — цену не трогаем
         pr = fantasy_api._lookup_price(card.get("name", ""), prices)
-        row, price = pr.get("row"), int(pr.get("price") or 0)
-        if not row or price <= 0:
+        row = pr.get("row") or fantasy_api.price_row_of(card["ref"])
+        if not row:
+            continue
+        # Цену берём по строке листа: в процессе крона имён нет, и найти её
+        # по названию карточки («№88») невозможно — раньше на этом весь
+        # пересчёт молча заканчивался ничем.
+        price = int(pr.get("price") or 0)
+        if not price:
+            price = next((v["price"] for v in prices.values()
+                          if v.get("row") == row), 0)
+        if price <= 0:
             continue
         item = by_row.setdefault(int(row), {"price": price, "refs": [],
                                             "name": card.get("name", "")})
@@ -314,6 +324,12 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
         if source and game_id:
             _remember(source, str(game_id), changes)
     changes.sort(key=lambda c: abs(c["new"] - c["old"]), reverse=True)
+    if not by_row:
+        # Молчаливое «ничего не сделал» — худший исход: цены стоят, а никто не
+        # знает. Раньше так и было: в кроне реестр имён пуст, связок не было.
+        logging.getLogger(__name__).warning(
+            "Пересчёт цен: не нашёл ни одного игрока (карточек в пуле %s, "
+            "строк с ценой %s) — цены не двигались", len(pool), len(prices))
     return {"updated": written, "checked": len(by_row), "dry_run": dry_run,
             "changes": changes}
 

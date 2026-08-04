@@ -777,6 +777,30 @@ def _price_key(name: str) -> str:
     return " ".join((name or "").lower().replace("ё", "е").split())
 
 
+def _remember_price_ref(ref: str, row: int) -> None:
+    try:
+        sheets_cache.init_db()
+        with sheets_cache.get_connection() as conn:
+            conn.execute(
+                """INSERT INTO price_refs (ref, player_row, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(ref) DO UPDATE SET player_row = excluded.player_row,
+                                                  updated_at = excluded.updated_at""",
+                (str(ref), int(row), sheets_cache.now_iso()))
+            conn.commit()
+    except Exception as e:            # связка — удобство, а не обязательство
+        log.debug(f"связка цены для {ref} не сохранилась: {e}")
+
+
+def price_row_of(ref: str) -> int:
+    """Строка листа для карточки — по запомненной связке. 0, если её нет."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute("SELECT player_row FROM price_refs WHERE ref = ?",
+                           (str(ref),)).fetchone()
+    return int(row["player_row"]) if row else 0
+
+
 def _lookup_price(name: str, prices: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """Цена игрока из листа «Игроки» с поправкой на написание.
 
@@ -819,6 +843,11 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
         lasts = [last[k] for k in keys if last.get(k)]
         last_one = max(lasts, key=lambda x: x.get("date", ""), default={})
         pr = _lookup_price(p["name"], prices)
+        if pr.get("row"):
+            # Пока имена под рукой, запоминаем «карточка -> строка листа».
+            # В процессе крона реестр имён пуст, и без этой связки пересчёт
+            # цен после игры не находит никого (см. price_refs).
+            _remember_price_ref(p["ref"], int(pr["row"]))
         # Уровень ВСЕГДА считаем от цены, а не читаем из таблицы: цена —
         # единственный источник правды, её правит тренер, и значок обязан
         # идти за ней сам. Столбец «Уровень» в листе — формула для глаз.
