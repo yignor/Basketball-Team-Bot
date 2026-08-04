@@ -877,6 +877,28 @@ def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]
     return enriched
 
 
+# Показатели на карточке игрока: ключ агрегата и подпись.
+CARD_STATS = (("pts", "очки"), ("reb", "подборы"), ("ast", "передачи"),
+              ("stl", "перехваты"), ("blk", "блоки"))
+
+
+def _pool_scale(pool: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Лучшее в пуле по каждому показателю — шкала полосок на карточке.
+
+    Меряем «за игру», иначе шкалу задаёт тот, кто просто больше сыграл. Ноль
+    не отдаём: на него потом делить."""
+    scale: Dict[str, float] = {}
+    for key, _ in CARD_STATS:
+        best = 0.0
+        for p in pool:
+            st = p.get("stats") or {}
+            games = float(st.get("games") or 0)
+            if games:
+                best = max(best, float(st.get(key) or 0) / games)
+        scale[key] = round(best, 2) or 1.0
+    return scale
+
+
 TOP_PERIODS = ("last", "week", "month", "all")
 
 
@@ -1609,6 +1631,14 @@ async def handle_player(request: web.Request) -> web.Response:
         profile["last"]["opponent"] = names.get(str(profile["last"]["opponent_id"]), "Соперник")
     profile["name"] = entry["name"]          # транзитно, как и в пуле
     profile["number"] = entry.get("number", "")
+    # Карточка: цена и ранг те же, что в пуле, плюс шкала — лучшее в пуле по
+    # каждому показателю. Без шкалы полоски пришлось бы мерить от выдуманного
+    # потолка, а «сколько это вообще много» знает только сама команда.
+    priced = await asyncio.to_thread(_pool_with_stats, pool, season)
+    mine = next((p for p in priced if p["ref"] == ref), {})
+    profile["price"] = mine.get("price", 0)
+    profile["tier"] = mine.get("tier", "")
+    profile["scale"] = _pool_scale(priced)
     # Турнир в шапке — только по источникам игрока (у составного игрока их два).
     psrcs = {fantasy_stats.parse_ref(lr)[0] for lr in fantasy_stats.expand_refs([ref])}
     own = [s for s in scopes if s.get("source") in psrcs]

@@ -62,6 +62,40 @@
     .tier-elite { filter: drop-shadow(0 0 3px #ff9d3d); }
     .tier-plat  { filter: drop-shadow(0 0 2px #7fd3ff); }
     .tier-gold  { filter: drop-shadow(0 0 2px #ffd76a); }
+    /* Карточка игрока. Цвет — от ранга; фон полупрозрачный поверх обычного,
+       чтобы карточка одинаково читалась и в светлой, и в тёмной теме
+       Telegram (её тему нам задают переменными, своих цветов фона нет). */
+    .c2 { --accent: #9aa0a6; border-radius: 14px; padding: 12px 14px; margin: 4px 0 12px;
+      background: var(--secondary-bg); border: 1px solid var(--secondary-bg); }
+    /* color-mix понимают не все вебвью. Он идёт ВТОРЫМ объявлением: старый
+       браузер молча отбросит эту строку и оставит фон выше, а не покажет
+       карточку без фона и границы вовсе. */
+    .c2 { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 26%, transparent),
+        color-mix(in srgb, var(--accent) 6%, transparent)), var(--secondary-bg);
+      border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .c2.t-elite { --accent: #ff9d3d; }
+    .c2.t-plat  { --accent: #7fd3ff; }
+    .c2.t-gold  { --accent: #ffd76a; }
+    .c2.t-silver{ --accent: #c8ccd0; }
+    .c2.t-bronze{ --accent: #cd7f32; }
+    .c2-top { display: flex; align-items: center; gap: 12px; }
+    .c2-rate { text-align: center; min-width: 62px; padding: 6px 8px; border-radius: 10px;
+      background: var(--bg); }
+    .c2-rate { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+    .c2-rate b { display: block; font-size: 30px; line-height: 1; }
+    .c2-rate span { font-size: 10px; color: var(--hint); text-transform: uppercase; }
+    .c2-name { font-size: 17px; font-weight: 600; }
+    .c2-sub { font-size: 12px; color: var(--hint); margin-top: 2px; }
+    .c2-bars { margin-top: 12px; display: grid; gap: 6px; }
+    .c2-bar { display: grid; grid-template-columns: 74px 1fr 34px; align-items: center; gap: 8px;
+      font-size: 12px; }
+    .c2-bar span { color: var(--hint); }
+    .c2-bar u { display: block; height: 6px; border-radius: 3px; text-decoration: none;
+      background: var(--bg); }
+    .c2-bar u { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+    .c2-bar u i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+    .c2-bar b { text-align: right; }
+    .c2-note { font-size: 11px; color: var(--hint); margin-top: 8px; }
     /* Строка участника раскрывается в состав, которым он играл. Маркер прячем:
        с ним summary ломает flex-раскладку строки. */
     .guess > summary { list-style: none; cursor: pointer; }
@@ -868,6 +902,32 @@
     return n + ' игр';
   }
 
+  // Карточка игрока: ранг, цена и пять показателей полосками. Полоски меряем
+  // от ЛУЧШЕГО в пуле (шкала приходит с сервера), а не от выдуманного
+  // потолка: «12 очков за игру» само по себе ни о чём не говорит, а «почти
+  // как у лучшего в команде» — говорит.
+  const CARD_BARS = [['pts', 'Очки'], ['reb', 'Подборы'], ['ast', 'Передачи'],
+                     ['stl', 'Перехваты'], ['blk', 'Блоки']];
+
+  function playerCard(p) {
+    const avg = (p.season && p.season.avg) || {}, scale = p.scale || {};
+    const key = TIER_KEY[p.tier] || '';
+    const bars = CARD_BARS.map(([k, title]) => {
+      const val = +(avg[k] || 0), max = +(scale[k] || 0);
+      const pct = max > 0 ? Math.min(100, Math.round(val / max * 100)) : 0;
+      return `<div class="c2-bar"><span>${title}</span>` +
+        `<u><i style="width:${pct}%"></i></u><b>${val.toFixed(1)}</b></div>`;
+    }).join('');
+    const sub = [p.number ? '№' + p.number : '', p.tier || '', p.tournament || '']
+      .filter(Boolean).map(esc).join(' · ');
+    return `<div class="c2 t-${key}"><div class="c2-top">` +
+      `<div class="c2-rate"><b>${p.price || '—'}</b><span>цена</span></div>` +
+      `<div class="c2-id"><div class="c2-name">${TIER_ICON[p.tier] || ''} ${esc(p.name)}</div>` +
+      `<div class="c2-sub">${sub}</div></div></div>` +
+      `<div class="c2-bars">${bars}</div>` +
+      '<div class="c2-note">Полоска — доля от лучшего в пуле за игру.</div></div>';
+  }
+
   function renderPlayer() {
     const s = P.season;
     $('pTitle').textContent = (P.number ? '№' + P.number + ' ' : '') + P.name;
@@ -876,7 +936,8 @@
 
     // Посещаемость и пропуски показываем в обоих срезах: без них непонятно,
     // за сколько матчей набраны очки.
-    let html = `<div class="warn">Сыграл <b>${s.games}</b> из ${games(s.team_games)} команды` +
+    let html = playerCard(P) +
+      `<div class="warn">Сыграл <b>${s.games}</b> из ${games(s.team_games)} команды` +
       (s.missed_streak ? ` · пропустил ${games(s.missed_streak)} подряд` : '') + `</div>`;
 
     if (slice === 'last') {
