@@ -725,8 +725,81 @@ def _subs_markup(uid: Any) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(f"{'✅' if state[k] else '🚫'} {title}",
                                   callback_data=f"menu:sub:{k}")]
             for k, title in subscriptions.KINDS.items()]
+    mine = len(subscriptions.my_players(uid))
+    rows.append([InlineKeyboardButton(
+        f"🏀 Слежу за игроками: {mine}" if mine else "🏀 Следить за игроком",
+        callback_data="menu:players")])
     rows.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
+
+
+# Кого показываем на одном экране выбора игрока.
+PLAYERS_SUB_PAGE = 8
+
+
+async def _player_subs_screen(uid: Any, page: int = 0, query: str = ""
+                              ) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто из игроков «под наблюдением» и кого можно добавить.
+
+    Подписка на игрока — это «покажи мне матч, когда играет он», а не «когда
+    играет его команда»: рассылка сверяется с протоколом
+    (subscriptions.watchers_of_game)."""
+    import player_names
+    import subscriptions
+    pool = await fantasy_api.build_pool()
+    names = {p["ref"]: (p.get("name") or p["ref"]) for p in pool}
+    mine = subscriptions.my_players(uid)
+
+    lines = ["🏀 Слежу за игроками", "",
+             "Придёт в личку, когда этот человек сыграл: счёт, его строка "
+             "и ссылка на протокол.", ""]
+    rows: List[List[InlineKeyboardButton]] = []
+
+    # Реестр имён живёт в памяти и после рестарта пуст: в пуле тогда номера
+    # вместо фамилий. Выбирать, за кем следить, по «ID 170068» невозможно —
+    # честнее попросить подождать, чем показать список цифр.
+    if player_names.is_cold():
+        lines += ["⏳ Имена игроков ещё подгружаются — загляни через минуту."]
+        if mine:
+            lines += ["", "Сейчас слежу за: " + str(len(mine))]
+        rows.append([InlineKeyboardButton("⬅️ К подпискам", callback_data="menu:subs")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+    if mine:
+        lines.append("Уже слежу:")
+        for ref in mine:
+            lines.append(f"• {names.get(ref, ref)}")
+            rows.append([InlineKeyboardButton(
+                f"➖ {names.get(ref, ref)}"[:60],
+                callback_data=f"menu:punsub:{ref}")])
+        lines.append("")
+    else:
+        lines.append("Пока ни за кем. Выбери из списка ниже.")
+        lines.append("")
+
+    # Кого ещё можно добавить: весь пул минус уже выбранные.
+    rest = [p for p in pool if p["ref"] not in set(mine)]
+    if query:
+        import player_search
+        needle = player_search.norm(query)
+        rest = [p for p in rest if needle in player_search.norm(p.get("name") or "")]
+    rest.sort(key=lambda p: (p.get("name") or ""))
+    pages = max(1, (len(rest) + PLAYERS_SUB_PAGE - 1) // PLAYERS_SUB_PAGE)
+    page = max(0, min(page, pages - 1))
+    for p in rest[page * PLAYERS_SUB_PAGE:(page + 1) * PLAYERS_SUB_PAGE]:
+        rows.append([InlineKeyboardButton(f"➕ {p.get('name') or p['ref']}"[:60],
+                                          callback_data=f"menu:psub:{p['ref']}")])
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"menu:ppage:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="menu:pnoop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"menu:ppage:{page + 1}"))
+        rows.append(nav)
+    if not rest:
+        lines.append("Больше добавить некого.")
+    rows.append([InlineKeyboardButton("⬅️ К подпискам", callback_data="menu:subs")])
+    return "\n".join(lines).rstrip(), InlineKeyboardMarkup(rows)
 
 
 def _subs_text(uid: Any) -> str:
@@ -777,6 +850,20 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Включено" if now_on else "Выключено")
         await query.edit_message_text(_subs_text(user.id),
                                       reply_markup=_subs_markup(user.id))
+    elif what in ("players", "ppage"):
+        page = int(parts[2]) if what == "ppage" and len(parts) > 2 else 0
+        text, markup = await _player_subs_screen(user.id, page)
+        await query.edit_message_text(text, reply_markup=markup)
+    elif what in ("psub", "punsub") and len(parts) > 2:
+        import subscriptions
+        # ref вида «slpro:707:12996» сам содержит двоеточия — склеиваем обратно.
+        ref = ":".join(parts[2:])
+        now_on = await asyncio.to_thread(subscriptions.player_toggle, user.id, ref)
+        await query.answer("Слежу" if now_on else "Больше не слежу")
+        text, markup = await _player_subs_screen(user.id)
+        await query.edit_message_text(text, reply_markup=markup)
+    elif what == "pnoop":
+        return
     elif what == "feedback":
         _awaiting_feedback.add(user.id)
         await query.edit_message_text(FEEDBACK_ASK)
@@ -4082,6 +4169,13 @@ async def on_startup(app: Application) -> None:
         people = await asyncio.to_thread(coach_payments.build_summary_sheet, sheet)
         if people:
             log.info(f"Лист «Оплаты» пересобран: игроков {people}")
+        # Игры до появления порядка оплат — молчим по ним навсегда.
+        import game_roster
+        import training_dues
+        muted = await asyncio.to_thread(game_roster.silence_old,
+                                        training_dues.mark_event)
+        if muted:
+            log.info(f"Старые игры: платёжные оповещения погашены ({muted})")
         global _pay_sheet_at
         _pay_sheet_at = time.time()      # только что собрали — фону ждать свой срок
     except Exception as e:

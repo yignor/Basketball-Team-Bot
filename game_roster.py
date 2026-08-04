@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 # За сколько дней до игры просим тренера собрать состав.
 COLLECT_BEFORE_DAYS = 3
 
+# С какой игры действует цикл оплаты игр. Всё, что раньше, — до появления
+# порядка: команда о нём не знала, состав в чат не объявлялся, и требовать
+# деньги задним числом нельзя. 03.08.2026 из-за этого семи игрокам ушло
+# «оплати игру» за матч 02.08 — состав тренер собрал, пробуя новый экран.
+PAY_SINCE = "2026-08-04"
+
 POLL_TYPES = ("ОПРОС_ИГРА", "ОПРОС_ИГРА_SLPRO")
 VOTE_READY = "PRESENT"
 
@@ -318,6 +324,15 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
         # выполненным, поэтому запрос уходит один раз.
         if 0 <= left <= COLLECT_BEFORE_DAYS:
             out.append((f"game:{ref}:collect", game, "collect"))
+
+        # Дальше — только деньги, и тут два условия. Игра не старше порядка
+        # оплат, и состав РАЗОСЛАН в чат: пока команда его не видела, никто
+        # ничего не должен. Собранный, но не отправленный состав — это
+        # черновик тренера, а не основание для требования.
+        if game["date"].isoformat() < PAY_SINCE:
+            continue
+        if not is_posted(game["source"], game["game_id"]):
+            continue
         if left == 0 and now.hour >= 9:
             out.append((f"game:{ref}:coach_day", game, "coach_day"))
         elif left == -1 and now.hour >= 9:
@@ -325,3 +340,18 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
             if now.hour >= 19:
                 out.append((f"game:{ref}:player_next", game, "player_next"))
     return out
+
+
+def silence_old(mark) -> int:
+    """Гасит платёжные события по играм, которые были до PAY_SINCE.
+
+    Правило выше их и так не выдаст, но отметка в базе нужна: если окно дат
+    когда-нибудь сдвинется, старая игра не должна ожить и снова разослать
+    людям требование оплаты. mark — функция (ключ, пояснение)."""
+    done = 0
+    for game in games(until_day=date.fromisoformat(PAY_SINCE) - timedelta(days=1)):
+        ref = f"{game['source']}:{game['game_id']}"
+        for kind in ("coach_day", "coach_next", "player_next"):
+            mark(f"game:{ref}:{kind}", "старая игра, цикл оплат не применялся")
+            done += 1
+    return done
