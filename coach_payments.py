@@ -246,8 +246,9 @@ def players() -> List[Dict[str, Any]]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            "SELECT row_index, surname, name, status, team, pay_season, pay_game, "
-            "active_mark FROM players ORDER BY surname, name").fetchall()
+            "SELECT row_index, surname, name, nickname, birthday, status, team, "
+            "pay_season, pay_game, active_mark FROM players "
+            "ORDER BY surname, name").fetchall()
     people = [r for r in rows if (r["surname"] or "").strip()
               or (r["name"] or "").strip()]
     # Пока отметка не стоит НИ У КОГО, столбцом просто не пользуются — ждём
@@ -264,6 +265,10 @@ def players() -> List[Dict[str, Any]]:
             "surname": surname,
             "name": name,
             "title": f"{surname} {name}".strip(),
+            # Ник и дата рождения — их правят из админки, поэтому едут вместе
+            # со всеми (запрос всё равно один).
+            "nickname": (r["nickname"] or "").strip(),
+            "birthday": (r["birthday"] or "").strip(),
             "status": (r["status"] or "").strip(),
             "team": (r["team"] or "").strip(),
             "pay_season": int(r["pay_season"] or 0),

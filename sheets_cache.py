@@ -1203,6 +1203,40 @@ def write_player_prices(spreadsheet, updates: Dict[int, int]) -> int:
     return len(data)
 
 
+# Какие столбцы листа «Игроки» правим из админки и куда они ложатся в зеркале.
+PLAYER_FIELDS = {
+    "bd": ("Дата рождения", "birthday", "🎂 Дата рождения"),
+    "nick": ("Ник", "nickname", "✏️ Ник"),
+}
+
+
+def write_player_field(spreadsheet, player_row: int, field: str, value: str,
+                       expect: str = "") -> bool:
+    """Пишет одну ячейку игрока в лист и в зеркало.
+
+    Строку сверяем по ФИО тем же способом, что и при записи числового id: лист
+    живёт своей жизнью, и запись по устаревшему номеру попала бы к соседу."""
+    meta = PLAYER_FIELDS.get(field)
+    if not meta:
+        return False
+    header, column, _ = meta
+    ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
+    row_no = _verify_player_row(ws, player_row, expect)
+    if row_no is None:
+        return False
+    head = ws.row_values(1)
+    if header not in head:
+        logger.warning("В листе «Игроки» нет столбца «%s»", header)
+        return False
+    ws.update_cell(row_no, head.index(header) + 1, str(value))
+    init_db()
+    with _connection() as conn:
+        conn.execute(f"UPDATE players SET {column} = ? WHERE row_index = ?",
+                     (str(value), int(row_no)))
+        conn.commit()
+    return True
+
+
 def get_config_rows() -> List[List[str]]:
     """Возвращает сырые строки листа 'Конфиг' из локального зеркала —
     пустой список, если синхронизация ещё ни разу не проходила (вызывающий

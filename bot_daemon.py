@@ -515,6 +515,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _awaiting_payment.discard(user.id)
     _pay_draft.pop(user.id, None)
     _awaiting_video.pop(user.id, None)
+    _awaiting_field.pop(user.id, None)
 
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
@@ -1519,6 +1520,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
         [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
         [InlineKeyboardButton("⏱ Записи игр", callback_data="admin:video:list")],
+        [InlineKeyboardButton("🎂 Дни рождения и ники", callback_data="admin:field:list:0")],
         [InlineKeyboardButton("📈 Моя статистика (скрытое)", callback_data="admin:menu:profile")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
@@ -1906,6 +1908,122 @@ def game_timeline_drop(source: str, game_id: str) -> None:
     """Снять ручную привязку. Обёртка, чтобы не тащить импорт в роутер."""
     import game_timeline
     game_timeline.drop_offset(source, game_id)
+
+
+# ─── дни рождения и ники ────────────────────────────────────────────────────
+#
+# Обе колонки живут в листе «Игроки» и правились только там. День рождения бот
+# использует для поздравлений, ник — в шутках и разборах, и чаще всего их
+# приходится дописывать по одному: открывать ради этого таблицу с телефона —
+# то ещё удовольствие.
+
+# Кто из админов что сейчас правит: id → "строка:поле".
+_awaiting_field: Dict[int, str] = {}
+
+
+def _fields_screen(offset: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_payments
+    people = coach_payments.players()
+    page = people[offset:offset + PLAYERS_PER_PAGE]
+    shown_to = min(offset + len(page), len(people))
+    no_bd = sum(1 for p in people if not p.get("birthday"))
+    no_nick = sum(1 for p in people if not p.get("nickname"))
+    lines = [f"🎂 Дни рождения и ники ({offset + 1}-{shown_to} из {len(people)})", "",
+             f"Без даты рождения: {no_bd} · без ника: {no_nick}", ""]
+    rows = []
+    for p in page:
+        bd = p.get("birthday") or "—"
+        nick = p.get("nickname") or "—"
+        lines.append(f"• {p['title']}: {bd} · {nick}")
+        rows.append([InlineKeyboardButton(f"{p['title']}"[:60],
+                                          callback_data=f"admin:field:pick:{p['row']}")])
+    nav = _pagination_row("admin:field:list", offset, PLAYERS_PER_PAGE, len(people))
+    if nav:
+        rows.append(nav)
+    rows.append(_back_button())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _field_card(row: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_payments
+    p = coach_payments.player_by_row(int(row))
+    if not p:
+        return "Не нашёл этого игрока в листе.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")]])
+    lines = [f"👤 {p['title']}", "",
+             f"🎂 Дата рождения: {p.get('birthday') or 'не указана'}",
+             f"✏️ Ник: {p.get('nickname') or 'не указан'}", "",
+             "Что поправить?"]
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎂 Дата рождения", callback_data=f"admin:field:set:{row}:bd"),
+         InlineKeyboardButton("✏️ Ник", callback_data=f"admin:field:set:{row}:nick")],
+        [InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")]])
+
+
+def _norm_birthday(text: str) -> Optional[str]:
+    """«22.09.2001», «2001-09-22» или «22.09» → ISO для листа.
+
+    Год не обязателен: поздравлять можно и без него, а выдумывать за человека
+    возраст — хуже, чем не знать его. Тогда пишем 1900-й, как в остальных
+    записях без года."""
+    raw = str(text or "").strip().replace("/", ".").replace("-", ".")
+    parts = [x for x in raw.split(".") if x]
+    if len(parts) not in (2, 3):
+        return None
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return None
+    if len(nums) == 3 and nums[0] > 31:          # прислали 2001.09.22
+        year, month, day = nums
+    else:
+        day, month = nums[0], nums[1]
+        year = nums[2] if len(nums) == 3 else 1900
+    if not (1 <= day <= 31 and 1 <= month <= 12 and 1900 <= year <= 2100):
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Новое значение дня рождения или ника, присланное админом."""
+    import sheets_cache
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_field:
+        return
+    if not _is_admin(user):
+        _awaiting_field.pop(user.id, None)
+        return
+    row, field = _awaiting_field[user.id].split(":", 1)
+    value = (msg.text or "").strip()
+    if field == "bd":
+        value = _norm_birthday(value)
+        if not value:
+            await msg.reply_text("Не понял дату. Как в паспорте: «22.09.2001» "
+                                 "или без года «22.09». Передумал — /start.")
+            raise ApplicationHandlerStop
+    elif not value:
+        await msg.reply_text("Пустой ник не записываю. Передумал — /start.")
+        raise ApplicationHandlerStop
+
+    _awaiting_field.pop(user.id, None)
+    import coach_payments
+    person = await asyncio.to_thread(coach_payments.player_by_row, int(row))
+    try:
+        import report_common
+        book = await asyncio.to_thread(report_common.init_sheets)
+        ok = await asyncio.to_thread(sheets_cache.write_player_field, book,
+                                     int(row), field, value,
+                                     (person or {}).get("title", ""))
+    except Exception as e:
+        log.warning(f"Правка поля игрока: {e}")
+        ok = False
+    if not ok:
+        await msg.reply_text("Таблица не приняла запись — проверь доступ бота "
+                             "к листу «Игроки».")
+        raise ApplicationHandlerStop
+    text, markup = await asyncio.to_thread(_field_card, int(row))
+    await msg.reply_text(f"Записал.\n\n{text}", reply_markup=markup)
+    raise ApplicationHandlerStop
 
 
 # ─── привязка записей ВК ────────────────────────────────────────────────────
@@ -3786,7 +3904,23 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
-        if parts[1] == "video":
+        if parts[1] == "field":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "pick" and len(parts) > 3:
+                text, markup = await asyncio.to_thread(_field_card, int(parts[3]))
+                await query.edit_message_text(text, reply_markup=markup)
+            elif what == "set" and len(parts) > 4:
+                _awaiting_field[user.id] = f"{parts[3]}:{parts[4]}"
+                ask = ("🎂 Пришли дату рождения: «22.09.2001» или без года «22.09»."
+                       if parts[4] == "bd" else
+                       "✏️ Пришли ник — как к человеку обращаются в команде.")
+                await query.edit_message_text(f"{ask}\n\nПередумал — /start.")
+            else:
+                _awaiting_field.pop(user.id, None)
+                off = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                text, markup = await asyncio.to_thread(_fields_screen, off)
+                await query.edit_message_text(text, reply_markup=markup)
+        elif parts[1] == "video":
             what = parts[2] if len(parts) > 2 else "list"
             if what == "auto" and len(parts) > 4:
                 await asyncio.to_thread(game_timeline_drop, parts[3], parts[4])
@@ -4663,6 +4797,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_video_text), group=7)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_field_text), group=8)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))

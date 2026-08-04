@@ -165,6 +165,11 @@ def compare(source: str, player_id: str, mode: str = "all",
                   "reb": int(best.get("reb") or 0), "ast": int(best.get("ast") or 0),
                   "fp": fantasy_stats.fantasy_points(best)} if best else None),
         "avg_now": {k: _avg(form, k) for k, _, _ in (metrics or metrics_of())},
+        # Средние за форму с подписями — их показываем ВСЕГДА, даже когда
+        # сравнивать не с чем: человек открыл «Мою статистику» ради своих
+        # цифр, а получал одну фразу «нужен второй период».
+        "avg_list": [{"title": title, "value": _avg(form, key)}
+                     for key, title, _ in (metrics or metrics_of())],
     }
 
 
@@ -173,16 +178,32 @@ def format_report(source_title: str, data: Dict[str, Any], mode: str) -> str:
     if not data.get("games"):
         return f"• {source_title}: игр пока не нашёл."
 
-    lines = [f"📈 {source_title} · форма за {data['form_games']} последних игр"]
-    if data.get("period_from"):
-        lines.append(f"   {_d(data['period_from'])} – {_d(data['period_to'])}")
+    period = (f" ({_d(data['period_from'])} – {_d(data['period_to'])})"
+              if data.get("period_from") else "")
+    lines = [f"📈 {source_title} · последние {data['form_games']} "
+             f"{_plural(data['form_games'], 'игра', 'игры', 'игр')}{period}"]
 
-    if not data.get("ref_games"):
-        lines.append("\nСравнивать пока не с чем — нужен второй период. "
-                     "Отчёт станет содержательным после следующих игр.")
-        return "\n".join(lines)
+    # Свои цифры — первым делом и в любом случае.
+    # Не больше шести показателей: одиннадцать в строку — простыня, из которой
+    # ничего не выхватывается. Полный набор живёт в «Подробном разборе».
+    bits = [f"{a['title']} {a['value']:g}" for a in data.get("avg_list") or []
+            if a["value"]][:SUMMARY_METRICS]
+    if bits:
+        lines.append("В среднем за игру: " + " · ".join(bits))
+    b = data.get("best")
+    if b:
+        lines.append(f"🏅 Лучшая игра {_d(b['date'])}: {b['pts']} очк · "
+                     f"{b['reb']} подб · {b['ast']} пас")
 
     label = COMPARE_MODES.get(mode, COMPARE_MODES["all"])
+    if not data.get("ref_games"):
+        # Не «отчёт бессодержателен», а что именно делать: сравнение с периодом
+        # включается кнопками ниже, и «за всё время» обычно уже работает.
+        lines.append(f"\nСравнить не с чем: других игр за период «{label}» "
+                     f"пока нет. Выбери период пошире кнопкой ниже — или "
+                     f"подожди следующих игр.")
+        return "\n".join(lines)
+
     up = [c for c in data["changes"] if c["improved"]]
     down = [c for c in data["changes"] if not c["improved"]]
 
@@ -200,11 +221,19 @@ def format_report(source_title: str, data: Dict[str, Any], mode: str) -> str:
         lines.append(f"\n➖ Заметных изменений нет — держишь свой уровень "
                      f"{label}.")
 
-    b = data.get("best")
-    if b:
-        lines.append(f"\n🏅 Лучшая игра периода {_d(b['date'])}: "
-                     f"{b['pts']} очк · {b['reb']} подб · {b['ast']} пас")
     return "\n".join(lines)
+
+
+SUMMARY_METRICS = 6
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    a, b = abs(n) % 100, abs(n) % 10
+    if 10 < a < 20:
+        return many
+    if 1 < b < 5:
+        return few
+    return one if b == 1 else many
 
 
 def _sign(x: float) -> str:
