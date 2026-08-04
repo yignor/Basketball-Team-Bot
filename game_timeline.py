@@ -17,10 +17,11 @@ Infobasket это события типов 8/9 (`Widget/GetOnline`), у SLPRO �
 
 Ноль отсчёта в записи — момент, с которого включили трансляцию. Считаем, что
 её включают ко времени из расписания: тогда спорный мяч приходится на
-«протокольный старт минус время по расписанию» — обычно это 1–12 минут
-(команды опаздывают, предыдущая игра затягивается). Точнее из данных не
-узнать, поэтому под тайм-кодами честно висит приписка про возможное
-смещение.
+«начало игры минус время по расписанию» — обычно это 1–12 минут (команды
+опаздывают, предыдущая игра затягивается). Началом игры считаем не первую
+запись в протоколе, а момент, когда пошли игровые часы: состав секретарь
+заводит заранее, иногда сильно. Точнее из данных не узнать, поэтому под
+тайм-кодами честно висит приписка про возможное смещение.
 
 Имён здесь нет и не будет — только id игрока ([[legal-data-invariant]]).
 """
@@ -62,6 +63,11 @@ MSK = timezone(timedelta(hours=3))
 # ещё верилось. Больше часа — значит расписание в кеше не про эту игру
 # (перенос, спаренный тур), и сдвиг лучше не выдумывать.
 MAX_LATE_START = 3600
+
+# Разметка, сделанная раньше этой отметки, пересчитывается заново: до неё
+# нулём отсчёта у SLPRO была первая запись протокола, а не начало игры.
+# Дешевле перекачать 13 игр, чем держать в базе две несовместимые эпохи.
+REDO_BEFORE = "2026-08-04T12:30:00"
 
 SHIFT_NOTE = ("<i>Время в записи считаем от начала трансляции по расписанию — "
               "возможно смещение на минуту-другую.</i>")
@@ -223,11 +229,19 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
     if not stamps:
         logger.info("Тайм-коды slpro/%s: в протоколе нет времени событий", game_id)
         return [], None
-    zero = min(stamps)
 
     # game_time у SLPRO идёт на УБЫВАНИЕ (600 → 0) и считается внутри периода.
     per_len = max((float(e.get("game_time") or 0) for e in log),
                   default=DEFAULT_PERIOD_SECONDS) or DEFAULT_PERIOD_SECONDS
+
+    # Ноль — не первая запись в протоколе, а момент, когда ПОШЛИ ИГРОВЫЕ ЧАСЫ.
+    # Секретарь заводит стартовые пятёрки заранее и по-разному: обычно за
+    # полминуты, а 19.07 — за двенадцать минут до спорного. По первой записи
+    # весь матч уезжал на эти минуты вперёд.
+    running = [t for t in (_slpro_time(e.get("date_add")) for e in log
+                           if int(e.get("period") or 0) == 1
+                           and float(e.get("game_time") or per_len) < per_len) if t]
+    zero = min(running) if running else min(stamps)
 
     events: List[Dict[str, Any]] = []
     for idx, e in enumerate(log):
@@ -270,7 +284,10 @@ def _pair(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         start = open_at.pop(pid, None)
         if not start:
             continue
-        start_real, end_real = start["real"], e["real"]
+        # Стартовую пятёрку заводят до спорного, поэтому её «выход» приходится
+        # на отрицательное время. Для записи это ноль: игра начинается тогда,
+        # когда начинается.
+        start_real, end_real = max(0.0, start["real"]), e["real"]
         if end_real < start_real:
             continue
         shifts.append({
@@ -442,10 +459,13 @@ def games_without_shifts(limit: int = 20, days: int = BACKFILL_DAYS) -> List[Dic
                          "AND (NOT EXISTS (SELECT 1 FROM game_shifts s "
                          "                  WHERE s.source = m.source AND s.game_id = m.game_id) "
                          "  OR NOT EXISTS (SELECT 1 FROM game_video_sync v "
-                         "                  WHERE v.source = m.source AND v.game_id = m.game_id)) "
+                         "                  WHERE v.source = m.source AND v.game_id = m.game_id) "
+                         "  OR EXISTS (SELECT 1 FROM game_shifts s "
+                         "              WHERE s.source = m.source AND s.game_id = m.game_id "
+                         "                AND s.fetched_at < ?)) "
                          "AND EXISTS (SELECT 1 FROM game_player_stats p "
                          "             WHERE p.source = m.source AND p.game_id = m.game_id)"),
-            args=[since_iso], limit=limit)
+            args=[since_iso, REDO_BEFORE], limit=limit)
 
 
 async def backfill(limit: int = 10, client=None) -> int:
