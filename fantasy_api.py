@@ -1097,6 +1097,9 @@ async def handle_admin_state(request: web.Request) -> web.Response:
                     # и подписан номером.
                     "off_roster": bool(p.get("off_roster")),
                     "games": (p.get("stats") or {}).get("games", 0),
+                    # Цена и ранг — чтобы тренер правил их здесь же, не открывая
+                    # таблицу. Пишем всё равно в лист: он остаётся источником.
+                    "price": p.get("price", 0), "tier": p.get("tier", ""),
                     "profiles": _profile_links(p["ref"])}
                    for p in _pool_with_stats(await build_pool(season=s), s)]
         players.sort(key=lambda p: (p["excluded"], p["name"]))
@@ -1211,6 +1214,35 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         payload = json.loads(out.body.decode())
         payload["recalc"] = res
         return web.json_response(payload)
+    elif action == "price_set":
+        # Ручная цена игрока. Пишем в тот же столбец листа, что и автоматика:
+        # лист остаётся единственным источником правды, и следующий пересчёт
+        # оттолкнётся от того, что поставил тренер, а не от старого значения.
+        ref = str(body.get("ref") or "")
+        try:
+            value = int(body.get("value"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad_value"}, status=400)
+        # Верх шкалы — 100, как бюджет режима: цена дороже всего бюджета
+        # сделала бы игрока невыбираемым. Ноль разрешён: это «цены нет».
+        if not 0 <= value <= 100:
+            return web.json_response({"error": "bad_value"}, status=400)
+        row = await asyncio.to_thread(price_row_of, ref)
+        if not row:
+            # Связка «карточка → строка листа» появляется при прогреве демона.
+            # Молчать нельзя: тренер жмёт, цена не меняется, и виноват бот.
+            return web.json_response({"error": "unknown_row"}, status=404)
+        try:
+            import report_common
+            book = await asyncio.to_thread(report_common.init_sheets)
+            written = await asyncio.to_thread(
+                sheets_cache.write_player_prices, book, {int(row): value})
+        except Exception as exc:
+            log.warning("Ручная цена %s: %s", ref, exc)
+            return web.json_response({"error": "sheet_write_failed"}, status=502)
+        if not written:
+            return web.json_response({"error": "sheet_write_failed"}, status=502)
+        invalidate_pool()
     elif action == "prices_since":
         # «Цены проставлены, считай с этого дня». Игры до этой даты в движение
         # цены не идут вовсе: тренер их уже учёл, выставляя цену руками, и

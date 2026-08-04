@@ -147,6 +147,12 @@
     .step:disabled { opacity: .3; cursor: default; }
     .step.wide { width: auto; padding: 0 12px; font-size: 14px; }
     .step.del { color: var(--hint); font-size: 15px; }
+    .price-edit { display: flex; align-items: center; gap: 8px; margin: -4px 0 8px;
+      padding: 8px 12px; background: var(--secondary-bg); border-radius: 12px;
+      font-size: 13px; color: var(--hint); }
+    .price-edit input { width: 72px; padding: 6px 8px; border-radius: 8px;
+      border: 1px solid var(--hint); background: var(--bg); color: var(--text);
+      font-size: 15px; }
     .cnt { min-width: 22px; text-align: center; font-weight: 700; }
     .cnt.zero { color: var(--hint); font-weight: 400; }
     .banner { margin: 10px 16px; padding: 12px; border-radius: 10px;
@@ -1439,15 +1445,68 @@
     const links = (p.profiles || []).map(l =>
       `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>`).join(' · ');
     const games = p.games ? `${p.games} ${plural(p.games, 'игра', 'игры', 'игр')}` : 'игр нет';
-    return `<div class="card${p.excluded ? ' disabled' : ''}">` +
+    return `<div class="card${p.excluded ? ' disabled' : ''}" data-pref="${esc(p.ref)}">` +
       `<div class="num">${esc(p.number || '—')}</div>` +
       `<div class="info"><div class="pname">${esc(p.name)}` +
       (p.off_roster ? ' <span class="pteam">(нет в заявке)</span>' : '') +
       (p.excluded ? ' <span class="pteam">(убран)</span>' : '') + `</div>` +
-      `<div class="pstat">${esc(p.team || '')} · ${games}</div>` +
+      `<div class="pstat">${esc(p.team || '')} · ${games}` +
+      (p.price ? ` · ${TIER_ICON[p.tier] || ''} цена ${p.price}` : ' · цены нет') +
+      `</div>` +
       (links ? `<div class="pstat plinks">${links}</div>` : '') + `</div>` +
-      `<div class="ctrl"><button class="step wide" onclick='adminDo(${act})'>` +
+      `<div class="ctrl"><button class="step" title="Цена" ` +
+      `onclick='setPrice(${jattr(p.ref)},${seasonId},${p.price || 0})'>💰</button>` +
+      `<button class="step wide" onclick='adminDo(${act})'>` +
       `${p.excluded ? 'Вернуть' : 'Убрать'}</button></div></div>`;
+  }
+
+  // Цена правится прямо в списке: в попапе Telegram поля ввода нет, поэтому
+  // раскрываем строку под карточкой — так же, как сделан ввод названия сезона.
+  // Пишем всё равно в лист «Игроки»: он остаётся единственным источником, и
+  // следующий автоматический пересчёт оттолкнётся от поставленного тренером.
+  function setPrice(ref, seasonId, cur) {
+    const card = document.querySelector(`[data-pref="${ref}"]`);
+    if (!card) return;
+    const open = card.parentNode.querySelector('.price-edit');
+    if (open && open.dataset.ref === ref) { open.remove(); return; }
+    if (open) open.remove();
+    const box = document.createElement('div');
+    box.className = 'price-edit';
+    box.dataset.ref = ref;
+    box.innerHTML = `<span>Цена 0–100:</span>` +
+      `<input type="number" min="0" max="100" step="1" value="${cur || ''}">` +
+      `<button class="step">✓</button>`;
+    card.after(box);
+    const input = box.querySelector('input');
+    box.querySelector('button').onclick = () => {
+      const v = parseInt(input.value, 10);
+      if (!(v >= 0 && v <= 100)) { input.focus(); return; }
+      box.remove();
+      savePrice(ref, seasonId, v);
+    };
+    input.focus();
+    input.select();
+  }
+  window.setPrice = setPrice;
+
+  async function savePrice(ref, seasonId, value) {
+    const y = window.scrollY;
+    try {
+      renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(
+        {action: 'price_set', season_id: seasonId, ref: ref, value: value})}));
+      window.scrollTo(0, y);
+    } catch (e) {
+      // Отдельное сообщение на каждый случай: «не получилось» вынуждает
+      // гадать, а причины тут разные и лечатся по-разному.
+      const code = (e && e.data && e.data.error) || '';
+      const text = code === 'unknown_row'
+        ? 'Не нашёл этого игрока в листе «Игроки» — цену там ставит строка таблицы. ' +
+          'Если бот только что перезапускался, попробуй через минуту.'
+        : code === 'sheet_write_failed'
+        ? 'Таблица не приняла запись. Проверь доступ бота к листу «Игроки».'
+        : 'Не получилось сохранить цену.';
+      tg && tg.showAlert ? tg.showAlert(text) : alert(text);
+    }
   }
 
   function renderAdmin(d) {
