@@ -186,15 +186,55 @@ def is_posted(source: str, game_id: str) -> bool:
     return bool(row and str(row["posted_at"] or ""))
 
 
-def mark_posted(source: str, game_id: str) -> None:
+def mark_posted(source: str, game_id: str,
+                posts: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Запоминает факт отправки: когда, куда и каким был состав.
+
+    Адреса сообщений нужны, чтобы потом ПРАВИТЬ их, а не слать в чат второй
+    список; снимок состава — чтобы видеть, что он с тех пор изменился."""
+    rows = sorted(p["row"] for p in roster(source, game_id))
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         conn.execute(
-            """INSERT INTO game_roster_state (source, game_id, posted_at)
-               VALUES (?, ?, ?)
-               ON CONFLICT(source, game_id) DO UPDATE SET posted_at = excluded.posted_at""",
-            (source, str(game_id), datetime.now().isoformat(timespec="seconds")))
+            """INSERT INTO game_roster_state (source, game_id, posted_at,
+                                              posted_json, posted_rows)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(source, game_id) DO UPDATE SET
+                   posted_at = excluded.posted_at,
+                   posted_json = excluded.posted_json,
+                   posted_rows = excluded.posted_rows""",
+            (source, str(game_id), datetime.now().isoformat(timespec="seconds"),
+             json.dumps(posts or [], ensure_ascii=False), json.dumps(rows)))
         conn.commit()
+
+
+def posted_messages(source: str, game_id: str) -> List[Dict[str, Any]]:
+    """Куда ушёл состав: [{chat_id, message_id}] — их и правим."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT posted_json FROM game_roster_state WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    try:
+        return json.loads((row["posted_json"] if row else "") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def is_stale(source: str, game_id: str) -> bool:
+    """Состав изменился после отправки — в чате висит устаревший список."""
+    if not is_posted(source, game_id):
+        return False
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT posted_rows FROM game_roster_state WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    try:
+        was = json.loads((row["posted_rows"] if row else "") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        was = []
+    return sorted(was) != sorted(p["row"] for p in roster(source, game_id))
 
 
 def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:

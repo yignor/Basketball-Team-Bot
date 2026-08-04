@@ -2763,8 +2763,12 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
         lines.append("По опросу пока никто не отметился.")
         lines.append("")
     lines.append("Добавить любого — просто напиши фамилию или её часть.")
-    if game_roster.is_posted(source, game_id):
-        lines.append("Состав уже отправлен в чат — можно поправить и отправить снова.")
+    posted = game_roster.is_posted(source, game_id)
+    stale = posted and game_roster.is_stale(source, game_id)
+    if stale:
+        lines.append("⚠️ В чате висит прежний состав — обнови сообщение.")
+    elif posted:
+        lines.append("✅ Состав в чате актуален.")
 
     rows: List[List[InlineKeyboardButton]] = []
     for v in waiting[:10]:
@@ -2776,9 +2780,17 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
         rows.append([InlineKeyboardButton(
             f"➖ {p['title']}"[:60],
             callback_data=f"rost:del:{source}:{game_id}:{p['row']}")])
-    if picked:
+    if picked and stale:
+        rows.append([InlineKeyboardButton(
+            "✏️ Обновить сообщение в чате",
+            callback_data=f"rost:edit:{source}:{game_id}")])
+    elif picked and not posted:
         rows.append([InlineKeyboardButton(
             "📣 Отправить состав в чат",
+            callback_data=f"rost:post:{source}:{game_id}")])
+    if picked and posted:
+        rows.append([InlineKeyboardButton(
+            "📣 Отправить заново (новое сообщение)",
             callback_data=f"rost:post:{source}:{game_id}")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(rows)
@@ -3058,6 +3070,9 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif what == "post":
             await _post_roster(query, source, game_id, user)
             return
+        elif what == "edit":
+            await _update_roster_post(query, source, game_id)
+            return
 
         # Спорные фамилии из списка разбираем подряд, не возвращая тренера
         # каждый раз к общему экрану.
@@ -3094,21 +3109,57 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
     text = game_roster.post_text(game, people)
     gsm = await asyncio.to_thread(_game_manager)
     topic = getattr(gsm, "game_poll_topic_id", None)
-    sent = 0
+    posts = []
     for chat_id in _result_chat_ids(gsm):
         kwargs = {"chat_id": chat_id, "text": text}
         if topic is not None:
             kwargs["message_thread_id"] = topic
         try:
-            await query.get_bot().send_message(**kwargs)
-            sent += 1
+            m = await query.get_bot().send_message(**kwargs)
+            # Запоминаем адрес сообщения: состав правят после отправки, и
+            # тогда мы отредактируем это же, а не пришлём в чат второй список.
+            posts.append({"chat_id": chat_id, "message_id": m.message_id})
         except Exception as e:
             log.warning(f"Состав не ушёл в чат {chat_id}: {e}")
-    if sent:
-        await asyncio.to_thread(game_roster.mark_posted, source, game_id)
+    if posts:
+        await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts)
     screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
-    note = (f"📣 Состав отправлен ({len(people)} чел.)." if sent
+    note = (f"📣 Состав отправлен ({len(people)} чел.)." if posts
             else "⚠️ Не смог отправить состав в чат.")
+    await query.edit_message_text(note + "\n\n" + screen, reply_markup=markup)
+
+
+async def _update_roster_post(query, source: str, game_id: str) -> None:
+    """Правит уже отправленное сообщение — без нового уведомления в чате."""
+    import game_roster
+    game = next((g for g in await asyncio.to_thread(game_roster.games)
+                 if g["source"] == source and g["game_id"] == str(game_id)), None)
+    people = await asyncio.to_thread(game_roster.roster, source, game_id)
+    posts = await asyncio.to_thread(game_roster.posted_messages, source, game_id)
+    if not game or not posts:
+        await query.answer("Нечего править — состав в чат не отправляли",
+                           show_alert=True)
+        return
+    text = game_roster.post_text(game, people)
+    done, gone = 0, 0
+    for post in posts:
+        try:
+            await query.get_bot().edit_message_text(
+                chat_id=post["chat_id"], message_id=post["message_id"], text=text)
+            done += 1
+        except Exception as e:
+            # «Message is not modified» — не ошибка: в чате уже то, что нужно.
+            if "not modified" in str(e).lower():
+                done += 1
+            else:
+                log.warning(f"Состав не обновился в {post['chat_id']}: {e}")
+                gone += 1
+    if done:
+        await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts)
+    screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
+    note = ("✏️ Сообщение в чате обновлено — новых уведомлений никому не ушло."
+            if done else "⚠️ Не смог поправить сообщение (возможно, его удалили). "
+                         "Отправь состав заново.")
     await query.edit_message_text(note + "\n\n" + screen, reply_markup=markup)
 
 

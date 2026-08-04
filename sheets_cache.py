@@ -607,6 +607,12 @@ CREATE TABLE IF NOT EXISTS game_roster_state (
     game_date   TEXT NOT NULL DEFAULT '',
     opponent    TEXT NOT NULL DEFAULT '',
     posted_at   TEXT NOT NULL DEFAULT '',   -- пусто = ещё не отправляли в топик
+    -- Куда именно ушло сообщение: [{chat_id, message_id}]. Состав правят после
+    -- отправки (кто-то заболел, кто-то добавился), и правильный ответ —
+    -- отредактировать то же сообщение, а не слать в чат ещё одно.
+    posted_json TEXT NOT NULL DEFAULT '',
+    -- Каким состав был в момент отправки: по нему видно, что он устарел.
+    posted_rows TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (source, game_id)
 );
 
@@ -743,6 +749,8 @@ def init_db() -> None:
         _ensure_column(conn, "payments", "period", "TEXT NOT NULL", "''")
         _ensure_column(conn, "payments", "game_ref", "TEXT NOT NULL", "''")
         _ensure_column(conn, "payments", "by_coach", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_roster_state", "posted_json", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "game_roster_state", "posted_rows", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
