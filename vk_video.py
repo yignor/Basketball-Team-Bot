@@ -55,8 +55,26 @@ LIVE_TAIL_HOURS = 3             # сколько ещё смотрим посл�
 LIVE_SCAN_SECONDS = 180         # как часто дёргаем VK по одной игре
 
 
+_env_loaded = False
+
+
 def token() -> str:
-    return (os.getenv("VK_TOKEN") or os.getenv("VK_SERVICE_TOKEN") or "").strip()
+    """Токен ВК. Если в окружении пусто — дочитываем .env.
+
+    Демон грузит .env сам, а кроновые процессы (ingest фэнтези, где теперь
+    уточняется начало эфира) — нет: без этого VK-часть у них молча
+    отключалась, и тайм-коды навсегда оставались посчитанными по расписанию."""
+    global _env_loaded
+    tok = (os.getenv("VK_TOKEN") or os.getenv("VK_SERVICE_TOKEN") or "").strip()
+    if not tok and not _env_loaded:
+        _env_loaded = True
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+        except Exception:
+            return ""
+        tok = (os.getenv("VK_TOKEN") or os.getenv("VK_SERVICE_TOKEN") or "").strip()
+    return tok
 
 
 def groups() -> List[str]:
@@ -114,6 +132,74 @@ async def _call(method: str, **params: Any) -> Optional[Dict[str, Any]]:
         print(f"⚠️ VK {method}: {err.get('error_msg')} (код {err.get('error_code')})")
         return None
     return (data or {}).get("response")
+
+
+VIDEO_ID_RE = re.compile(r"(?:video|live|clip)(-?\d+)_(\d+)")
+
+
+def parse_link(link: str) -> Tuple[str, str, str]:
+    """(owner_id, video_id, access_key) из ссылки. Пусто — если не разобрали.
+
+    Одно и то же видео ВК отдаёт под тремя адресами (video/live/clip) и на двух
+    доменах — берём из ссылки только id, всё остальное спросим у API."""
+    m = VIDEO_ID_RE.search(str(link or ""))
+    if not m:
+        return "", "", ""
+    key = re.search(r"[?&]list=([\w-]+)", str(link))
+    return m.group(1), m.group(2), (key.group(1) if key else "")
+
+
+async def video_meta(link: str) -> Dict[str, Any]:
+    """Когда началась трансляция и сколько идёт: {started_at, seconds}.
+
+    started_at — то, ради чего это всё: реальное время начала эфира. Зная его
+    и время спорного из протокола, положение матча в записи считается
+    вычитанием, а не догадкой «трансляцию включили по расписанию».
+
+    У законченного эфира ВК держит время начала в самом видео (`date`), а у
+    идущего — ещё и в `live_start_time`; берём то, что есть."""
+    owner, vid, key = parse_link(link)
+    if not owner or not vid:
+        return {}
+    # Ключ из ссылки (`list=`) подходит не всегда: у публичного видео его либо
+    # нет, либо это ключ плейлиста. Пробуем с ним и без него, чтобы из-за
+    # лишнего хвоста не потерять время начала эфира.
+    items = []
+    for videos in ([f"{owner}_{vid}_{key}"] if key else []) + [f"{owner}_{vid}"]:
+        res = await _call("video.get", videos=videos, count=1)
+        items = (res or {}).get("items") or []
+        if items:
+            break
+    if not items:
+        return {}
+    v = items[0]
+    started = int(v.get("live_start_time") or v.get("date") or 0)
+    return {"started_at": started, "seconds": int(v.get("duration") or 0),
+            "live": str(v.get("live_status") or "")}
+
+
+def store_video_meta(source: str, game_id: Any, meta: Dict[str, Any]) -> bool:
+    """Кладёт время начала эфира в game_meta. Ноль не пишем."""
+    if not meta.get("started_at"):
+        return False
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        n = conn.execute(
+            """UPDATE game_meta SET video_started_at = ?, video_seconds = ?
+                WHERE source = ? AND game_id = ?""",
+            (int(meta["started_at"]), int(meta.get("seconds") or 0),
+             source, str(game_id))).rowcount
+        conn.commit()
+    return bool(n)
+
+
+def video_started_at(source: str, game_id: Any) -> int:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT video_started_at FROM game_meta WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    return int(row["video_started_at"] or 0) if row else 0
 
 
 def _video_link(post: Dict[str, Any]) -> str:

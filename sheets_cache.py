@@ -366,6 +366,11 @@ CREATE TABLE IF NOT EXISTS game_meta (
     quarters_json   TEXT NOT NULL DEFAULT '',   -- [[home, guest], ...] по периодам
     arena           TEXT NOT NULL DEFAULT '',
     video_vk        TEXT NOT NULL DEFAULT '',
+    -- Когда ВК начал трансляцию (unix) и сколько она идёт. Это точка отсчёта
+    -- тайм-кодов: зная её и время спорного из протокола, положение матча в
+    -- записи считается вычитанием, а не догадкой про расписание.
+    video_started_at INTEGER NOT NULL DEFAULT 0,
+    video_seconds    INTEGER NOT NULL DEFAULT 0,
     fetched_at      TEXT NOT NULL,
     PRIMARY KEY (source, game_id)
 );
@@ -682,6 +687,7 @@ CREATE TABLE IF NOT EXISTS game_video_sync (
     source      TEXT NOT NULL,
     game_id     TEXT NOT NULL,
     offset_sec  INTEGER NOT NULL DEFAULT 0,
+    tipoff_at   INTEGER NOT NULL DEFAULT 0,   -- unix-момент спорного по протоколу
     set_by      TEXT NOT NULL DEFAULT '',
     set_at      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (source, game_id)
@@ -793,6 +799,9 @@ def init_db() -> None:
         _ensure_column(conn, "game_roster_state", "posted_rows", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "home_name", "TEXT NOT NULL", "''")
         _ensure_column(conn, "game_meta", "guest_name", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "game_meta", "video_started_at", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_meta", "video_seconds", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_video_sync", "tipoff_at", "INTEGER NOT NULL", "0")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».

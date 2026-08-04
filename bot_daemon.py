@@ -3955,6 +3955,12 @@ async def _sync_leagues() -> None:
         else:
             log.info(f"VK: групп {len(__import__('vk_video').groups())}, "
                      f"просмотрено игр {vk['looked']}, записей не нашлось")
+        # Ссылка на запись найдена — можно спросить у ВК, когда начался эфир, и
+        # пересчитать тайм-коды по нему вместо оценки по расписанию.
+        import game_timeline
+        upgraded = await game_timeline.resync_offsets()
+        if upgraded:
+            log.info(f"Тайм-коды: сдвиг уточнён по эфиру у {upgraded} игр")
     except Exception as e:
         log.warning(f"Справочники лиг не обновились: {e}")
 

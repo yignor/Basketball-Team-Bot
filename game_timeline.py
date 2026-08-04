@@ -15,13 +15,17 @@ Infobasket это события типов 8/9 (`Widget/GetOnline`), у SLPRO �
   куска видео. Он есть примерно у четверти событий, остальные разносим
   линейной интерполяцией между соседними якорями.
 
-Ноль отсчёта в записи — момент, с которого включили трансляцию. Считаем, что
-её включают ко времени из расписания: тогда спорный мяч приходится на
-«начало игры минус время по расписанию» — обычно это 1–12 минут (команды
-опаздывают, предыдущая игра затягивается). Началом игры считаем не первую
-запись в протоколе, а момент, когда пошли игровые часы: состав секретарь
-заводит заранее, иногда сильно. Точнее из данных не узнать, поэтому под
-тайм-кодами честно висит приписка про возможное смещение.
+Ноль отсчёта в записи — момент, с которого включили трансляцию. Его знает сам
+ВК (`video.get` отдаёт время начала эфира), поэтому положение матча в записи
+получается вычитанием двух реальных моментов: эфир в 20:00, свисток в 21:00 —
+спорный на 1:00:00 записи, выход игрока в 21:20 — на 1:20:00. Началом игры
+считаем не первую запись в протоколе, а момент, когда пошли игровые часы:
+состав секретарь заводит заранее, иногда за десять минут.
+
+Если начало эфира узнать не удалось (нет токена, видео удалили), остаётся
+оценка: трансляцию включают ко времени из расписания. Тогда сдвиг — «начало
+игры минус расписание», и под тайм-кодами висит приписка, что возможно
+смещение. Какой способ сработал, видно по `game_video_sync.set_by`.
 
 Имён здесь нет и не будет — только id игрока ([[legal-data-invariant]]).
 """
@@ -31,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -64,6 +69,11 @@ MSK = timezone(timedelta(hours=3))
 # (перенос, спаренный тур), и сдвиг лучше не выдумывать.
 MAX_LATE_START = 3600
 
+# Для отсчёта от эфира запас больше: трансляцию включают и за час, и за два —
+# перед нашей игрой в зале идёт чужая. Но не сутки: такой разрыв означает, что
+# ссылка ведёт не на ту запись.
+MAX_STREAM_LEAD = 6 * 3600
+
 # Разметка, сделанная раньше этой отметки, пересчитывается заново: до неё
 # нулём отсчёта у SLPRO была первая запись протокола, а не начало игры.
 # Дешевле перекачать 13 игр, чем держать в базе две несовместимые эпохи.
@@ -72,7 +82,16 @@ MAX_LATE_START = 3600
 # ingest перекачивал бы все протоколы заново.
 REDO_BEFORE = "2026-08-04T09:00:00"
 
-SHIFT_NOTE = ("<i>Время в записи считаем от начала трансляции по расписанию — "
+# Начинаем показывать чуть раньше самого выхода: попасть ровно в секунду
+# замены бесполезно — человек хочет увидеть, как он выходит, а не догонять
+# уже идущий эпизод.
+LEAD_SECONDS = 5
+
+# Приписка зависит от того, чем меряли. По эфиру — это вычитание двух
+# реальных моментов, извиняться не за что; по расписанию — оценка.
+NOTE_EXACT = ("<i>Время считаем от начала эфира: когда ВК включил трансляцию "
+              "и когда в протоколе пошли часы.</i>")
+NOTE_GUESS = ("<i>Начало эфира неизвестно, считаем от времени по расписанию — "
               "возможно смещение на минуту-другую.</i>")
 
 
@@ -136,12 +155,12 @@ def _interpolate(anchors: List[Tuple[float, float]], clock: float) -> float:
     return r1 + (r2 - r1) * (clock - c1) / (c2 - c1)
 
 
-def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[int]]:
     data = _ib_fetch(str(game_id))
     plays = data.get("OnlinePlays") or []
     starts = data.get("OnlineStarts") or []
     if not plays:
-        return [], None
+        return [], None, None
 
     # StartID — номер заявки в этой игре; настоящий id игрока лежит в PersonID.
     person = {int(s.get("StartID") or 0): str(s.get("PersonID") or "")
@@ -165,7 +184,7 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[int]]:
         items.sort()
     if not per_anchors:
         logger.info("Тайм-коды infobasket/%s: в протоколе нет привязки к видео", game_id)
-        return [], None
+        return [], None, None
     every = sorted(a for items in per_anchors.values() for a in items)
     # Ноль — старт первого периода (у него якорь есть всегда, событие типа 21).
     zero = per_anchors.get(1, every)[0][1]
@@ -188,7 +207,7 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[int]]:
             "in": kind == IB_PLAY_IN,
             "order": int(p.get("PlaySortOrder") or 0),
         })
-    return _pair(events), _seconds_of_day(datetime.fromtimestamp(zero, MSK))
+    return _pair(events), zero, _seconds_of_day(datetime.fromtimestamp(zero, MSK))
 
 
 # ─────────────────────────────── SLPRO ─────────────────────────────────────
@@ -216,22 +235,26 @@ def _scheduled_seconds(game_time: Any) -> Optional[int]:
 
 
 def _slpro_time(value: Any) -> Optional[float]:
+    """Отметка секретаря → unix. Часы в зале московские, и сказать это надо
+    явно: сервер живёт в UTC, и без tzinfo момент уехал бы на три часа — а
+    сравнивать его теперь приходится с временем начала эфира в ВК."""
     try:
-        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").timestamp()
+        naive = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return None
+    return naive.replace(tzinfo=MSK).timestamp()
 
 
-async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[int]]:
     game = await client.get_game(game_id)
     log = (game or {}).get("log") or []
     if not log:
-        return [], None
+        return [], None, None
 
     stamps = [t for t in (_slpro_time(e.get("date_add")) for e in log) if t]
     if not stamps:
         logger.info("Тайм-коды slpro/%s: в протоколе нет времени событий", game_id)
-        return [], None
+        return [], None, None
 
     # game_time у SLPRO идёт на УБЫВАНИЕ (600 → 0) и считается внутри периода.
     per_len = max((float(e.get("game_time") or 0) for e in log),
@@ -264,8 +287,7 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
             "in": int(e.get("value") or 0) == 1,
             "order": idx,
         })
-    # date_add секретаря — местное московское время, как и расписание.
-    return _pair(events), _seconds_of_day(datetime.fromtimestamp(zero))
+    return _pair(events), zero, _seconds_of_day(datetime.fromtimestamp(zero, MSK))
 
 
 # ──────────────────────────── Общая сборка ─────────────────────────────────
@@ -356,12 +378,12 @@ async def refresh(source: str, game_id: Any, client=None) -> int:
     source = str(source)
     try:
         if source == "infobasket":
-            found, tipoff = await asyncio.to_thread(_ib_shifts, str(game_id))
+            found, at, tipoff = await asyncio.to_thread(_ib_shifts, str(game_id))
         elif source == "slpro":
             if client is None:
                 from slpro_client import SlproClient
                 client = SlproClient()
-            found, tipoff = await _slpro_shifts(client, str(game_id))
+            found, at, tipoff = await _slpro_shifts(client, str(game_id))
         else:
             return 0
     except Exception as exc:  # сеть/формат — не роняем ingest из-за тайм-кодов
@@ -369,35 +391,62 @@ async def refresh(source: str, game_id: Any, client=None) -> int:
         return 0
     n = store(source, game_id, found)
     if n:
-        sync_to_schedule(source, game_id, tipoff)
+        await sync_offset(source, game_id, at, tipoff)
     return n
 
 
-def sync_to_schedule(source: str, game_id: Any, tipoff_sec: Optional[int]) -> int:
-    """Считает, на какой секунде записи спорный мяч, и запоминает.
+async def sync_offset(source: str, game_id: Any, tipoff_epoch: Optional[float],
+                      tipoff_sec: Optional[int]) -> int:
+    """На какой секунде записи спорный мяч. Считает и запоминает.
 
-    Трансляцию включают ко времени из расписания, а свисток дают позже:
-    команды опаздывают, предыдущая игра затягивается. Разница «протокольный
-    старт минус расписание» и есть искомый сдвиг — по нашим играм выходит от
-    минуты до двенадцати.
+    Точный путь: у ВК спрашиваем, когда НАЧАЛСЯ эфир, и вычитаем его из
+    времени спорного по протоколу. Обе величины — реальные моменты, никаких
+    допущений: эфир в 20:00, свисток в 21:00 — спорный на 1:00:00 записи.
 
-    Отрицательная разница (в протоколе старт раньше расписания) означает, что
-    трансляцию включили позже назначенного, и тогда спорный — в самом начале
-    записи. Считаем сдвиг нулевым, а не отматываем в минус."""
-    if tipoff_sec is None:
-        return 0
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        row = conn.execute(
-            "SELECT game_time FROM game_meta WHERE source = ? AND game_id = ?",
-            (source, str(game_id))).fetchone()
-    planned = _scheduled_seconds(row["game_time"]) if row else None
-    if planned is None:
-        return 0
-    shift = tipoff_sec - planned
-    if shift < 0 or shift > MAX_LATE_START:
+    Запасной путь (эфир не нашли, токена нет, видео удалили): считаем, что
+    трансляцию включили ко времени из расписания. Тогда сдвиг — «начало игры
+    минус расписание», по нашим играм это от минуты до двенадцати.
+
+    Отрицательная разница означает, что эфир начали уже после свистка: спорный
+    в самом начале записи, сдвиг ноль, в минус не отматываем."""
+    started = 0
+    if tipoff_epoch:
+        try:
+            import vk_video
+            started = vk_video.video_started_at(source, game_id)
+            if not started:
+                link = vk_video.link_of(source, game_id)
+                meta = await vk_video.video_meta(link) if link else {}
+                if meta.get("started_at"):
+                    vk_video.store_video_meta(source, game_id, meta)
+                    started = int(meta["started_at"])
+        except Exception as exc:
+            logger.warning("Тайм-коды %s/%s: начало эфира не узнать: %s",
+                           source, game_id, exc)
+
+    if started and tipoff_epoch:
+        shift = int(round(tipoff_epoch - started))
+        way = "по эфиру"
+    else:
+        if tipoff_sec is None:
+            return 0
+        sheets_cache.init_db()
+        with sheets_cache.get_connection() as conn:
+            row = conn.execute(
+                "SELECT game_time FROM game_meta WHERE source = ? AND game_id = ?",
+                (source, str(game_id))).fetchone()
+        planned = _scheduled_seconds(row["game_time"]) if row else None
+        if planned is None:
+            return 0
+        shift = tipoff_sec - planned
+        way = "по расписанию"
+    limit = MAX_LATE_START if way == "по расписанию" else MAX_STREAM_LEAD
+    if shift < 0 or shift > limit:
         shift = 0
-    set_offset(source, game_id, shift, "auto")
+    set_offset(source, game_id, shift, "auto" if way == "по расписанию" else "vk",
+               tipoff_at=tipoff_epoch or 0)
+    logger.info("Тайм-коды %s/%s: спорный на %s записи (%s)",
+                source, game_id, hhmmss(shift), way)
     return shift
 
 
@@ -480,7 +529,35 @@ async def backfill(limit: int = 10, client=None) -> int:
         if n:
             logger.info("Тайм-коды %s/%s: отрезков %d",
                         game["source"], game["game_id"], n)
+    total += await resync_offsets(limit=limit)
     return total
+
+
+async def resync_offsets(limit: int = 10) -> int:
+    """Переводит сдвиги с расписания на реальное начало эфира.
+
+    Ссылку на запись бот находит не сразу — иногда через день после игры.
+    К этому времени разметка уже сделана и сдвиг посчитан по расписанию;
+    протокол ради уточнения перекачивать не надо, момент спорного мы сохранили.
+    """
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            """SELECT v.source, v.game_id, v.tipoff_at
+                 FROM game_video_sync v
+                 JOIN game_meta m ON m.source = v.source AND m.game_id = v.game_id
+                WHERE v.set_by != 'vk' AND v.tipoff_at > 0 AND m.video_vk != ''
+                ORDER BY m.game_date DESC LIMIT ?""", (int(limit),))]
+    done = 0
+    for r in rows:
+        before = offset(r["source"], r["game_id"])
+        await sync_offset(r["source"], r["game_id"], float(r["tipoff_at"]), None)
+        if offset_kind(r["source"], r["game_id"]) == "vk":
+            done += 1
+            logger.info("Тайм-коды %s/%s: сдвиг уточнён по эфиру, было %s стало %s",
+                        r["source"], r["game_id"], hhmmss(before),
+                        hhmmss(offset(r["source"], r["game_id"])))
+    return done
 
 
 # ───────────────────────── Привязка к записи ВК ────────────────────────────
@@ -495,16 +572,26 @@ def offset(source: str, game_id: Any) -> int:
     return int(row["offset_sec"]) if row else 0
 
 
-def set_offset(source: str, game_id: Any, seconds: int, who: Any = "") -> None:
+def set_offset(source: str, game_id: Any, seconds: int, who: Any = "",
+               tipoff_at: float = 0) -> None:
+    """Запоминает сдвиг и сам момент спорного.
+
+    Момент нужен, чтобы позже пересчитать сдвиг по начавшемуся эфиру, не
+    выкачивая протокол заново: ссылку на запись ВК бот находит уже после игры,
+    а иногда и через день."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         conn.execute(
-            """INSERT INTO game_video_sync (source, game_id, offset_sec, set_by, set_at)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO game_video_sync (source, game_id, offset_sec, tipoff_at,
+                                            set_by, set_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(source, game_id) DO UPDATE SET
                    offset_sec = excluded.offset_sec,
+                   tipoff_at = CASE WHEN excluded.tipoff_at > 0 THEN excluded.tipoff_at
+                                    ELSE game_video_sync.tipoff_at END,
                    set_by = excluded.set_by, set_at = excluded.set_at""",
-            (source, str(game_id), int(seconds), str(who), sheets_cache.now_iso()))
+            (source, str(game_id), int(seconds), int(tipoff_at or 0), str(who),
+             sheets_cache.now_iso()))
         conn.commit()
 
 
@@ -515,13 +602,32 @@ def hhmmss(seconds: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
+def vk_time(seconds: int) -> str:
+    """Секунды в формате перемотки ВК: 26m5s, 1h20m5s."""
+    seconds = max(0, int(seconds))
+    h, rest = divmod(seconds, 3600)
+    m, sec = divmod(rest, 60)
+    return (f"{h}h" if h else "") + (f"{m}m" if h or m else "") + f"{sec}s"
+
+
 def vk_link(video_url: str, seconds: int) -> str:
-    """Ссылка на запись с перемоткой. ВК понимает `t=` в секундах."""
+    """Ссылка на запись с перемоткой. Прежний `?t=` в ссылке заменяем: ВК
+    берёт первый параметр, и второй просто не сработал бы."""
     if not video_url:
         return ""
-    base = str(video_url).split("#")[0]
+    base = re.sub(r"[?&]t=[^&#]*", "", str(video_url).split("#")[0])
     sep = "&" if "?" in base else "?"
-    return f"{base}{sep}t={max(0, int(seconds))}"
+    return f"{base}{sep}t={vk_time(seconds)}"
+
+
+def offset_kind(source: str, game_id: Any) -> str:
+    """Чем меряли сдвиг: «vk» — по началу эфира, «auto» — по расписанию."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT set_by FROM game_video_sync WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    return str(row["set_by"]) if row else ""
 
 
 def timecodes(source: str, game_id: Any, player_id: Any,
@@ -530,7 +636,7 @@ def timecodes(source: str, game_id: Any, player_id: Any,
     shift = offset(source, game_id)
     out = []
     for s in shifts(source, game_id, player_id):
-        start = s["start_sec"] + shift
+        start = max(0, s["start_sec"] + shift - LEAD_SECONDS)
         end = s["end_sec"] + shift
         out.append({
             "period": s["period"],
@@ -575,5 +681,5 @@ def format_block(source: str, game_id: Any, player_id: Any,
         lines.append(f"…и ещё {len(shown) - max_items}")
     if total:
         lines.append(f"Итого {total // 60} мин игрового времени")
-    lines.append(SHIFT_NOTE)
+    lines.append(NOTE_EXACT if offset_kind(source, game_id) == "vk" else NOTE_GUESS)
     return "\n".join(lines)
