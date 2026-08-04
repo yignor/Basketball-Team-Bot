@@ -433,8 +433,11 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
     except Exception as e:
         log.warning(f"проверка состава для клавиатуры: {e}")
         is_member = is_admin
+    # Фэнтези открыта всем желающим (решение 04.08.2026): своим и чужим
+    # одинаково. Командные разделы клавиатуры это не затрагивает — они ниже
+    # по своим проверкам.
     with_fantasy = bool(FANTASY_FALLBACK_BUTTON and FANTASY_WEBAPP_URL
-                        and _webapp_url() and is_member)
+                        and _webapp_url())
 
     # Запасные данные в кнопке собираются из пула. Пул греет фоновый цикл; если
     # он холодный (демон только поднялся) — подождём немного и уйдём без них.
@@ -1405,9 +1408,7 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
         return
 
     uid = str(user.id)
-    if not fantasy_api._is_team_member(uid, user.username or ""):
-        await msg.reply_text("Фэнтези доступна только игрокам команды.")
-        return
+
     season = fantasy.get_active_season()
     if not season:
         await msg.reply_text("Сейчас нет активного сезона.")

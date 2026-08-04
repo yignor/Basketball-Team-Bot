@@ -740,14 +740,21 @@ def _season(request: web.Request) -> Optional[Dict[str, Any]]:
 
 
 def _can_view(user: Optional[Dict[str, Any]]) -> bool:
-    """Кто вправе ЧИТАТЬ фэнтези: игрок команды (лист «Игроки») или админ.
-    Подпись initData сама по себе не пропуск — её получит любой, кто открыл
-    бота. А в пуле/таблице видны ФИО, поэтому посторонним доступа нет
-    (см. юр-инвариант: ФИО показываем только своим)."""
-    if not user:
-        return False
-    return (_is_team_member(str(user.get("id")), user.get("username", ""))
-            or _is_admin(user))
+    """Кто вправе ЧИТАТЬ фэнтези — любой, кто открыл приложение из бота.
+
+    Раньше пускали только игроков команды: в пуле видны имена, а показывать их
+    посторонним не хотелось. Решение пересмотрено (04.08.2026, пользователь):
+    играть может любой желающий, и имена в пуле — те же, что открыто лежат в
+    заявках лиг на их сайтах, то есть публичный факт.
+
+    Закрытым остаётся ВСЁ КОМАНДНОЕ: раздел тренера, отчёты, посещаемость,
+    оплаты, личная статистика — у них свои проверки, к фэнтези отношения не
+    имеющие. Настройки лиги (вкладка ⚙️) по-прежнему только админу.
+
+    Подпись initData тут не «пропуск», а опознание: она подтверждает, что это
+    настоящий пользователь Telegram, открывший наше приложение, и даёт его
+    числовой id, под которым сохранится состав."""
+    return bool(user)
 
 
 def _is_admin(user: Optional[Dict[str, Any]]) -> bool:
@@ -1558,8 +1565,6 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     uid = str(user["id"])
-    if not _is_team_member(uid, user.get("username", "")):
-        return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
     if not season:
         return web.json_response({"error": "no_active_season"}, status=400)
