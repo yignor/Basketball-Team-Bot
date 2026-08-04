@@ -431,6 +431,28 @@ def history(teams: Optional[List[Tuple[str, str]]] = None,
 # здесь и что нужно сделать. Все числа берутся из того же движка, которым бот
 # двигает цену, — иначе кабинет обещал бы одно, а пересчёт делал другое.
 
+def _attach_opponents(games: List[Dict[str, Any]]) -> None:
+    """Дописывает к играм соперника и счёт — из локальной копии протоколов."""
+    import sheets_cache
+    if not games:
+        return
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        for g in games:
+            row = conn.execute(
+                """SELECT home_name, guest_name, home_score, guest_score
+                   FROM game_meta WHERE source = ? AND game_id = ?""",
+                (g.get("source", ""), g.get("game_id", ""))).fetchone()
+            g["title"] = "SLPRO" if g.get("source") == "slpro" else "Инфобаскет"
+            if not row:
+                g["vs"] = ""
+                continue
+            g["vs"] = " — ".join(x for x in (str(row["home_name"] or ""),
+                                             str(row["guest_name"] or "")) if x)
+            if row["home_score"] or row["guest_score"]:
+                g["score"] = f"{row['home_score']}:{row['guest_score']}"
+
+
 def progress(price: Any, refs: List[str],
              season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Где игрок и что ему нужно: ранг, форма, сколько до подъёма и падения."""
@@ -466,8 +488,24 @@ def progress(price: Any, refs: List[str],
     if season:
         import fantasy
         weights = fantasy.season_weights(season)
-    games = [{"date": r.get("game_date", ""),
-              "fp": fantasy_stats.fantasy_points(r, weights)} for r in rows[:window]]
+    # Полная строка игрока, а не только очки: кабинет должен отвечать на
+    # «почему у меня столько», а для этого нужна сама игра, а не её итог.
+    games = []
+    for r in rows[:window]:
+        games.append({
+            "date": r.get("game_date", ""),
+            "fp": fantasy_stats.fantasy_points(r, weights),
+            "source": r.get("source", ""),
+            "game_id": str(r.get("game_id", "")),
+            "pts": int(r.get("pts") or 0), "reb": int(r.get("reb") or 0),
+            "ast": int(r.get("ast") or 0), "stl": int(r.get("stl") or 0),
+            "blk": int(r.get("blk") or 0), "tur": int(r.get("tur") or 0),
+            "mins": int(r.get("secs") or 0) // 60,
+            "fgm": int(r.get("fgm") or 0), "fga": int(r.get("fga") or 0),
+            "tpm": int(r.get("tpm") or 0), "tpa": int(r.get("tpa") or 0),
+            "ftm": int(r.get("ftm") or 0), "fta": int(r.get("fta") or 0),
+        })
+    _attach_opponents(games)
 
     up_fp, up_n = form_fp(refs, cfg["up_games"], cfg.get("since", ""))
     down_fp, down_n = form_fp(refs, cfg["down_games"], cfg.get("since", ""))

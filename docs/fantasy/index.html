@@ -1109,13 +1109,47 @@
           '<br><br>Цена меняется только если ' +
           (you ? 'ты играл' : 'игрок играл') + ' в этой игре.') : '';
 
+    // Каждая игра раскрывается: в списке только дата и очки, а «почему
+    // столько» — внутри. Строкой из шести показателей экран превращался в
+    // простыню, ради которой пришлось бы листать весь кабинет.
     const games = (d.games || []).length
-      ? '<div class="sect">Последние игры</div>' + d.games.map(g =>
-          `<div class="row"><span>${esc((g.date || '').slice(8, 10))}.` +
-          `${esc((g.date || '').slice(5, 7))}</span><b>${g.fp}</b></div>`).join('')
+      ? '<div class="sect">Последние игры · нажми, чтобы раскрыть</div>' +
+        d.games.map(gameRow).join('')
       : '';
 
     return head + form + up + down + next + games;
+  }
+
+  function statLine(g) {
+    const bits = [];
+    if (g.pts) bits.push(`Очки ${g.pts}`);
+    if (g.reb) bits.push(`Подборы ${g.reb}`);
+    if (g.ast) bits.push(`Передачи ${g.ast}`);
+    if (g.stl) bits.push(`Перехваты ${g.stl}`);
+    if (g.blk) bits.push(`Блоки ${g.blk}`);
+    if (g.tur) bits.push(`Потери ${g.tur}`);
+    return bits.length ? bits.join(' · ') : 'В протоколе одни нули.';
+  }
+
+  function shotLine(g) {
+    const bits = [];
+    if (g.fga) bits.push(`С игры ${g.fgm}/${g.fga}`);
+    if (g.tpa) bits.push(`Трёхочковые ${g.tpm}/${g.tpa}`);
+    if (g.fta) bits.push(`Штрафные ${g.ftm}/${g.fta}`);
+    return bits.join(' · ');
+  }
+
+  function gameRow(g) {
+    const when = `${(g.date || '').slice(8, 10)}.${(g.date || '').slice(5, 7)}`;
+    const head = [when, g.title, g.vs, g.score].filter(Boolean).map(esc).join(' · ');
+    const shots = shotLine(g);
+    const body =
+      `<div class="pstat">${esc(statLine(g))}</div>` +
+      (g.mins ? `<div class="pstat">${g.mins} мин на площадке</div>` : '') +
+      (shots ? `<div class="pstat">${esc(shots)}</div>` : '');
+    return `<details class="guess"><summary class="row">` +
+      `<span>${head}<span class="chev">▾</span></span><b>${g.fp}</b></summary>` +
+      `<div class="guess-body">${body}</div></details>`;
   }
 
   // ─── правила ───────────────────────────────────────────────────────────────
