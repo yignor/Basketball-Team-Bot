@@ -2792,6 +2792,10 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
         rows.append([InlineKeyboardButton(
             "📣 Отправить заново (новое сообщение)",
             callback_data=f"rost:post:{source}:{game_id}")])
+        # Долги по игре открывались только из рассылки после матча. Тренеру
+        # они нужны и раньше — например, когда деньги собирают в зале.
+        rows.append([InlineKeyboardButton(
+            "💰 Кто не оплатил", callback_data=f"rost:debt:{source}:{game_id}")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(rows)
 
