@@ -59,7 +59,7 @@ def tier_for(price: Any) -> str:
 
 
 DEFAULT_BUDGET = 100
-DEFAULT_MULTIPLIER = 1.5
+DEFAULT_MULTIPLIER = 1.0
 
 
 def settings(season: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -72,12 +72,12 @@ def settings(season: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         budget = int(s.get("budget") or DEFAULT_BUDGET)
     except (TypeError, ValueError):
         budget = DEFAULT_BUDGET
-    try:
-        mult = float(s.get("cat_multiplier") or DEFAULT_MULTIPLIER)
-    except (TypeError, ValueError):
-        mult = DEFAULT_MULTIPLIER
+    # Повышающий коэффициент категорий отменён (решение 04.08.2026): режимы не
+    # уравниваются между собой — у каждого своя таблица, сравнивать их всё
+    # равно нельзя. Значение из старых настроек намеренно игнорируем: иначе
+    # убранная из интерфейса кнопка продолжала бы молча множить очки на 1.5.
     return {"modes": modes, "budget": max(1, budget),
-            "cat_multiplier": max(1.0, mult), "categories": cats}
+            "cat_multiplier": 1.0, "categories": cats}
 
 
 def enabled(season: Optional[Dict[str, Any]]) -> List[str]:
