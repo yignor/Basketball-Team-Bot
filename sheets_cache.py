@@ -676,6 +676,7 @@ CREATE TABLE IF NOT EXISTS game_shifts (
     start_sec   INTEGER NOT NULL,
     end_sec     INTEGER NOT NULL,
     clock_sec   INTEGER NOT NULL DEFAULT 0,
+    start_left  INTEGER NOT NULL DEFAULT 0,  -- сколько было на табло при выходе
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (source, game_id, player_id, start_sec)
 );
@@ -802,6 +803,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_meta", "video_started_at", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_meta", "video_seconds", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_video_sync", "tipoff_at", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_shifts", "start_left", "INTEGER NOT NULL", "0")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».

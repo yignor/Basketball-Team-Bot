@@ -514,6 +514,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # недовведённого платежа.
     _awaiting_payment.discard(user.id)
     _pay_draft.pop(user.id, None)
+    _awaiting_video.pop(user.id, None)
 
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
@@ -1513,6 +1514,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
         [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
         [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
+        [InlineKeyboardButton("⏱ Записи игр", callback_data="admin:video:list")],
         [InlineKeyboardButton("📈 Моя статистика (скрытое)", callback_data="admin:menu:profile")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
@@ -1894,6 +1896,80 @@ def _render_bot_users_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
     rows = [_pagination_row("admin:users:bot", offset, PAGE_SIZE, data["total"])]
     rows.append(_back_button("admin:menu:users"))
     return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
+
+
+# ─── привязка записей ВК ────────────────────────────────────────────────────
+#
+# Тайм-коды бот считает от начала эфира (ВК говорит, когда включили) и времени
+# спорного из протокола. Это работает, но проверить его может только человек с
+# записью перед глазами — поэтому здесь ручная поправка. Выставленное руками
+# автоматика больше не трогает.
+
+# Кто из админов сейчас присылает время спорного: id → "источник:игра".
+_awaiting_video: Dict[int, str] = {}
+
+VIDEO_ASK = ("⏱ Открой запись и найди спорный мяч.\n\n"
+             "Пришли его время с плеера: «5:33» или «1:02:15».\n\n"
+             "После этого все тайм-коды этой игры отсчитываются от него, и "
+             "автоматика их больше не трогает.\n\nПередумал — /start.")
+
+_VIDEO_WAY = {"vk": "по эфиру", "auto": "по расписанию", "hand": "вручную"}
+
+
+def _video_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_payments
+    import game_timeline
+    import sheets_cache
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        games = game_timeline.our_games(conn, limit=8)
+    back = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")]]
+    if not games:
+        return ("⏱ Записи игр\n\nНи у одной нашей игры пока нет ссылки на запись.",
+                InlineKeyboardMarkup(back))
+    lines = ["⏱ Записи игр", "",
+             "Где в записи спорный мяч — от него считаются все выходы:", ""]
+    rows = []
+    for g in games:
+        day = coach_payments._human_date(str(g["game_date"]))
+        title = f"{g['home_name'] or '—'} — {g['guest_name'] or '—'}"
+        if not g["shifts"]:
+            state = "разметки нет"
+        else:
+            off = game_timeline.offset(g["source"], g["game_id"])
+            way = _VIDEO_WAY.get(game_timeline.offset_kind(g["source"], g["game_id"]), "?")
+            state = f"{game_timeline.hhmmss(off)} ({way})"
+        lines.append(f"• {day} · {title} — {state}")
+        if g["shifts"]:
+            rows.append([InlineKeyboardButton(
+                f"{day} · {title}"[:60],
+                callback_data=f"admin:video:set:{g['source']}:{g['game_id']}")])
+    lines += ["", "Нажми на игру, если время не сходится с записью."]
+    rows += back
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def handle_video_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Время спорного мяча, присланное админом после выбора игры."""
+    import game_timeline
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_video:
+        return
+    if not _is_admin(user):
+        _awaiting_video.pop(user.id, None)
+        return
+    seconds = game_timeline.parse_offset(msg.text or "")
+    if seconds is None:
+        await msg.reply_text("Не понял время. Как на плеере: «5:33» или "
+                             "«1:02:15». Передумал — /start.")
+        raise ApplicationHandlerStop
+    source, game_id = _awaiting_video.pop(user.id).split(":", 1)
+    await asyncio.to_thread(game_timeline.set_offset, source, game_id, seconds, "hand")
+    text, markup = await asyncio.to_thread(_video_screen)
+    await msg.reply_text(
+        f"Готово: спорный на {game_timeline.hhmmss(seconds)}.\n\n{text}",
+        reply_markup=markup)
+    raise ApplicationHandlerStop
 
 
 # ─── опознание игроков ──────────────────────────────────────────────────────
@@ -3665,7 +3741,16 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
-        if parts[1] == "menu":
+        if parts[1] == "video":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "set" and len(parts) > 4:
+                _awaiting_video[user.id] = f"{parts[3]}:{parts[4]}"
+                await query.edit_message_text(VIDEO_ASK)
+            else:
+                _awaiting_video.pop(user.id, None)
+                text, markup = await asyncio.to_thread(_video_screen)
+                await query.edit_message_text(text, reply_markup=markup)
+        elif parts[1] == "menu":
             screen = parts[2] if len(parts) > 2 else "main"
             if screen == "main":
                 await query.edit_message_text("📊 Админ-панель", reply_markup=_main_menu_markup())
@@ -4526,6 +4611,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_roster_text), group=6)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_video_text), group=7)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))

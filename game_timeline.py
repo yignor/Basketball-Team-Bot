@@ -82,7 +82,7 @@ MAX_STREAM_LEAD = 6 * 3600
 # Время — UTC, как и fetched_at (сервер живёт в UTC): с московской отметкой
 # условие оставалось бы верным ещё три часа, и каждый прогон ingest
 # перекачивал бы все протоколы заново.
-REDO_BEFORE = "2026-08-04T11:45:00"
+REDO_BEFORE = "2026-08-04T12:40:00"
 
 # Начинаем показывать чуть раньше самого выхода: попасть ровно в секунду
 # замены бесполезно — человек хочет увидеть, как он выходит, а не догонять
@@ -219,10 +219,17 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Opt
             continue
         period = int(p.get("PlayPeriod") or 0)
         clock = _elapsed(period, p.get("PlaySecond"), offsets)
+        in_period = clock - offsets.get(period, 0.0)
+        # Длина периода своя (овертайм — пять минут), берём из расписания лиги.
+        period_len = offsets.get(period + 1, 0.0) - offsets.get(period, 0.0) \
+            or DEFAULT_PERIOD_SECONDS
         events.append({
             "player_id": pid,
             "period": period,
             "clock": clock,
+            # Сколько было на табло: по этому числу человек сверяет ссылку с
+            # записью, не зная, кого высматривать среди пяти замен подряд.
+            "left": max(0.0, period_len - in_period),
             "real": _place(per_anchors.get(period) or every, clock) - zero,
             "in": kind == IB_PLAY_IN,
             "order": int(p.get("PlaySortOrder") or 0),
@@ -319,6 +326,7 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
             "player_id": pid,
             "period": int(e.get("period") or 0),
             "clock": elapsed,
+            "left": float(e.get("game_time") or 0),
             # Отметка секретаря остаётся крайним случаем: у стартовых пятёрок
             # (часы ещё не шли) игровых событий на этой отметке нет.
             "real": (real if anchors else stamp) - zero,
@@ -359,6 +367,7 @@ def _pair(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "start_sec": int(round(start_real)),
             "end_sec": int(round(end_real)),
             "clock_sec": int(round(max(0.0, e["clock"] - start["clock"]))),
+            "start_left": int(round(start.get("left") or 0)),
         })
     if open_at:
         logger.info("Тайм-коды: %d незакрытых отрезков в протоколе", len(open_at))
@@ -379,10 +388,11 @@ def store(source: str, game_id: Any, shifts: List[Dict[str, Any]]) -> int:
         conn.executemany(
             """INSERT OR REPLACE INTO game_shifts
                    (source, game_id, player_id, period, start_sec, end_sec,
-                    clock_sec, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    clock_sec, start_left, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(source, str(game_id), s["player_id"], s["period"], s["start_sec"],
-              s["end_sec"], s["clock_sec"], now) for s in shifts])
+              s["end_sec"], s["clock_sec"], s.get("start_left", 0), now)
+             for s in shifts])
         conn.commit()
     return len(shifts)
 
@@ -400,7 +410,7 @@ def shifts(source: str, game_id: Any, player_id: Any = None) -> List[Dict[str, A
     """Разметка из кеша. Живых запросов отсюда не делаем — это путь ответа
     человеку, наружу ходит только фоновая дозагрузка."""
     sheets_cache.init_db()
-    sql = ("SELECT player_id, period, start_sec, end_sec, clock_sec "
+    sql = ("SELECT player_id, period, start_sec, end_sec, clock_sec, start_left "
            "FROM game_shifts WHERE source = ? AND game_id = ?")
     args: List[Any] = [source, str(game_id)]
     if player_id is not None:
@@ -461,6 +471,14 @@ async def sync_offset(source: str, game_id: Any, tipoff_epoch: Optional[float],
         except Exception as exc:
             logger.warning("Тайм-коды %s/%s: начало эфира не узнать: %s",
                            source, game_id, exc)
+
+    if offset_kind(source, game_id) == "hand":
+        # Руками выставленное не трогаем никогда: человек смотрел запись, а
+        # автоматика — нет. Момент спорного всё равно обновим, он пригодится,
+        # если ручную привязку потом снимут.
+        if tipoff_epoch:
+            _remember_tipoff(source, game_id, tipoff_epoch)
+        return offset(source, game_id)
 
     if started and tipoff_epoch:
         shift = int(round(tipoff_epoch - started))
@@ -610,6 +628,33 @@ def offset(source: str, game_id: Any) -> int:
     return int(row["offset_sec"]) if row else 0
 
 
+def _remember_tipoff(source: str, game_id: Any, tipoff_at: float) -> None:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            "UPDATE game_video_sync SET tipoff_at = ? WHERE source = ? AND game_id = ?",
+            (int(tipoff_at), source, str(game_id)))
+        conn.commit()
+
+
+def parse_offset(text: str) -> Optional[int]:
+    """«5:33», «1:02:15» или «333» → секунды. None — если не разобрали."""
+    raw = str(text or "").strip().replace(",", ":").replace(".", ":")
+    if not raw:
+        return None
+    parts = raw.split(":")
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return None
+    if not nums or len(nums) > 3 or any(n < 0 for n in nums):
+        return None
+    total = 0
+    for n in nums:
+        total = total * 60 + n
+    return total
+
+
 def set_offset(source: str, game_id: Any, seconds: int, who: Any = "",
                tipoff_at: float = 0) -> None:
     """Запоминает сдвиг и сам момент спорного.
@@ -676,12 +721,15 @@ def timecodes(source: str, game_id: Any, player_id: Any,
     for s in shifts(source, game_id, player_id):
         start = max(0, s["start_sec"] + shift - LEAD_SECONDS)
         end = s["end_sec"] + shift
+        left = int(s["start_left"] or 0)
         out.append({
             "period": s["period"],
             "start": start,
             "end": end,
             "label": f"{hhmmss(start)}–{hhmmss(end)}",
             "clock_sec": s["clock_sec"],
+            "left": left,
+            "left_label": f"{left // 60}:{left % 60:02d}",
             "link": vk_link(video_url, start),
         })
     return out
@@ -707,7 +755,11 @@ def format_block(source: str, game_id: Any, player_id: Any,
         head += f" · <a href=\"{video_url}\">запись</a>"
     lines = [head]
     for t in shown[:max_items]:
+        # На табло в этот момент — чтобы ссылку можно было проверить, не зная,
+        # кого высматривать: остановил видео, сравнил цифры на табло.
         mark = f"{t['period']}-й период"
+        if t.get("left"):
+            mark += f", на табло {t['left_label']}"
         # Ссылка спрятана под время: в сообщении остаётся «0:00–8:02», а не
         # простыня из vk.com/video-...?t=. Иначе блок из восьми выходов
         # раздувает разбор так, что своей статистики уже не видно.
