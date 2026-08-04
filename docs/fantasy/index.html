@@ -810,7 +810,7 @@
     unknown_player: 'В составе есть игрок не из пула.',
     too_many_copies: 'Слишком много копий одного игрока.',
     locked: 'Идёт игра — состав заморожен. Менять можно будет сразу после результата.',
-    not_a_member: 'Не удалось подтвердить вход. Открой фэнтези через бота.',
+    not_a_member: 'Эта фэнтези-лига пока только для игроков команды.',
   };
 
   function confirmModeSwitch() {
@@ -1567,18 +1567,16 @@
         `<div class="pstat">Режимы участия:</div>` +
         `<div class="bar" style="padding-left:0">${modeChips}</div>` +
         ((md.modes || []).includes('budget')
-          ? `<div class="bar" style="padding-left:0">` +
-            [50, 100, 150].map(v =>
+          ? `<div class="pstat">Бюджет на состав из ${s.roster_size} игроков ` +
+            `(самые дорогие стоят по 70–100)</div>` +
+            `<div class="bar" style="padding-left:0">` +
+            (s.roster_size >= 5 ? [100, 150, 200] : [50, 100, 150]).map(v =>
               `<button class="chip${md.budget === v ? ' on' : ''}" ` +
               `onclick='adminDo({action:"budget",season_id:${s.id},value:${v}})'>` +
               `бюджет ${v}</button>`).join(' ') + `</div>` : '') +
-        ((md.modes || []).includes('category')
-          ? `<div class="bar" style="padding-left:0">` +
-            [1.5, 2, 2.5].map(v =>
-              `<button class="chip${md.cat_multiplier === v ? ' on' : ''}" ` +
-              `onclick='adminDo({action:"multiplier",season_id:${s.id},value:${v}})'>` +
-              `коэффициент ×${v}</button>`).join(' ') + `</div>` : '') +
-        `<div class="pstat">Движение цен: подъём / падение / шаг</div>` +
+        `<div class="pstat">Движение цен: сколько игр подряд держать форму, ` +
+        `чтобы сменился ранг (↑ вверх, ↓ вниз), и на сколько очков цена ` +
+        `двигается за один пересчёт</div>` +
         `<div class="bar" style="padding-left:0">` +
           [3, 5].map(v => `<button class="chip${(s.prices || {}).up_games === v ? ' on' : ''}" ` +
             `onclick='adminDo({action:"rank_up_games",season_id:${s.id},value:${v}})'>` +
@@ -1588,7 +1586,15 @@
             `↓ ${v} игр</button>`).join(' ') + ' ' +
           [1, 3, 5].map(v => `<button class="chip${(s.prices || {}).step === v ? ' on' : ''}" ` +
             `onclick='adminDo({action:"price_step",season_id:${s.id},value:${v}})'>` +
-            `шаг ${v}</button>`).join(' ') +
+            `±${v} за игру</button>`).join(' ') +
+        `</div>` +
+        `<div class="pstat">Доступ: ${s.open_to_all
+            ? 'играть может любой, кто открыл приложение'
+            : 'только игроки команды из листа «Игроки»'}</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip${s.open_to_all ? ' on' : ''}" ` +
+          `onclick='adminDo({action:"open_toggle",season_id:${s.id}})'>` +
+          `${s.open_to_all ? '🔒 Закрыть для команды' : '🌍 Открыть для всех'}</button>` +
         `</div>` +
         `<div class="bar" style="padding-left:0">` +
           `<button class="chip" onclick='recalcPrices(${s.id}, true)'>👀 Показать пересчёт</button> ` +

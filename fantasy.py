@@ -232,6 +232,19 @@ def set_format(fmt: str, season_id: Optional[int] = None) -> bool:
     return True
 
 
+def is_open(season: Dict[str, Any]) -> bool:
+    """Пускаем ли в эту лигу посторонних.
+
+    По умолчанию нет: фэнтези задумана для команды, и в пуле видны имена
+    игроков. Открывается кнопкой в админке, когда лигу сознательно выносят
+    наружу — тогда играть может любой, кто открыл приложение из бота."""
+    return bool(season_settings(season).get("open_to_all"))
+
+
+def set_open(season: Dict[str, Any], value: bool) -> bool:
+    return _update_settings(season, open_to_all=bool(value))
+
+
 def roster_size(season: Dict[str, Any]) -> int:
     return 5 if str(season.get("format", "3x3")).lower().startswith("5") else 3
 

@@ -342,9 +342,14 @@ async def derive_pool_teams() -> List[Dict[str, Any]]:
     команда(ы) Инфобаскета (team_id × comp_id из Конфига)."""
     teams: List[Dict[str, Any]] = []
     try:
+        import league_sync
         import slpro_client
         seen_ids = set()
-        for ctx in await slpro_client.team_contexts():
+        # Сначала зеркало (без сети), живой запрос — только если оно пусто.
+        contexts = [t["ctx"] for t in league_sync.our_teams("slpro") if t.get("ctx")]
+        if not contexts:
+            contexts = await slpro_client.team_contexts()
+        for ctx in contexts:
             tid = ctx.get("team_id")
             if tid and tid not in seen_ids:
                 seen_ids.add(tid)
@@ -377,10 +382,23 @@ _ib_names: Dict[str, str] = {}
 
 
 async def _ib_team_name(team_id: Any, comp_id: Any) -> str:
-    """Название команды Инфобаскета из ответа лиги (с кешем на процесс:
-    имя меняется раз в сезон, а админку открывают часто)."""
+    """Название команды Инфобаскета: сперва из локального справочника лиг,
+    и только если его там нет — живым запросом (с кешем на процесс).
+
+    Справочник наполняет league_sync, он же держит его свежим. Живой запрос
+    здесь стоил админке пары секунд на ровном месте, а при недоступной лиге —
+    всего её таймаута."""
     key = f"{team_id}:{comp_id}"
     if key not in _ib_names:
+        try:
+            import league_sync
+            local = next((t for t in league_sync.our_teams("infobasket")
+                          if str(t.get("team_id")) == str(team_id) and t.get("name")), None)
+            if local:
+                _ib_names[key] = local["name"]
+                return _ib_names[key]
+        except Exception as e:
+            log.warning(f"справочник команд Инфобаскета: {e}")
         try:
             import stats_backfill
             info = await stats_backfill.fetch_infobasket_team(team_id, comp_id)
@@ -739,22 +757,23 @@ def _season(request: web.Request) -> Optional[Dict[str, Any]]:
     return fantasy.get_active_season()
 
 
-def _can_view(user: Optional[Dict[str, Any]]) -> bool:
-    """Кто вправе ЧИТАТЬ фэнтези — любой, кто открыл приложение из бота.
+def _can_view(user: Optional[Dict[str, Any]], season: Optional[Dict[str, Any]] = None) -> bool:
+    """Кто вправе ЧИТАТЬ фэнтези: игрок команды, админ — и все желающие, если
+    лигу открыли кнопкой «Открыть для всех» в админке.
 
-    Раньше пускали только игроков команды: в пуле видны имена, а показывать их
-    посторонним не хотелось. Решение пересмотрено (04.08.2026, пользователь):
-    играть может любой желающий, и имена в пуле — те же, что открыто лежат в
-    заявках лиг на их сайтах, то есть публичный факт.
-
-    Закрытым остаётся ВСЁ КОМАНДНОЕ: раздел тренера, отчёты, посещаемость,
-    оплаты, личная статистика — у них свои проверки, к фэнтези отношения не
-    имеющие. Настройки лиги (вкладка ⚙️) по-прежнему только админу.
-
-    Подпись initData тут не «пропуск», а опознание: она подтверждает, что это
-    настоящий пользователь Telegram, открывший наше приложение, и даёт его
-    числовой id, под которым сохранится состав."""
-    return bool(user)
+    По умолчанию лига закрыта: она задумана для команды, и в пуле видны имена.
+    Открытие — сознательное решение на конкретную лигу, а не общий режим бота;
+    командные разделы (тренер, отчёты, оплаты, шутки, личная статистика) им не
+    затрагиваются вовсе, у них свои проверки."""
+    if not user:
+        return False
+    if _is_team_member(str(user.get("id")), user.get("username", "")) or _is_admin(user):
+        return True
+    try:
+        import fantasy as _f
+        return _f.is_open(season or _f.get_active_season() or {})
+    except Exception:
+        return False
 
 
 def _is_admin(user: Optional[Dict[str, Any]]) -> bool:
@@ -1058,13 +1077,24 @@ async def available_scopes() -> List[Dict[str, Any]]:
     Нужны, чтобы убранный турнир можно было ВЕРНУТЬ. Раньше интерфейс показывал
     только выбранные, и снятый со счёта турнир исчезал безвозвратно."""
     out: List[Dict[str, Any]] = []
-    # Турниры SLPRO — из листа «Конфиг» (а если он пуст, автоопределением по
-    # названию команды): и то и другое отдаёт team_contexts.
+    # Из ЛОКАЛЬНОГО справочника лиг: контекст стадии SLPRO там уже лежит
+    # (league_sync складывает его в league_teams.ctx_json). Живой запрос
+    # оставлен на случай пустого зеркала — но именно он делал открытие админки
+    # тридцатисекундным, когда лига не отвечала: у SLPRO большой таймаут, а
+    # ждал его человек перед экраном.
     try:
+        import league_sync
         import slpro_client
-        for ctx in await slpro_client.team_contexts():
-            if ctx.get("stage_id") is not None:
-                out.append(slpro_client.scope_of(ctx))
+        local = [t for t in league_sync.our_teams("slpro") if t.get("ctx")]
+        if local:
+            for t in local:
+                ctx = t["ctx"]
+                if ctx.get("stage_id") is not None:
+                    out.append(slpro_client.scope_of(ctx))
+        else:
+            for ctx in await slpro_client.team_contexts():
+                if ctx.get("stage_id") is not None:
+                    out.append(slpro_client.scope_of(ctx))
     except Exception as e:
         log.warning(f"админка: турниры SLPRO не определены: {e}")
     try:
@@ -1120,6 +1150,7 @@ async def handle_admin_state(request: web.Request) -> web.Response:
             "manual_scopes": bool(fantasy.season_scopes(s)),
             "pool_teams": teams,
             "manual_pool": bool(teams),
+            "open_to_all": fantasy.is_open(s),
             "modes": fantasy_modes.settings(s),
             "prices": fantasy_prices.describe(s),
             "all_modes": [{"id": m, "title": fantasy_modes.MODE_TITLES[m]}
@@ -1221,6 +1252,9 @@ async def handle_admin_action(request: web.Request) -> web.Response:
         payload = json.loads(out.body.decode())
         payload["recalc"] = res
         return web.json_response(payload)
+    elif action == "open_toggle":
+        season = fantasy._get_season(sid)
+        fantasy.set_open(season, not fantasy.is_open(season))
     elif action == "price_set":
         # Ручная цена игрока. Пишем в тот же столбец листа, что и автоматика:
         # лист остаётся единственным источником правды, и следующий пересчёт
@@ -1568,6 +1602,8 @@ async def handle_save_roster(request: web.Request) -> web.Response:
     season = _season(request)
     if not season:
         return web.json_response({"error": "no_active_season"}, status=400)
+    if not _can_view(user, season):
+        return web.json_response({"error": "not_a_member"}, status=403)
 
     try:
         body = await request.json()
