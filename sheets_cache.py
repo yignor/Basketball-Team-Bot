@@ -658,6 +658,35 @@ CREATE TABLE IF NOT EXISTS coach_report_sent (
     PRIMARY KEY (source, team_id, game_id)
 );
 
+-- Отрезки на площадке: когда игрок выходил и уходил. start_sec/end_sec —
+-- РЕАЛЬНЫЕ секунды от спорного мяча (не игровые), потому что запись идёт в
+-- реальном времени: по ним человек мотает видео. clock_sec — игровое время
+-- отрезка, оно нужно только для сверки с протоколом (сумма ≈ «минуты»).
+-- Имён нет, только id игрока ([[legal-data-invariant]]).
+CREATE TABLE IF NOT EXISTS game_shifts (
+    source      TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    player_id   TEXT NOT NULL,
+    period      INTEGER NOT NULL DEFAULT 0,
+    start_sec   INTEGER NOT NULL,
+    end_sec     INTEGER NOT NULL,
+    clock_sec   INTEGER NOT NULL DEFAULT 0,
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (source, game_id, player_id, start_sec)
+);
+
+-- Привязка записи ВК к игре: на какой секунде видео происходит спорный мяч.
+-- Трансляцию включают заранее и по-разному, поэтому сдвиг задаётся руками
+-- один раз на игру; пока не задан — считаем тайм-коды от спорного (0).
+CREATE TABLE IF NOT EXISTS game_video_sync (
+    source      TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    offset_sec  INTEGER NOT NULL DEFAULT 0,
+    set_by      TEXT NOT NULL DEFAULT '',
+    set_at      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (source, game_id)
+);
+
 -- Зеркало справочника команд/турниров лиги: id, название, стадия. Название
 -- команды — не персональные данные, его храним. Сюда же складываем то, что
 -- раньше резолвилось живым запросом на каждый показ (team_contexts).

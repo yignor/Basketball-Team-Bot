@@ -83,6 +83,17 @@ class FantasyRunner:
         print(f"📥 Фэнтези ingest: новых игр выкачано {n} "
               f"(турниров {len(contexts)})")
         # TODO(F1): ingest основы (Infobasket) по связке ID.
+
+        # Тайм-коды выходов на площадку: тянем протоколы тех игр, где уже есть
+        # запись ВК. Отдельным шагом и с гашением ошибок — разметка приятна, но
+        # ради неё ingest статистики падать не должен.
+        try:
+            import game_timeline
+            marked = await game_timeline.backfill(client=self.client)
+            if marked:
+                print(f"⏱ Тайм-коды: размечено игр {marked}")
+        except Exception as exc:
+            print(f"⚠️ Тайм-коды: {exc}")
         return n
 
     async def weekly(self) -> bool:

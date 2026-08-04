@@ -196,6 +196,20 @@ def digest(source: str, source_title: str, player_id: str,
                 lines.append("📉 Хуже обычного: "
                              + ", ".join(t for _, t in worse[:3]))
 
+    # Тайм-коды выходов на площадку. Появляются не сразу: разметку тянет
+    # фоновая дозагрузка после игры, и ссылка на запись ВК тоже находится не
+    # мгновенно. Нет разметки — блока просто нет.
+    try:
+        import game_timeline
+        import vk_video
+        spans = game_timeline.format_block(
+            source, str(game["game_id"]), str(player_id),
+            vk_video.link_of(source, str(game["game_id"])))
+        if spans:
+            lines += ["", spans]
+    except Exception as exc:  # разбор важнее тайм-кодов
+        logger.warning("Тайм-коды в разборе %s/%s: %s", source, game.get("game_id"), exc)
+
     lines += ["", "<i>Как часто присылать — «📊 Моя статистика» → уведомления.</i>"]
     return "\n".join(lines)
 
