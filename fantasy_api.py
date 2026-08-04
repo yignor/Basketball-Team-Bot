@@ -792,6 +792,21 @@ def _remember_price_ref(ref: str, row: int) -> None:
         log.debug(f"связка цены для {ref} не сохранилась: {e}")
 
 
+def remember_price_refs(pool: List[Dict[str, Any]]) -> int:
+    """Проставляет связки «карточка -> строка листа» для всего пула.
+
+    Зовётся демоном при прогреве: только у него тёплый реестр имён. Пересчёт
+    цен живёт в кроне, где имён нет, и без этих связок он не находит никого."""
+    prices = sheets_cache.get_player_prices()
+    done = 0
+    for card in pool:
+        pr = _lookup_price(card.get("name", ""), prices)
+        if pr.get("row"):
+            _remember_price_ref(card["ref"], int(pr["row"]))
+            done += 1
+    return done
+
+
 def price_row_of(ref: str) -> int:
     """Строка листа для карточки — по запомненной связке. 0, если её нет."""
     sheets_cache.init_db()

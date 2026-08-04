@@ -4125,6 +4125,13 @@ async def _warm_fantasy_pool(force: bool = False) -> None:
     try:
         pool = await fantasy_api.build_pool(force=True)
         log.info(f"Пул фэнтези прогрет: {len(pool)} игроков")
+        # Связки «карточка -> строка листа» умеет проставить только тот, у кого
+        # тёплый реестр имён, то есть демон. Пересчёт цен после игры идёт в
+        # кроне, где имён нет, и без связок он молча не двигает ничего.
+        import player_names as _pn
+        if not _pn.is_cold():
+            linked = await asyncio.to_thread(fantasy_api.remember_price_refs, pool)
+            log.info(f"Связок карточка→строка листа: {linked} из {len(pool)}")
         # Ссылка игрока меняется, когда бот склеил его из двух лиг. Прогрев —
         # единственное место, где точно известен свежий пул, поэтому здесь же
         # приводим сохранённые составы к новому виду: иначе у человека внезапно
