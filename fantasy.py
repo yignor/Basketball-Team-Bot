@@ -1077,22 +1077,167 @@ def display_names(user_ids: List[str]) -> Dict[str, str]:
 _MEDALS = ["🥇", "🥈", "🥉"]
 
 
-def format_weekly_table(season_id: int, week_start: str) -> str:
-    """Текст недельной таблицы для чата/лички."""
-    season = _get_season(season_id)
-    table = weekly_standings(season_id, week_start)
+TOP_PER_MODE = 5
+
+
+def _dm(iso: str) -> str:
+    """'2026-07-27' -> '27.07'. ISO-даты в заголовке недели читаются плохо."""
+    return f"{iso[8:10]}.{iso[5:7]}" if len(str(iso)) >= 10 else str(iso)
+
+
+def weekly_by_mode(season_id: int, week_start: str) -> List[Dict[str, Any]]:
+    """Недельная таблица, разложенная по режимам: [{mode, title, rows}].
+
+    Складывать режимы в один список нельзя: при лучшей игре свободный выбор
+    даёт вдвое больше бюджета, и общий зачёт становится зачётом РЕЖИМА, а не
+    людей ([[fantasy-scoring-invariant]], решение 30.07)."""
+    import fantasy_modes
     d_from, d_to = week_bounds(week_start)
-    names = display_names([r["user_id"] for r in table])
-    header = f"🏆 Фэнтези — итоги недели {d_from} – {d_to}"
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT user_id, mode, ROUND(SUM(points), 2) AS points
+               FROM fantasy_game_scores
+               WHERE season_id = ? AND game_date >= ? AND game_date <= ?
+               GROUP BY user_id, mode""",
+            (season_id, d_from, d_to)).fetchall()
+    by_mode: Dict[str, Dict[str, float]] = {}
+    for r in rows:
+        # Снимки до появления режимов лежат с пустым mode — тогда играли
+        # только свободным, иначе те же люди пошли бы двумя блоками.
+        mode = str(r["mode"] or "") or fantasy_modes.FREE
+        by_mode.setdefault(mode, {})[str(r["user_id"])] = float(r["points"] or 0)
+    out = []
+    for mode, points in by_mode.items():
+        table = sorted(({"user_id": uid, "points": pts} for uid, pts in points.items()),
+                       key=lambda x: -x["points"])
+        out.append({"mode": mode,
+                    "title": fantasy_modes.MODE_TITLES.get(mode) or "Свободный",
+                    "rows": table})
+    out.sort(key=lambda m: -len(m["rows"]))
+    return out
+
+
+def format_weekly_table(season_id: int, week_start: str) -> str:
+    """Текст недельной таблицы для чата/лички — по блоку на каждый режим."""
+    season = _get_season(season_id)
+    d_from, d_to = week_bounds(week_start)
+    header = f"🏆 Фэнтези — итоги недели {_dm(d_from)} – {_dm(d_to)}"
     if season:
-        header = f"🏆 Фэнтези «{season['name']}» — неделя {d_from} – {d_to}"
-    if not table:
+        header = f"🏆 Фэнтези «{season['name']}» — неделя {_dm(d_from)} – {_dm(d_to)}"
+
+    blocks = weekly_by_mode(season_id, week_start)
+    if not blocks:
+        # Составы были, очков нет — значит на неделе просто не играли.
+        if weekly_standings(season_id, week_start):
+            return header + "\n\nНа этой неделе игр не было — очки не начислялись."
         return header + "\n\nНа этой неделе никто не набрал состав."
-    lines = [header, ""]
-    for i, r in enumerate(table):
-        place = _MEDALS[i] if i < 3 else f"{i + 1}."
-        name = names.get(str(r["user_id"]), f"Участник {r['user_id']}")
-        lines.append(f"{place} {name} — {r['points']:g}")
+
+    names = display_names([r["user_id"] for b in blocks for r in b["rows"]])
+    lines = [header]
+    single = len(blocks) == 1
+    for b in blocks:
+        lines.append("")
+        if not single:
+            lines.append(f"▫️ {b['title']}")
+        for i, r in enumerate(b["rows"][:TOP_PER_MODE]):
+            place = _MEDALS[i] if i < 3 else f"{i + 1}."
+            name = names.get(str(r["user_id"]), f"Участник {r['user_id']}")
+            lines.append(f"{place} {name} — {r['points']:g}")
+        left = len(b["rows"]) - TOP_PER_MODE
+        if left > 0:
+            lines.append(f"… и ещё {left} — вся таблица в приложении")
+    return "\n".join(lines)
+
+
+SOURCE_TITLES = {"slpro": "СЛПРО", "infobasket": "Инфобаскет"}
+
+
+def weekly_personal(season_id: int, week_start: str, tg_user_id: Any
+                    ) -> List[Dict[str, Any]]:
+    """Разбивка недели для одного человека — по играм.
+
+    На каждую игру два числа: сколько принёс его СОСТАВ (он как участник) и
+    сколько он набрал САМ (он как игрок). Это разные вещи, и складывать их
+    нельзя: можно выбрать удачный состав и не выйти на площадку.
+
+    [{date, source, title, opponent, picked, played}] — только те игры, где
+    есть хоть одно из двух."""
+    uid = str(tg_user_id)
+    d_from, d_to = week_bounds(week_start)
+    sheets_cache.init_db()
+    games: Dict[tuple, Dict[str, Any]] = {}
+
+    with sheets_cache.get_connection() as conn:
+        # Как участник: снимок очков его состава по каждой игре.
+        for r in conn.execute(
+                """SELECT source, game_id, game_date, points FROM fantasy_game_scores
+                   WHERE season_id = ? AND user_id = ?
+                     AND game_date >= ? AND game_date <= ?""",
+                (season_id, uid, d_from, d_to)):
+            key = (str(r["source"]), str(r["game_id"]))
+            games.setdefault(key, {"date": str(r["game_date"] or ""),
+                                   "source": key[0], "picked": 0.0, "played": 0.0})
+            games[key]["picked"] = round(float(r["points"] or 0), 1)
+
+        # Как игрок: его собственная строка в протоколе той же недели.
+        import player_identity
+        for ident in player_identity.get_identities(uid):
+            src, pid = str(ident["source"]), str(ident["player_id"])
+            for r in conn.execute(
+                    """SELECT * FROM game_player_stats
+                       WHERE source = ? AND player_id = ?
+                         AND game_date >= ? AND game_date <= ?""",
+                    (src, pid, d_from, d_to)):
+                key = (src, str(r["game_id"]))
+                games.setdefault(key, {"date": str(r["game_date"] or ""),
+                                       "source": src, "picked": 0.0, "played": 0.0})
+                games[key]["played"] = round(
+                    fantasy_stats.fantasy_points(dict(r)), 1)
+
+        # Соперник — из протокола игры, чтобы строка читалась без гадания.
+        for (src, gid), item in games.items():
+            meta = conn.execute(
+                """SELECT home_name, guest_name FROM game_meta
+                   WHERE source = ? AND game_id = ?""", (src, gid)).fetchone()
+            item["opponent"] = ""
+            if meta:
+                item["opponent"] = " — ".join(
+                    x for x in (str(meta["home_name"] or ""),
+                                str(meta["guest_name"] or "")) if x)
+            item["title"] = SOURCE_TITLES.get(src, src)
+
+    out = [g for g in games.values() if g["picked"] or g["played"]]
+    out.sort(key=lambda g: g["date"])
+    return out
+
+
+def format_weekly_personal(season_id: int, week_start: str, tg_user_id: Any) -> str:
+    """Личная разбивка по играм. Пусто — значит человек на этой неделе не
+    выбирал и не играл, и слать ему нечего."""
+    rows = weekly_personal(season_id, week_start, tg_user_id)
+    if not rows:
+        return ""
+    d_from, d_to = week_bounds(week_start)
+    lines = [f"📅 Твоя неделя {_dm(d_from)} – {_dm(d_to)}", ""]
+    total_picked = total_played = 0.0
+    for g in rows:
+        when = f"{g['date'][8:10]}.{g['date'][5:7]}" if len(g["date"]) >= 10 else ""
+        head = f"Игра {g['title']}"
+        if when:
+            head += f" · {when}"
+        parts = []
+        if g["picked"]:
+            parts.append(f"{g['picked']:g} за выбор")
+        if g["played"]:
+            parts.append(f"{g['played']:g} за игру")
+        lines.append(f"• {head} — " + " и ".join(parts))
+        if g.get("opponent"):
+            lines.append(f"    {g['opponent']}")
+        total_picked += g["picked"]
+        total_played += g["played"]
+    lines.append("")
+    lines.append(f"Итого: {total_picked:g} как участник, {total_played:g} как игрок.")
     return "\n".join(lines)
 
 

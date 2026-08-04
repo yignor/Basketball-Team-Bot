@@ -119,7 +119,35 @@ class FantasyRunner:
             participants = subscriptions.filter_subscribed(participants, "fantasy")
             sent_dm = await self._send_dms(participants, text, with_fantasy_button=True)
             print(f"📊 «{season['name']}»: таблица в {len(chat_ids)} чат(ов), личка {sent_dm}/{len(participants)}")
+            personal = await self._send_personal(season, report_week, participants)
+            print(f"📨 «{season['name']}»: личных разбивок по играм — {personal}")
         return True
+
+    async def _send_personal(self, season: Any, week: str,
+                             participants: List[str]) -> int:
+        """Каждому — разбивка по играм недели: сколько принёс его состав и
+        сколько он набрал сам.
+
+        Шлём не только участникам: человек мог не собирать состав, но играть —
+        его очки как игрока тоже интересны. А кто не делал ни того, ни
+        другого, сообщения не получит вовсе (format_weekly_personal вернёт
+        пустую строку)."""
+        import player_identity
+        import subscriptions
+        who = list(dict.fromkeys(list(participants) + player_identity.linked_users()))
+        who = subscriptions.filter_subscribed(who, "fantasy")
+        sent = 0
+        for uid in who:
+            try:
+                text = fantasy.format_weekly_personal(season["id"], week, uid)
+            except Exception as e:
+                print(f"⚠️ Личная разбивка для {uid} не собралась: {e}")
+                continue
+            if not text:
+                continue
+            if await self._send_dms([uid], text):
+                sent += 1
+        return sent
 
     async def _refresh_auto_scopes(self, season: Any) -> None:
         """Обновляет «лиги, в которых команда играет сейчас» — SLPRO активная
