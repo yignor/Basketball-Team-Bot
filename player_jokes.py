@@ -343,8 +343,11 @@ class Jokes:
         # ВСЁ сообщение, и команда осталась бы без счёта из-за одной шутки.
         text = html.escape(pick["text"])
         nick = html.escape(pick["author_nick"])
-        sign = f" (с) @{nick}" if nick else ""
-        return f" · {text}{sign}"
+        sign = f" — @{nick}" if nick else ""
+        # Своей строкой, а не хвостом к статистике. В строку «🏀 Штрафные:
+        # Иванов - 40% · фраза (с) @ник» фраза не читалась вовсе: глаз ищет в
+        # блоке цифры и проскакивает всё, что стоит после них.
+        return f"\n     💬 <i>{text}</i>{sign}"
 
 
 def decorate(name: str, won: Optional[bool]) -> str:
