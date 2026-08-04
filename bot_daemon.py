@@ -1316,6 +1316,10 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
         text, markup = await asyncio.to_thread(_my_games_video, uid)
         await query.edit_message_text(text, reply_markup=markup)
         return
+    if len(parts) >= 5 and parts[1] == "vidt":
+        _awaiting_video[uid] = f"rep:{parts[2]}:{parts[3]}:{parts[4]}"
+        await query.edit_message_text(VIDTIME_ASK)
+        return
     if len(parts) >= 5 and parts[1] == "vidg":
         text, markup = await asyncio.to_thread(_my_video_game, parts[2], parts[3], parts[4])
         await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML",
@@ -1898,6 +1902,12 @@ def _render_bot_users_page(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup([r for r in rows if r])
 
 
+def game_timeline_drop(source: str, game_id: str) -> None:
+    """Снять ручную привязку. Обёртка, чтобы не тащить импорт в роутер."""
+    import game_timeline
+    game_timeline.drop_offset(source, game_id)
+
+
 # ─── привязка записей ВК ────────────────────────────────────────────────────
 #
 # Тайм-коды бот считает от начала эфира (ВК говорит, когда включили) и времени
@@ -1941,21 +1951,28 @@ def _video_screen() -> Tuple[str, InlineKeyboardMarkup]:
             state = f"{game_timeline.hhmmss(off)} ({way})"
         lines.append(f"• {day} · {title} — {state}")
         if g["shifts"]:
-            rows.append([InlineKeyboardButton(
-                f"{day} · {title}"[:60],
-                callback_data=f"admin:video:set:{g['source']}:{g['game_id']}")])
-    lines += ["", "Нажми на игру, если время не сходится с записью."]
+            row = [InlineKeyboardButton(
+                f"{day} · {title}"[:56],
+                callback_data=f"admin:video:set:{g['source']}:{g['game_id']}")]
+            if game_timeline.offset_kind(g["source"], g["game_id"]) == "hand":
+                row.append(InlineKeyboardButton(
+                    "↩︎", callback_data=f"admin:video:auto:{g['source']}:{g['game_id']}"))
+            rows.append(row)
+    lines += ["", "Нажми на игру, если время не сходится с записью. "
+              "↩︎ рядом с игрой — снять ручную привязку и вернуть автоматику."]
     rows += back
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 async def handle_video_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Время спорного мяча, присланное админом после выбора игры."""
+    """Время спорного мяча: и из админки, и из «🎬 Я в записи» у игрока."""
     import game_timeline
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_video:
         return
-    if not _is_admin(user):
+    pending = _awaiting_video[user.id]
+    from_player = pending.startswith("rep:")
+    if not from_player and not _is_admin(user):
         _awaiting_video.pop(user.id, None)
         return
     seconds = game_timeline.parse_offset(msg.text or "")
@@ -1963,12 +1980,27 @@ async def handle_video_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await msg.reply_text("Не понял время. Как на плеере: «5:33» или "
                              "«1:02:15». Передумал — /start.")
         raise ApplicationHandlerStop
-    source, game_id = _awaiting_video.pop(user.id).split(":", 1)
-    await asyncio.to_thread(game_timeline.set_offset, source, game_id, seconds, "hand")
-    text, markup = await asyncio.to_thread(_video_screen)
-    await msg.reply_text(
-        f"Готово: спорный на {game_timeline.hhmmss(seconds)}.\n\n{text}",
-        reply_markup=markup)
+
+    _awaiting_video.pop(user.id, None)
+    if from_player:
+        _, source, game_id, player_id = pending.split(":", 3)
+    else:
+        source, game_id = pending.split(":", 1)
+        player_id = ""
+    await asyncio.to_thread(game_timeline.set_offset, source, game_id, seconds,
+                            f"hand:{user.id}")
+    if from_player:
+        # Сразу показываем пересчитанные выходы: правку видно на своих же
+        # тайм-кодах, а не «где-то потом».
+        text, markup = await asyncio.to_thread(_my_video_game, source, game_id, player_id)
+        await msg.reply_text(f"Готово, пересчитал от {game_timeline.hhmmss(seconds)}.\n\n{text}",
+                             reply_markup=markup, parse_mode="HTML",
+                             disable_web_page_preview=True)
+    else:
+        text, markup = await asyncio.to_thread(_video_screen)
+        await msg.reply_text(
+            f"Готово: спорный на {game_timeline.hhmmss(seconds)}.\n\n{text}",
+            reply_markup=markup)
     raise ApplicationHandlerStop
 
 
@@ -2887,9 +2919,22 @@ def _my_video_game(source: str, game_id: str, player_id: str) -> Tuple[str, Inli
             head += f" {meta['home_score']}:{meta['guest_score']}"
     text = f"{head}\n\n{block}" if block else (
         f"{head}\n\nВ этой игре разметки нет — протокол лиги не размечен.")
-    return text, InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ К списку игр", callback_data="rep:vid")],
-        [InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")]])
+    rows = []
+    if block:
+        # Поправить может любой, кто смотрит запись: сверять время с табло
+        # умеет только человек. Введённое действует для всех и переживает
+        # автоматические пересчёты.
+        rows.append([InlineKeyboardButton(
+            "⏱ Время не сходится", callback_data=f"rep:vidt:{source}:{game_id}:{player_id}")])
+    rows.append([InlineKeyboardButton("⬅️ К списку игр", callback_data="rep:vid")])
+    rows.append([InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+VIDTIME_ASK = ("⏱ Открой запись и найди спорный мяч — момент, с которого "
+               "пошла игра.\n\nПришли его время с плеера: «5:33» или "
+               "«1:02:15».\n\nВсе выходы этой игры пересчитаю от него — и "
+               "у тебя, и у остальных.\n\nПередумал — /start.")
 
 
 def _games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -3743,7 +3788,11 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         if parts[1] == "video":
             what = parts[2] if len(parts) > 2 else "list"
-            if what == "set" and len(parts) > 4:
+            if what == "auto" and len(parts) > 4:
+                await asyncio.to_thread(game_timeline_drop, parts[3], parts[4])
+                text, markup = await asyncio.to_thread(_video_screen)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif what == "set" and len(parts) > 4:
                 _awaiting_video[user.id] = f"{parts[3]}:{parts[4]}"
                 await query.edit_message_text(VIDEO_ASK)
             else:

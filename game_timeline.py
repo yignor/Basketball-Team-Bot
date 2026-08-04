@@ -95,6 +95,8 @@ NOTE_EXACT = ("<i>Время считаем от начала эфира: ког
               "и когда в протоколе пошли часы.</i>")
 NOTE_GUESS = ("<i>Начало эфира неизвестно, считаем от времени по расписанию — "
               "возможно смещение на минуту-другую.</i>")
+NOTE_HAND = ("<i>Время начала матча выставлено вручную по записи — "
+             "если не сходится, поправь кнопкой ниже.</i>")
 
 
 # ───────────────────────────── Infobasket ──────────────────────────────────
@@ -637,6 +639,15 @@ def _remember_tipoff(source: str, game_id: Any, tipoff_at: float) -> None:
         conn.commit()
 
 
+def drop_offset(source: str, game_id: Any) -> None:
+    """Снимает ручную привязку — сдвиг снова посчитает автоматика."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM game_video_sync WHERE source = ? AND game_id = ?",
+                     (source, str(game_id)))
+        conn.commit()
+
+
 def parse_offset(text: str) -> Optional[int]:
     """«5:33», «1:02:15» или «333» → секунды. None — если не разобрали."""
     raw = str(text or "").strip().replace(",", ":").replace(".", ":")
@@ -704,13 +715,14 @@ def vk_link(video_url: str, seconds: int) -> str:
 
 
 def offset_kind(source: str, game_id: Any) -> str:
-    """Чем меряли сдвиг: «vk» — по началу эфира, «auto» — по расписанию."""
+    """Чем меряли сдвиг: vk — по началу эфира, auto — по расписанию,
+    hand — выставлено человеком (за двоеточием остаётся, кем именно)."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             "SELECT set_by FROM game_video_sync WHERE source = ? AND game_id = ?",
             (source, str(game_id))).fetchone()
-    return str(row["set_by"]) if row else ""
+    return str(row["set_by"]).split(":")[0] if row else ""
 
 
 def timecodes(source: str, game_id: Any, player_id: Any,
@@ -771,5 +783,7 @@ def format_block(source: str, game_id: Any, player_id: Any,
         lines.append(f"…и ещё {len(shown) - max_items}")
     if total:
         lines.append(f"Итого {total // 60} мин игрового времени")
-    lines.append(NOTE_EXACT if offset_kind(source, game_id) == "vk" else NOTE_GUESS)
+    kind = offset_kind(source, game_id)
+    lines.append(NOTE_HAND if kind == "hand"
+                 else NOTE_EXACT if kind == "vk" else NOTE_GUESS)
     return "\n".join(lines)
