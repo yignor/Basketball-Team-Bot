@@ -312,6 +312,31 @@ def debtors(source: str, game_id: str) -> List[Dict[str, Any]]:
     return out
 
 
+def game_debts() -> List[Dict[str, Any]]:
+    """Кто и за сколько игр должен — по всем объявленным составам.
+
+    Считаем по человеку целиком, а не по играм: оплаты ложатся на игры по
+    порядку, и «должен за две игры» понятнее, чем список матчей."""
+    sheets_cache.init_db()
+    out: List[Dict[str, Any]] = []
+    with sheets_cache.get_connection() as conn:
+        rows = [int(r["player_row"]) for r in conn.execute(
+            "SELECT DISTINCT player_row FROM game_rosters")]
+    for row in rows:
+        played = [g for g in _played_games(row)
+                  if g[2] >= PAY_SINCE and is_posted(g[0], g[1])]
+        owed = len(played) - _paid_games(row)
+        if owed <= 0:
+            continue
+        player = coach_payments.player_by_row(row) or {}
+        price = coach_payments.game_price(player)
+        out.append({"row": row, "title": player.get("title") or f"строка {row}",
+                    "games": owed, "amount": owed * price,
+                    "last": played[-1][2] if played else ""})
+    out.sort(key=lambda x: -x["amount"])
+    return out
+
+
 def mark_paid(player_row: int, source: str, game_id: str, by: str = "") -> Dict[str, Any]:
     """Тренер отметил оплату игры без СМС."""
     player = coach_payments.player_by_row(player_row)

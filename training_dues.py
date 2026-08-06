@@ -32,6 +32,8 @@ FIRST_PERIOD = "2026-09"
 
 # Середина месяца — 15-е; предупреждение тренеру за три дня до неё.
 MID_DAY = 15
+# 25-е число: напоминаем про следующий месяц заранее.
+AHEAD_DAY = 25
 COACH_WARN_BEFORE_MID = 3
 COACH_REPORT_BEFORE_END = 2
 
@@ -160,14 +162,23 @@ def coach_report(period: str, when: str = "end") -> str:
     return "\n".join(lines)
 
 
-def player_reminder(row: Dict[str, Any]) -> str:
-    """Напоминание самому игроку. Без счетов и претензий — просто факт."""
-    title = month_title(row["period"])
-    sum_line = (f"{row['debt']} ₽" if not row["paid"]
-                else f"{row['debt']} ₽ (внесено {row['paid']} из {row['need']})")
-    return (f"💰 Взнос за тренировки, {title}: {sum_line}.\n\n"
-            "Как переведёшь — просто скинь чек тренеру, он отметит. "
-            "Если уже оплатил, ничего делать не надо.")
+def player_reminder(row: Dict[str, Any], ahead: bool = False) -> str:
+    """Личное напоминание игроку. ahead — про следующий месяц, заранее.
+
+    Заранее и по факту — разные разговоры: в первом случае человек ничего не
+    нарушил, и требовать с него нечего."""
+    # В строке лежит «need» (сколько ждём) — «price» тут не было никогда, и
+    # сумма в напоминании молча не показывалась.
+    money = int(row.get("need") or row.get("pay_season") or 0)
+    sum_part = f" — {money} ₽" if money else ""
+    if ahead:
+        return (f"🏋️ Взнос за тренировки на {month_title(row['period'])}"
+                f"{sum_part}.\n\n"
+                f"Напоминаю заранее: за зал платим вперёд, до начала месяца. "
+                f"Реквизиты у тренера.")
+    return (f"🏋️ Взнос за тренировки за {month_title(row['period'])}"
+            f"{sum_part}.\n\n"
+            f"Если уже переводил — просто скажи тренеру, отмечу.")
 
 
 def delivery_report(period: str, sent: List[str], failed: List[str],
@@ -215,6 +226,13 @@ def due_events(today: Optional[date] = None) -> List[Tuple[str, str, str]]:
     # Середина месяца — второе напоминание должникам.
     if today.day == MID_DAY and counts(cur):
         out.append((f"train:{cur}:player_mid", cur, "player_mid"))
+
+    # 25-е — всем активным напоминание про СЛЕДУЮЩИЙ месяц. Это не про долг:
+    # человек ещё ничего не должен, но за зал платят вперёд, и тренеру важно
+    # собрать деньги до начала месяца, а не догонять их в середине.
+    nxt = next_period(cur)
+    if today.day == AHEAD_DAY and counts(nxt):
+        out.append((f"train:{nxt}:player_ahead", nxt, "player_ahead"))
     return out
 
 

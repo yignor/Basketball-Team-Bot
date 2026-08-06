@@ -516,6 +516,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _pay_draft.pop(user.id, None)
     _awaiting_video.pop(user.id, None)
     _awaiting_field.pop(user.id, None)
+    _awaiting_money.pop(user.id, None)
 
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
@@ -2083,6 +2084,71 @@ def _video_screen() -> Tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
+async def _rebuild_payments_sheet() -> None:
+    """Пересобрать лист «Оплаты» после отмены платежа.
+
+    Сводка считается из базы, но лежит в таблице: без пересборки там осталась
+    бы сумма, которой в базе уже нет, и тренер видел бы призрак."""
+    import coach_payments
+    try:
+        import report_common
+        book = await asyncio.to_thread(report_common.init_sheets)
+        await asyncio.to_thread(coach_payments.build_summary_sheet, book)
+    except Exception as e:
+        log.warning(f"Лист «Оплаты» не пересобран: {e}")
+
+
+async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Суммы, которые тренер вводит руками: новый долг или размер взноса."""
+    import coach_payments
+    import sheets_cache
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_money:
+        return
+    if not _can_see_reports(user):
+        _awaiting_money.pop(user.id, None)
+        return
+    pending = _awaiting_money[user.id]
+    text = (msg.text or "").strip()
+    m = re.match(r"^\s*(\d{1,7})\s*(.*)$", text)
+    if not m:
+        await msg.reply_text("Нужна сумма числом: «500» или «500 мяч». "
+                             "Передумал — /start.")
+        raise ApplicationHandlerStop
+    amount, note = int(m.group(1)), m.group(2).strip()
+    _awaiting_money.pop(user.id, None)
+
+    if pending.startswith("debt:"):
+        row = int(pending.split(":", 1)[1])
+        await asyncio.to_thread(coach_payments.add_debt, row, amount, note, str(user.id))
+        who = await asyncio.to_thread(coach_payments.player_by_row, row)
+        head = (f"Добавил долг: {(who or {}).get('title', '')} — {amount} ₽"
+                + (f" ({note})" if note else ""))
+        screen, markup = await asyncio.to_thread(_debts_screen)
+        await msg.reply_text(f"{head}\n\n{screen}", reply_markup=markup,
+                             parse_mode="HTML")
+        raise ApplicationHandlerStop
+
+    _, row_s, field = pending.split(":", 2)
+    person = await asyncio.to_thread(coach_payments.player_by_row, int(row_s))
+    try:
+        import report_common
+        book = await asyncio.to_thread(report_common.init_sheets)
+        ok = await asyncio.to_thread(sheets_cache.write_player_field, book,
+                                     int(row_s), field, amount,
+                                     (person or {}).get("title", ""))
+    except Exception as e:
+        log.warning(f"Правка суммы игрока: {e}")
+        ok = False
+    if not ok:
+        await msg.reply_text("Таблица не приняла запись — проверь доступ бота "
+                             "к листу «Игроки».")
+        raise ApplicationHandlerStop
+    screen, markup = await asyncio.to_thread(_sums_screen, int(row_s))
+    await msg.reply_text(f"Записал {amount} ₽.\n\n{screen}", reply_markup=markup)
+    raise ApplicationHandlerStop
+
+
 async def handle_video_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Время спорного мяча: и из админки, и из «🎬 Я в записи» у игрока."""
     import game_timeline
@@ -2983,9 +3049,140 @@ def _coach_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
         [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games")],
         [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
-        [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe")],
-        [InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
+        [InlineKeyboardButton("💸 Долги", callback_data="coach:debts"),
+         InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")],
+        [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe"),
+         InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
+        [InlineKeyboardButton("✏️ Изменить суммы", callback_data="coach:sums"),
+         InlineKeyboardButton("🗑 Удалить оплату", callback_data="coach:delpay")],
     ])
+
+
+# Что тренер сейчас вводит: id → «долг:строка» или «сумма:строка:вид».
+_awaiting_money: Dict[int, str] = {}
+
+
+def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто и сколько должен — тремя блоками: тренировки, игры, добавленное.
+
+    Показываем только тех, с кого действительно ждём: без проставленной суммы
+    взноса человек не должник, а игры считаются лишь по объявленным составам
+    начиная с даты, с которой действует порядок."""
+    import coach_payments
+    import game_roster
+    import training_dues
+    from datetime import date as _date
+
+    lines = ["💸 Долги", ""]
+    # Тренировки: все месяцы, которые уже считаются, от первого до текущего.
+    train: List[Tuple[str, List[Dict[str, Any]]]] = []
+    period = training_dues.FIRST_PERIOD
+    cur = training_dues.period_of(_date.today())
+    while period <= cur:
+        if training_dues.counts(period):
+            debtors = training_dues.debtors(period)
+            if debtors:
+                train.append((period, debtors))
+        period = training_dues.next_period(period)
+
+    lines.append("🏋️ <b>За тренировки</b>")
+    if train:
+        for per, people in train:
+            lines.append(f"   {training_dues.month_title(per)}:")
+            for r in people:
+                lines.append(f"   • {r['title']} — {r['debt']} ₽")
+    else:
+        lines.append("   Никто не должен.")
+
+    games = game_roster.game_debts()
+    lines += ["", "🏀 <b>За игры</b>"]
+    if games:
+        for g in games:
+            lines.append(f"   • {g['title']} — {g['games']} "
+                         f"{_plural(g['games'], 'игра', 'игры', 'игр')}, {g['amount']} ₽")
+    else:
+        lines.append("   Никто не должен.")
+
+    extra = coach_payments.extra_debts()
+    if extra:
+        lines += ["", "📌 <b>Добавлено вручную</b>"]
+        for d in extra:
+            who = (coach_payments.player_by_row(d["player_row"]) or {}).get("title", "?")
+            note = f" — {d['note']}" if d["note"] else ""
+            lines.append(f"   • {who}: {d['amount']} ₽{note}")
+
+    total = (sum(r["debt"] for _, people in train for r in people)
+             + sum(g["amount"] for g in games)
+             + sum(d["amount"] for d in extra))
+    lines += ["", f"Итого: {total} ₽" if total else "Долгов нет."]
+
+    rows = [[InlineKeyboardButton(f"✅ Погасить: {(coach_payments.player_by_row(d['player_row']) or {}).get('title', '?')}"[:60],
+                                  callback_data=f"coach:closedebt:{d['id']}")]
+            for d in extra[:5]]
+    rows.append([InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _sums_screen(row: Optional[int] = None) -> Tuple[str, InlineKeyboardMarkup]:
+    """Сколько ждём с человека: взнос за тренировки и цена игры."""
+    import coach_payments
+    if row is None:
+        people = coach_payments.players()
+        lines = ["✏️ Изменить суммы", "",
+                 "Что бот ждёт с человека. Правится здесь же, в таблицу лезть "
+                 "не надо.", ""]
+        rows = []
+        for p in people[:PLAYERS_PER_PAGE]:
+            lines.append(f"• {p['title']}: тренировки {p['pay_season'] or '—'} ₽ · "
+                         f"игра {p['pay_game'] or '—'} ₽")
+            rows.append([InlineKeyboardButton(p["title"][:60],
+                                              callback_data=f"coach:sums:{p['row']}")])
+        if len(people) > PLAYERS_PER_PAGE:
+            lines.append(f"…и ещё {len(people) - PLAYERS_PER_PAGE} — "
+                         f"жми «👤 Другой игрок»")
+            rows.append([InlineKeyboardButton("👤 Другой игрок", callback_data="coach:sumswho")])
+        rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    p = coach_payments.player_by_row(int(row))
+    if not p:
+        return "Не нашёл игрока.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К списку", callback_data="coach:sums")]])
+    lines = [f"👤 {p['title']}", "",
+             f"🏋️ Взнос за тренировки: {p['pay_season'] or 'не задан'} ₽",
+             f"🏀 Оплата игры: {p['pay_game'] or 'не задана'} ₽", "",
+             "Что поменять?"]
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏋️ Тренировки", callback_data=f"coach:setsum:{row}:season"),
+         InlineKeyboardButton("🏀 Игра", callback_data=f"coach:setsum:{row}:game")],
+        [InlineKeyboardButton("⬅️ К списку", callback_data="coach:sums")]])
+
+
+def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Последние платежи с возможностью отменить ошибочный."""
+    import coach_payments
+    items = coach_payments.recent_payments(limit=8)
+    if not items:
+        return ("🗑 Удалить оплату\n\nПлатежей пока нет.",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ В раздел", callback_data="coach:main")]]))
+    lines = ["🗑 Удалить оплату", "",
+             "Отменяем ошибочные: тест, ложное срабатывание, возврат части "
+             "суммы. Запись уходит из расчётов, в листе «Логи оплаты» строка "
+             "остаётся историей.", ""]
+    rows = []
+    for it in items:
+        what = ("игра" if it["kind"] == coach_payments.KIND_GAME else
+                "тренировки" if it["kind"] == coach_payments.KIND_SEASON else "?")
+        extra = f" ×{it['games']}" if it["games"] else ""
+        lines.append(f"• {coach_payments._human_date(it['paid_at'])} — {it['title']}: "
+                     f"{it['amount']} ₽ ({what}{extra})")
+        rows.append([InlineKeyboardButton(
+            f"🗑 {it['title']} · {it['amount']} ₽"[:60],
+            callback_data=f"coach:delpay:{it['id']}")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _my_games_video(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -3236,9 +3433,13 @@ async def handle_coach_button(update: Update, context: ContextTypes.DEFAULT_TYPE
     raise ApplicationHandlerStop
 
 
-def _pay_players_markup(page: int = 0, query: str = "") -> InlineKeyboardMarkup:
+def _pay_players_markup(page: int = 0, query: str = "",
+                        pick: str = "coach:pick") -> InlineKeyboardMarkup:
     """Выбор игрока списком. Страницами: тридцать кнопок разом Telegram
-    покажет, но попасть в нужную пальцем уже нельзя."""
+    покажет, но попасть в нужную пальцем уже нельзя.
+
+    pick — куда ведёт нажатие: тот же список нужен и для оплаты, и для долга,
+    и для правки сумм, менялся только адрес."""
     import coach_payments
     # Все из листа: за игру может заплатить и тот, кто сейчас не тренируется.
     people = coach_payments.players()
@@ -3249,7 +3450,7 @@ def _pay_players_markup(page: int = 0, query: str = "") -> InlineKeyboardMarkup:
     pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
     page = max(0, min(page, pages - 1))
     chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
-    rows = [[InlineKeyboardButton(p["title"][:60], callback_data=f"coach:pick:{p['row']}")]
+    rows = [[InlineKeyboardButton(p["title"][:60], callback_data=f"{pick}:{p['row']}")]
             for p in chunk]
     if pages > 1:
         nav = []
@@ -3624,6 +3825,61 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif what == "games":
             text, markup = await asyncio.to_thread(_games_screen)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "debts":
+            text, markup = await asyncio.to_thread(_debts_screen)
+            await query.edit_message_text(text, reply_markup=markup,
+                                          parse_mode="HTML")
+
+        elif what == "closedebt" and len(parts) > 2:
+            import coach_payments
+            await asyncio.to_thread(coach_payments.close_debt, int(parts[2]))
+            await query.answer("Погашен")
+            text, markup = await asyncio.to_thread(_debts_screen)
+            await query.edit_message_text(text, reply_markup=markup,
+                                          parse_mode="HTML")
+
+        elif what == "adddebt":
+            # Сначала кому, потом сколько: список тот же, что при оплате.
+            markup = await asyncio.to_thread(_pay_players_markup, 0, "", "coach:debtwho")
+            await query.edit_message_text("➕ Кому добавить долг?", reply_markup=markup)
+
+        elif what == "debtwho" and len(parts) > 2:
+            _awaiting_money[user.id] = f"debt:{parts[2]}"
+            import coach_payments
+            who = await asyncio.to_thread(coach_payments.player_by_row, int(parts[2]))
+            await query.edit_message_text(
+                f"➕ Долг для {(who or {}).get('title', '')}.\n\n"
+                "Пришли сумму и за что: «500 мяч» или просто «500».\n\n"
+                "Передумал — /start.")
+
+        elif what == "sums":
+            row = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+            text, markup = await asyncio.to_thread(_sums_screen, row)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "sumswho":
+            markup = await asyncio.to_thread(_pay_players_markup, 0, "", "coach:sums")
+            await query.edit_message_text("👤 Чьи суммы меняем?", reply_markup=markup)
+
+        elif what == "setsum" and len(parts) > 3:
+            _awaiting_money[user.id] = f"sum:{parts[2]}:{parts[3]}"
+            what_title = ("взнос за тренировки" if parts[3] == "season"
+                          else "оплату одной игры")
+            await query.edit_message_text(
+                f"✏️ Пришли новую сумму — {what_title}, только число.\n\n"
+                "Передумал — /start.")
+
+        elif what == "delpay":
+            if len(parts) > 2 and parts[2].isdigit():
+                import coach_payments
+                ok = await asyncio.to_thread(coach_payments.delete, int(parts[2]))
+                await query.answer("Удалил" if ok else "Уже удалён")
+                # Лист «Оплаты» пересобирается из базы — иначе в сводке
+                # осталась бы сумма, которой больше нет.
+                asyncio.create_task(_rebuild_payments_sheet())
+            text, markup = await asyncio.to_thread(_delpay_screen)
             await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "train":
@@ -4337,7 +4593,10 @@ async def _pay_schedule(app: Application) -> None:
                                         f"тренерам: {sent}")
                 log.info(f"Взносы {period}: {kind} ушло тренерам ({sent})")
             else:
-                stat = await _remind_players(app, period)
+                # «Заранее» шлём ВСЕМ активным, а не должникам: за следующий
+                # месяц ещё никто не должен, и списка должников там просто нет.
+                stat = await _remind_players(app, period,
+                                             ahead=(kind == "player_ahead"))
                 report = await asyncio.to_thread(
                     training_dues.delivery_report, period, stat["sent"],
                     stat["failed"], stat["unknown"])
@@ -4432,18 +4691,24 @@ async def _tell_coaches(app: Application, text: str,
     return sent
 
 
-async def _remind_players(app: Application, period: str) -> Dict[str, List[str]]:
-    """Напоминание должникам. Возвращает, кому дошло, а кому нет и почему."""
+async def _remind_players(app: Application, period: str,
+                          ahead: bool = False) -> Dict[str, List[str]]:
+    """Напоминание об оплате тренировок. Кому дошло, а кому нет и почему.
+
+    ahead=True — рассылка 25-го числа про следующий месяц: адресаты не
+    должники (их ещё нет), а все, с кого взнос ждём вообще."""
     import training_dues
     stat: Dict[str, List[str]] = {"sent": [], "failed": [], "unknown": []}
-    for row in await asyncio.to_thread(training_dues.debtors, period):
+    people = (await asyncio.to_thread(training_dues.status, period) if ahead
+              else await asyncio.to_thread(training_dues.debtors, period))
+    for row in people:
         uid = await asyncio.to_thread(training_dues.chat_id_of, row["row"])
         if not uid:
             stat["unknown"].append(row["title"])
             continue
         try:
-            await app.bot.send_message(chat_id=int(uid),
-                                       text=training_dues.player_reminder(row))
+            await app.bot.send_message(
+                chat_id=int(uid), text=training_dues.player_reminder(row, ahead))
             stat["sent"].append(row["title"])
         except Exception as e:
             log.info(f"Напоминание {row['title']} не доставлено: {e}")
@@ -4801,6 +5066,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_field_text), group=8)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_money_text), group=9)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))

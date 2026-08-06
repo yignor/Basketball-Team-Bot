@@ -538,6 +538,59 @@ def record(player_row: int, amount: int, kind: str, games: int,
             "game_ref": game_ref, "by_coach": by_coach, "duplicate": False}
 
 
+# ─────────────────────── Долги, добавленные руками ──────────────────────────
+
+def add_debt(player_row: int, amount: int, note: str = "", by: str = "") -> int:
+    """Разовый долг сверх регулярных взносов. Возвращает id записи."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            """INSERT INTO extra_debts (player_row, amount, note, added_by, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (int(player_row), int(amount), str(note), str(by),
+             datetime.now().isoformat(timespec="seconds")))
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def extra_debts(player_row: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Открытые разовые долги, свежие сверху."""
+    sheets_cache.init_db()
+    sql = ("SELECT id, player_row, amount, note, created_at FROM extra_debts "
+           "WHERE closed_at = ''")
+    args: List[Any] = []
+    if player_row is not None:
+        sql += " AND player_row = ?"
+        args.append(int(player_row))
+    with sheets_cache.get_connection() as conn:
+        return [dict(r) for r in conn.execute(sql + " ORDER BY id DESC", args)]
+
+
+def close_debt(debt_id: int) -> bool:
+    """Долг погашен. Не удаляем, а помечаем: история важнее чистоты списка."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE extra_debts SET closed_at = ? WHERE id = ? AND closed_at = ''",
+            (datetime.now().isoformat(timespec="seconds"), int(debt_id)))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def recent_payments(limit: int = 10) -> List[Dict[str, Any]]:
+    """Последние проведённые платежи — для экрана «Удалить оплату»."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            """SELECT id, player_row, amount, kind, games, paid_at, period,
+                      game_ref, note FROM payments ORDER BY id DESC LIMIT ?""",
+            (int(limit),))]
+    for r in rows:
+        p = player_by_row(int(r["player_row"] or 0))
+        r["title"] = (p or {}).get("title") or f"строка {r['player_row']}"
+    return rows
+
+
 def delete(payment_id: int) -> bool:
     """Отмена ошибочного платежа. Из листа строка не исчезает — там пометка."""
     sheets_cache.init_db()

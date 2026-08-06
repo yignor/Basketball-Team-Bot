@@ -663,6 +663,21 @@ CREATE TABLE IF NOT EXISTS coach_report_sent (
     PRIMARY KEY (source, team_id, game_id)
 );
 
+-- Долг, добавленный тренером руками: пропущенная аренда, штраф, разбитый мяч.
+-- К требованиям из листа «Игроки» он не относится — тот столбец про регулярные
+-- взносы, а это разовое. Закрывается кнопкой, а не платежом: сумма может
+-- прийти вместе с другими деньгами, и угадывать, что именно ею погашено,
+-- нельзя.
+CREATE TABLE IF NOT EXISTS extra_debts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_row  INTEGER NOT NULL,
+    amount      INTEGER NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    added_by    TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    closed_at   TEXT NOT NULL DEFAULT ''
+);
+
 -- Отрезки на площадке: когда игрок выходил и уходил. start_sec/end_sec —
 -- РЕАЛЬНЫЕ секунды от спорного мяча (не игровые), потому что запись идёт в
 -- реальном времени: по ним человек мотает видео. clock_sec — игровое время
@@ -1207,6 +1222,10 @@ def write_player_prices(spreadsheet, updates: Dict[int, int]) -> int:
 PLAYER_FIELDS = {
     "bd": ("Дата рождения", "birthday", "🎂 Дата рождения"),
     "nick": ("Ник", "nickname", "✏️ Ник"),
+    # Суммы, которые ждём с человека. Правятся из раздела тренера, чтобы не
+    # лезть в таблицу ради одной цифры.
+    "season": (PLAYERS_PAY_SEASON_HEADER, "pay_season", "🏋️ Взнос за тренировки"),
+    "game": (PLAYERS_PAY_GAME_HEADER, "pay_game", "🏀 Оплата игры"),
 }
 
 
@@ -1231,8 +1250,11 @@ def write_player_field(spreadsheet, player_row: int, field: str, value: str,
     ws.update_cell(row_no, head.index(header) + 1, str(value))
     init_db()
     with _connection() as conn:
+        # Денежные колонки в зеркале числовые: строкой туда попадёт «5500» и
+        # сравнения «сколько должен» начнут врать.
+        stored = int(value) if column in ("pay_season", "pay_game") else str(value)
         conn.execute(f"UPDATE players SET {column} = ? WHERE row_index = ?",
-                     (str(value), int(row_no)))
+                     (stored, int(row_no)))
         conn.commit()
     return True
 
