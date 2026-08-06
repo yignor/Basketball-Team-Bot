@@ -30,12 +30,31 @@ logger = logging.getLogger(__name__)
 # С какого месяца считаем взносы. Всё, что раньше, тренер считает закрытым.
 FIRST_PERIOD = "2026-09"
 
-# Середина месяца — 15-е; предупреждение тренеру за три дня до неё.
+# Даты по умолчанию. Живые значения — в app_settings: их правит тренер из бота
+# («🗓 Даты оповещений»), потому что удобный день зависит от того, когда в зале
+# берут деньги, а это меняется.
 MID_DAY = 15
-# 25-е число: напоминаем про следующий месяц заранее.
-AHEAD_DAY = 25
-COACH_WARN_BEFORE_MID = 3
-COACH_REPORT_BEFORE_END = 2
+AHEAD_DAY = 25              # заранее про следующий месяц
+FIRST_DAY = 1               # в начале месяца — за начавшийся
+COACH_WARN_BEFORE_MID = 3   # тренеру перед повтором
+COACH_REPORT_BEFORE_END = 2  # тренеру перед концом месяца
+
+SCHEDULE = {
+    "dues_ahead_day": ("За следующий месяц, число", AHEAD_DAY, 1, 28),
+    "dues_first_day": ("За начавшийся месяц, число", FIRST_DAY, 1, 28),
+    "dues_mid_day": ("Повтор должникам, число", MID_DAY, 1, 28),
+    "dues_coach_warn": ("Тренеру перед повтором, за сколько дней",
+                        COACH_WARN_BEFORE_MID, 0, 10),
+    "dues_coach_end": ("Тренеру перед концом месяца, за сколько дней",
+                       COACH_REPORT_BEFORE_END, 0, 10),
+}
+
+
+def day(key: str) -> int:
+    """Настроенное значение даты/сдвига. Без настройки — как было."""
+    title, default, low, high = SCHEDULE[key]
+    value = sheets_cache.get_int_setting(key, default)
+    return max(low, min(high, value))
 
 MONTHS_RU = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль",
              "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
@@ -211,27 +230,27 @@ def due_events(today: Optional[date] = None) -> List[Tuple[str, str, str]]:
     out: List[Tuple[str, str, str]] = []
     cur = period_of(today)
 
-    # За два дня до конца месяца — отчёт тренерам по текущему месяцу.
-    if counts(cur) and (month_end(cur) - today).days == COACH_REPORT_BEFORE_END:
+    # Перед концом месяца — отчёт тренерам по текущему месяцу.
+    if counts(cur) and (month_end(cur) - today).days == day("dues_coach_end"):
         out.append((f"train:{cur}:coach_end", cur, "coach_end"))
 
-    # Первое число — напоминание игрокам за начавшийся месяц.
-    if today.day == 1 and counts(cur):
+    # Начало месяца — напоминание игрокам за начавшийся месяц.
+    if today.day == day("dues_first_day") and counts(cur):
         out.append((f"train:{cur}:player_first", cur, "player_first"))
 
-    # За три дня до середины — предупреждение тренеру.
-    if today.day == MID_DAY - COACH_WARN_BEFORE_MID and counts(cur):
+    # Перед повтором — предупреждение тренеру.
+    if today.day == day("dues_mid_day") - day("dues_coach_warn") and counts(cur):
         out.append((f"train:{cur}:coach_warn", cur, "coach_warn"))
 
-    # Середина месяца — второе напоминание должникам.
-    if today.day == MID_DAY and counts(cur):
+    # Второе напоминание должникам.
+    if today.day == day("dues_mid_day") and counts(cur):
         out.append((f"train:{cur}:player_mid", cur, "player_mid"))
 
     # 25-е — всем активным напоминание про СЛЕДУЮЩИЙ месяц. Это не про долг:
     # человек ещё ничего не должен, но за зал платят вперёд, и тренеру важно
     # собрать деньги до начала месяца, а не догонять их в середине.
     nxt = next_period(cur)
-    if today.day == AHEAD_DAY and counts(nxt):
+    if today.day == day("dues_ahead_day") and counts(nxt):
         out.append((f"train:{nxt}:player_ahead", nxt, "player_ahead"))
     return out
 

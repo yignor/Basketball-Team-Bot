@@ -2118,6 +2118,22 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     amount, note = int(m.group(1)), m.group(2).strip()
     _awaiting_money.pop(user.id, None)
 
+    if pending.startswith("sched:"):
+        key = pending.split(":", 1)[1]
+        import training_dues
+        low, high = (training_dues.SCHEDULE[key][2:4] if key in training_dues.SCHEDULE
+                     else SCHED_LIMITS.get(key, (0, 31)))
+        if not low <= amount <= high:
+            _awaiting_money[user.id] = pending
+            await msg.reply_text(f"Нужно число от {low} до {high}. "
+                                 "Передумал — /start.")
+            raise ApplicationHandlerStop
+        await asyncio.to_thread(sheets_cache.set_setting, key, amount)
+        screen, markup = await asyncio.to_thread(_sched_screen)
+        await msg.reply_text(f"Записал.\n\n{screen}", reply_markup=markup,
+                             parse_mode="HTML")
+        raise ApplicationHandlerStop
+
     if pending.startswith("debt:"):
         row = int(pending.split(":", 1)[1])
         await asyncio.to_thread(coach_payments.add_debt, row, amount, note, str(user.id))
@@ -3055,7 +3071,56 @@ def _coach_markup() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
         [InlineKeyboardButton("✏️ Изменить суммы", callback_data="coach:sums"),
          InlineKeyboardButton("🗑 Удалить оплату", callback_data="coach:delpay")],
+        [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
     ])
+
+
+# Даты оповещений об оплатах: ключ настройки → (подпись, что это значит).
+SCHED_FIELDS = [
+    ("dues_ahead_day", "Заранее за следующий месяц", "число месяца"),
+    ("dues_first_day", "За начавшийся месяц", "число месяца"),
+    ("dues_mid_day", "Повтор должникам", "число месяца"),
+    ("dues_coach_warn", "Тренеру перед повтором", "за сколько дней"),
+    ("dues_coach_end", "Тренеру перед концом месяца", "за сколько дней"),
+    ("game_pay_hour", "Оплата игры: утро", "час"),
+    ("game_pay_evening_hour", "Оплата игры: вечер следующего дня", "час"),
+    ("roster_collect_days", "Собрать состав на игру", "за сколько дней"),
+]
+
+SCHED_LIMITS = {"game_pay_hour": (0, 23), "game_pay_evening_hour": (0, 23),
+                "roster_collect_days": (0, 14)}
+
+
+def _sched_value(key: str) -> int:
+    import game_roster
+    import sheets_cache
+    import training_dues
+    if key in training_dues.SCHEDULE:
+        return training_dues.day(key)
+    defaults = {"game_pay_hour": 9, "game_pay_evening_hour": 19,
+                "roster_collect_days": game_roster.COLLECT_BEFORE_DAYS}
+    return sheets_cache.get_int_setting(key, defaults[key])
+
+
+def _sched_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Когда бот напоминает про деньги. Всё правится кнопками."""
+    lines = ["🗓 Даты оповещений", "",
+             "🏋️ <b>Взносы за тренировки</b> — по календарю месяца:"]
+    rows = []
+    for key, title, unit in SCHED_FIELDS:
+        if key == "game_pay_hour":
+            lines += ["", "🏀 <b>Оплата игр</b> — от даты матча:"]
+        value = _sched_value(key)
+        shown = (f"{value}-го" if unit == "число месяца"
+                 else f"{value}:00" if unit == "час"
+                 else f"за {value} дн.")
+        lines.append(f"   • {title}: {shown}")
+        rows.append([InlineKeyboardButton(f"{title}: {shown}"[:60],
+                                          callback_data=f"coach:setsched:{key}")])
+    lines += ["", "<i>Взносы за тренировки начинаются с сентября 2026 — "
+              "до этого месяца бот про них молчит.</i>"]
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 # Что тренер сейчас вводит: id → «долг:строка» или «сумма:строка:вид».
@@ -3826,6 +3891,23 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif what == "games":
             text, markup = await asyncio.to_thread(_games_screen)
             await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "sched":
+            text, markup = await asyncio.to_thread(_sched_screen)
+            await query.edit_message_text(text, reply_markup=markup,
+                                          parse_mode="HTML")
+
+        elif what == "setsched" and len(parts) > 2:
+            key = parts[2]
+            title = next((t for k, t, _ in SCHED_FIELDS if k == key), key)
+            unit = next((u for k, _, u in SCHED_FIELDS if k == key), "")
+            _awaiting_money[user.id] = f"sched:{key}"
+            hint = ("Пришли число месяца (1–28)." if unit == "число месяца"
+                    else "Пришли час (0–23)." if unit == "час"
+                    else "Пришли количество дней.")
+            await query.edit_message_text(
+                f"🗓 {title}. Сейчас: {_sched_value(key)}.\n\n{hint}\n\n"
+                "Передумал — /start.")
 
         elif what == "debts":
             text, markup = await asyncio.to_thread(_debts_screen)

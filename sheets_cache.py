@@ -663,6 +663,15 @@ CREATE TABLE IF NOT EXISTS coach_report_sent (
     PRIMARY KEY (source, team_id, game_id)
 );
 
+-- Настройки бота, которые правит человек из интерфейса. Отдельно от листа
+-- «Конфиг»: тот про лиги и топики, а это про поведение самого бота, и менять
+-- их надо кнопкой, а не через таблицу.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL DEFAULT '',
+    updated_at  TEXT NOT NULL DEFAULT ''
+);
+
 -- Долг, добавленный тренером руками: пропущенная аренда, штраф, разбитый мяч.
 -- К требованиям из листа «Игроки» он не относится — тот столбец про регулярные
 -- взносы, а это разовое. Закрывается кнопкой, а не платежом: сумма может
@@ -1257,6 +1266,33 @@ def write_player_field(spreadsheet, player_row: int, field: str, value: str,
                      (stored, int(row_no)))
         conn.commit()
     return True
+
+
+def get_setting(key: str, default: Any = None) -> Any:
+    """Значение настройки. default — когда её ни разу не меняли."""
+    init_db()
+    with _connection() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?",
+                           (str(key),)).fetchone()
+    return row["value"] if row else default
+
+
+def get_int_setting(key: str, default: int) -> int:
+    try:
+        return int(get_setting(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def set_setting(key: str, value: Any) -> None:
+    init_db()
+    with _connection() as conn:
+        conn.execute(
+            """INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                              updated_at = excluded.updated_at""",
+            (str(key), str(value), _now_iso()))
+        conn.commit()
 
 
 def get_config_rows() -> List[List[str]]:

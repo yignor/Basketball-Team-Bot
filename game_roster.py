@@ -387,7 +387,8 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
         # меньше»: игру в лиге могут открыть и за два дня до неё, и тогда
         # точное совпадение просто не сработало бы. Событие помечается
         # выполненным, поэтому запрос уходит один раз.
-        if 0 <= left <= COLLECT_BEFORE_DAYS:
+        if 0 <= left <= sheets_cache.get_int_setting("roster_collect_days",
+                                                     COLLECT_BEFORE_DAYS):
             out.append((f"game:{ref}:collect", game, "collect"))
 
         # Дальше — только деньги, и тут два условия. Игра не старше порядка
@@ -398,11 +399,13 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
             continue
         if not is_posted(game["source"], game["game_id"]):
             continue
-        if left == 0 and now.hour >= 9:
+        morning = sheets_cache.get_int_setting("game_pay_hour", 9)
+        evening = sheets_cache.get_int_setting("game_pay_evening_hour", 19)
+        if left == 0 and now.hour >= morning:
             out.append((f"game:{ref}:coach_day", game, "coach_day"))
-        elif left == -1 and now.hour >= 9:
+        elif left == -1 and now.hour >= morning:
             out.append((f"game:{ref}:coach_next", game, "coach_next"))
-            if now.hour >= 19:
+            if now.hour >= evening:
                 out.append((f"game:{ref}:player_next", game, "player_next"))
     return out
 
