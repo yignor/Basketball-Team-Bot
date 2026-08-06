@@ -4955,19 +4955,11 @@ async def _background_loop(app: Application) -> None:
             sheets_cache.report_error("background_loop", str(e), _get_spreadsheet())
 
 
-async def on_startup(app: Application) -> None:
-    log.info("=" * 50)
-    log.info("Бот запущен (long-polling режим)")
-    log.info(f"Время старта: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-    log.info("=" * 50)
-    sheets_cache.init_db()
-    _refresh_poll_cache()
-    _refresh_db_cache()
-    _periodic_push_local_changes()
-    # Работа с таблицей — один раз при старте, а не в ответ человеку: это
-    # походы в Google, и в обработчике они были бы задержкой.
+async def _startup_sheets_work() -> None:
+    """Подготовка листов при старте: переименования, столбцы, отложенные
+    платежи, сводка «Оплаты», гашение старых игровых оповещений."""
+    import coach_payments
     try:
-        import coach_payments
         sheet = _get_spreadsheet()
         # Переименования листов идут ПЕРВЫМИ: «Оплаты» переезжает в «Логи
         # оплаты», и только после этого имя «Оплаты» можно занять сводкой.
@@ -4998,8 +4990,33 @@ async def on_startup(app: Application) -> None:
         _pay_sheet_at = time.time()      # только что собрали — фону ждать свой срок
     except Exception as e:
         log.warning(f"Листы оплат не подготовлены: {e}")
+
+
+async def on_startup(app: Application) -> None:
+    log.info("=" * 50)
+    log.info("Бот запущен (long-polling режим)")
+    log.info(f"Время старта: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    log.info("=" * 50)
+    sheets_cache.init_db()
+    _refresh_poll_cache()
+    _refresh_db_cache()
+    _periodic_push_local_changes()
+
+    async def _startup_sheets() -> None:
+        """Разовая работа с таблицей при старте — ОТДЕЛЬНОЙ задачей.
+
+        После перезагрузки машины сеть встаёт не мгновенно, а у gspread нет
+        таймаута: запрос повисает, и вместе с ним повисал весь старт — бот
+        отвечал в Telegram, но фэнтези-API и фоновый цикл не поднимались
+        вовсе, молча. Ровно это случилось 06.08.2026. Теперь всё, что нужно
+        людям, стартует сразу, а таблица догоняет когда сможет."""
+        await _startup_sheets_work()
+
+    _sheets_task = asyncio.create_task(_startup_sheets())
+    _side_tasks.add(_sheets_task)
+    _sheets_task.add_done_callback(_side_tasks.discard)
+
     # Список команд у игрока и у админа разный: личная статистика и админка —
-    # скрытые функции, и в меню обычного игрока их быть не должно.
     try:
         await app.bot.set_my_commands([
             BotCommand("start", "Меню бота"),
