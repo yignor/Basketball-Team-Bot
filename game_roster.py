@@ -61,7 +61,8 @@ def games(from_day: Optional[date] = None,
     marks = ",".join("?" * len(POLL_TYPES))
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            f"""SELECT game_id, game_date, game_time, alt_name, additional_data
+            f"""SELECT game_id, game_date, game_time, alt_name, additional_data,
+                       arena
                 FROM service_records WHERE data_type IN ({marks})
                   AND game_id != '' AND deleted = 0""", POLL_TYPES).fetchall()
     out = []
@@ -80,9 +81,31 @@ def games(from_day: Optional[date] = None,
             "time": str(r["game_time"] or ""),
             "opponent": _opponent_from(str(r["additional_data"] or "")),
             "title": str(r["alt_name"] or ""),
+            # Место и форму лига объявляет в самом опросе — берём оттуда, а не
+            # заставляем тренера вводить то, что уже написано.
+            "arena": str(r["arena"] or "") or _arena_from(str(r["additional_data"] or "")),
+            "poll_form": _form_from(str(r["additional_data"] or "")),
         })
     out.sort(key=lambda g: g["date"])
     return out
+
+
+def _form_from(text: str) -> str:
+    """Форма из текста опроса: «👕 тёмная форма». Пусто — если не указана."""
+    low = text.lower()
+    if "тёмн" in low or "темн" in low:
+        return "dark"
+    if "светл" in low or "белая" in low:
+        return "light"
+    return ""
+
+
+def _arena_from(text: str) -> str:
+    """Место из текста опроса: строка с «📍»."""
+    for line in text.splitlines():
+        if "📍" in line:
+            return line.replace("📍", "").strip()
+    return ""
 
 
 def _opponent_from(text: str) -> str:
@@ -145,6 +168,8 @@ def roster(source: str, game_id: str) -> List[Dict[str, Any]]:
 # Форма на игру: тёмная или светлая. Хранится у игры, потому что зависит от
 # соперника, а не от команды вообще.
 FORMS = {"dark": "тёмная", "light": "светлая"}
+# Тренер снял форму руками: не пусто (иначе снова подставится из опроса).
+NO_FORM = "none"
 
 
 def _by_surname(player: Dict[str, Any]) -> Tuple[str, str]:
@@ -157,13 +182,28 @@ def _by_surname(player: Dict[str, Any]) -> Tuple[str, str]:
     return norm(player.get("surname")), norm(player.get("name"))
 
 
-def form_of(source: str, game_id: str) -> str:
+def form_of(source: str, game_id: str, game: Optional[Dict[str, Any]] = None) -> str:
+    """Какая форма на игру. Выбор тренера сильнее, иначе — из опроса лиги.
+
+    Отдельная отметка «снято руками» нужна, чтобы снятый тренером выбор не
+    подменялся снова тем, что написано в опросе: иначе кнопка «сбросить» не
+    работала бы вовсе."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             "SELECT form FROM game_roster_state WHERE source = ? AND game_id = ?",
             (source, str(game_id))).fetchone()
-    return str((row["form"] if row else "") or "")
+    chosen = str((row["form"] if row else "") or "")
+    if chosen == NO_FORM:
+        return ""
+    if chosen:
+        return chosen
+    if game and game.get("poll_form"):
+        return str(game["poll_form"])
+    for g in games():
+        if g["source"] == source and g["game_id"] == str(game_id):
+            return str(g.get("poll_form") or "")
+    return ""
 
 
 def set_form(source: str, game_id: str, form: str) -> None:
@@ -296,9 +336,11 @@ def post_text(game: Dict[str, Any], people: List[Dict[str, Any]]) -> str:
     lines = [head]
     # Форму пишем сразу под шапкой: это первое, что человек ищет перед выездом,
     # и искать её в конце списка из одиннадцати фамилий неудобно.
-    form = form_of(game["source"], str(game["game_id"]))
+    form = form_of(game["source"], str(game["game_id"]), game)
     if form in FORMS:
         lines.append(f"👕 Форма: {FORMS[form]}")
+    if game.get("arena"):
+        lines.append(f"📍 {game['arena']}")
     lines.append("")
     for i, p in enumerate(people, start=1):
         lines.append(f"{i}. {p['title']}")

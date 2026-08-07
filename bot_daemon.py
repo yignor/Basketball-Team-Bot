@@ -3454,9 +3454,13 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
 
     # Форма — рядом с составом: тренер решает её тогда же, когда собирает
     # людей, и отдельный экран ради двух вариантов был бы лишним шагом.
-    form = game_roster.form_of(source, game_id)
+    form = game_roster.form_of(source, game_id, game)
+    from_poll = bool(game.get("poll_form")) and form == game.get("poll_form")
     lines.append("")
-    lines.append(f"👕 Форма: {game_roster.FORMS.get(form, 'не выбрана')}")
+    lines.append(f"👕 Форма: {game_roster.FORMS.get(form, 'не выбрана')}"
+                 + (" (из опроса)" if from_poll else ""))
+    if game.get("arena"):
+        lines.append(f"📍 {game['arena']}")
 
     rows: List[List[InlineKeyboardButton]] = []
     rows.append([
@@ -3781,9 +3785,10 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
             import game_roster
             value = parts[4] if parts[4] in game_roster.FORMS else ""
             # Повторное нажатие снимает выбор: передумал — не надо искать
-            # отдельную кнопку «сбросить».
+            # отдельную кнопку «сбросить». Снятое помечаем особо, иначе на его
+            # место молча вернётся форма из опроса.
             if game_roster.form_of(source, game_id) == value:
-                value = ""
+                value = game_roster.NO_FORM
             await asyncio.to_thread(game_roster.set_form, source, game_id, value)
             # Если состав уже в чате — правим то же сообщение, а не шлём второе:
             # форма меняется чаще состава, и каждое такое изменение новым
