@@ -517,6 +517,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _awaiting_video.pop(user.id, None)
     _awaiting_field.pop(user.id, None)
     _awaiting_money.pop(user.id, None)
+    _newgame.pop(user.id, None)
 
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
@@ -1984,6 +1985,106 @@ def _api_port_alive() -> bool:
         return sock.connect_ex(("127.0.0.1", FANTASY_API_PORT)) == 0
 
 
+# ─── игра, заведённая тренером ──────────────────────────────────────────────
+#
+# Организатор объявляет матч раньше, чем тот появляется в расписании лиги.
+# Мастер ведёт тренера по шагам и в конце отправляет обычный опрос: дальше
+# игра живёт как лиговая — состав, оплата, долги.
+
+# Черновик игры по тренеру: id → {шаг, лига, соперник, дата, время, ...}
+_newgame: Dict[int, Dict[str, Any]] = {}
+
+NG_CANCEL = "\n\nПередумал — /start."
+
+
+def _ng_leagues_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_newgame
+    rows = [[InlineKeyboardButton(lg["title"][:60], callback_data=f"coach:ng:lg:{i}")]
+            for i, lg in enumerate(coach_newgame.leagues())]
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
+    return ("➕ Создать игру\n\nВ какой лиге играем?", InlineKeyboardMarkup(rows))
+
+
+def _ng_arena_screen(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_newgame
+    known = coach_newgame.arenas()
+    rows = [[InlineKeyboardButton(a[:60], callback_data=f"coach:ng:ar:{i}")]
+            for i, a in enumerate(known)]
+    draft["arena_list"] = known
+    rows.append([InlineKeyboardButton("✍️ Другое место", callback_data="coach:ng:arown")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
+    return ("📍 Где играем?\n\nВыбери зал или впиши свой." , InlineKeyboardMarkup(rows))
+
+
+def _ng_form_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    return ("👕 В какой форме играем?", InlineKeyboardMarkup([
+        [InlineKeyboardButton("👕 Тёмная", callback_data="coach:ng:form:dark"),
+         InlineKeyboardButton("👕 Светлая", callback_data="coach:ng:form:light")],
+        [InlineKeyboardButton("Пропустить", callback_data="coach:ng:form:none")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="coach:main")]]))
+
+
+def _ng_preview_screen(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_newgame
+    return (coach_newgame.summary(draft), InlineKeyboardMarkup([
+        [InlineKeyboardButton("📣 Отправить голосование", callback_data="coach:ng:send")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="coach:main")]]))
+
+
+async def _ng_send(query, user) -> None:
+    """Отправляет опрос и регистрирует игру — дальше она обычная."""
+    import coach_newgame
+    import game_roster
+    draft = _newgame.get(user.id)
+    if not draft:
+        await query.edit_message_text("Черновик потерялся — начни заново.",
+                                      reply_markup=_coach_markup())
+        return
+    gsm = _game_manager()
+    chat_ids = _result_chat_ids(gsm)
+    topic = getattr(gsm, "game_poll_topic_id", None)
+    question = coach_newgame.poll_text(draft)
+    sent: List[Dict[str, Any]] = []
+    for chat_id in chat_ids:
+        kwargs: Dict[str, Any] = {
+            "chat_id": int(chat_id), "question": question,
+            "options": coach_newgame.POLL_OPTIONS,
+            "is_anonymous": getattr(gsm, "game_poll_is_anonymous", False),
+            "allows_multiple_answers": getattr(gsm, "game_poll_allows_multiple", False),
+        }
+        if topic is not None:
+            kwargs["message_thread_id"] = topic
+        try:
+            pm = await query.get_bot().send_poll(**kwargs)
+        except Exception as e:
+            # Топик мог быть удалён — шлём в общий чат, а не молчим.
+            if topic is not None and "thread not found" in str(e).lower():
+                kwargs.pop("message_thread_id", None)
+                pm = await query.get_bot().send_poll(**kwargs)
+            else:
+                log.warning(f"Опрос новой игры в чат {chat_id}: {e}")
+                continue
+        sent.append({"poll_id": pm.poll.id if pm.poll else None,
+                     "chat_id": pm.chat.id, "message_id": pm.message_id})
+    if not sent:
+        await query.edit_message_text(
+            "Не смог отправить опрос — проверь, что бот в чате команды.",
+            reply_markup=_coach_markup())
+        return
+    gid = await asyncio.to_thread(coach_newgame.register, draft, sent)
+    # Форма ложится сразу в состояние игры: в опросе она уже написана, и
+    # заставлять тренера выбирать её второй раз незачем.
+    if draft.get("form") in game_roster.FORMS:
+        await asyncio.to_thread(game_roster.set_form, draft["source"], gid,
+                                draft["form"])
+    _refresh_poll_cache()
+    _newgame.pop(user.id, None)
+    await query.edit_message_text(
+        f"✅ Игра создана, опрос отправлен ({len(sent)} чат(а)).\n\n"
+        f"{question}\n\nКак проголосуют — собери состав в «👥 Состав на игру».",
+        reply_markup=_coach_markup())
+
+
 # ─── дни рождения и ники ────────────────────────────────────────────────────
 #
 # Обе колонки живут в листе «Игроки» и правились только там. День рождения бот
@@ -2168,6 +2269,82 @@ async def _rebuild_payments_sheet() -> None:
         await asyncio.to_thread(coach_payments.build_summary_sheet, book)
     except Exception as e:
         log.warning(f"Лист «Оплаты» не пересобран: {e}")
+
+
+def _our_team_title(league: Dict[str, str]) -> str:
+    """Как называется НАША команда в этой лиге — для текста опроса."""
+    try:
+        import league_sync
+        for t in league_sync.our_teams(league.get("source") or None):
+            if not league.get("team_id") or str(t.get("team_id")) == league["team_id"]:
+                return str(t.get("name") or "Мы")
+    except Exception as e:
+        log.warning(f"название нашей команды: {e}")
+    return "Мы"
+
+
+async def handle_newgame_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Шаги мастера создания игры, которые вводятся текстом."""
+    import coach_newgame
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _newgame:
+        return
+    if not _can_see_reports(user):
+        _newgame.pop(user.id, None)
+        return
+    draft = _newgame[user.id]
+    stage = draft.get("stage", "")
+    text = (msg.text or "").strip()
+
+    if stage == "opponent":
+        # Товарищеский матч не сверяем ни с чем: соперника может не быть ни в
+        # одной лиге, и требовать «выбери из списка» тут не из чего.
+        if draft.get("key") == coach_newgame.FRIENDLY:
+            draft["opponent"], draft["stage"] = text, "date"
+            await msg.reply_text(f"Соперник: {text}.\n\n📅 Дата игры? "
+                                 "Например «09.08»." + NG_CANCEL)
+            raise ApplicationHandlerStop
+        found = await asyncio.to_thread(coach_newgame.find_teams,
+                                        draft["source"], text)
+        draft["found"] = found
+        rows = [[InlineKeyboardButton(n[:60], callback_data=f"coach:ng:opp:{i}")]
+                for i, n in enumerate(found)]
+        rows.append([InlineKeyboardButton(f"✍️ Оставить «{text}»"[:60],
+                                          callback_data=f"coach:ng:opp:{len(found)}")])
+        rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
+        draft["found"] = found + [text]
+        head = (f"Нашёл по «{text}»:" if found
+                else f"В прошлых играх «{text}» не встречался — "
+                     f"можно оставить как есть.")
+        await msg.reply_text(head, reply_markup=InlineKeyboardMarkup(rows))
+        raise ApplicationHandlerStop
+
+    if stage == "date":
+        day = coach_newgame.parse_day(text)
+        if not day:
+            await msg.reply_text("Не понял дату. Как «09.08» или «09.08.2026»."
+                                 + NG_CANCEL)
+            raise ApplicationHandlerStop
+        draft["date"], draft["stage"] = day, "time"
+        await msg.reply_text(f"Дата: {day.strftime('%d.%m.%Y')}.\n\n"
+                             "🕒 Во сколько начало? Например «18:30»." + NG_CANCEL)
+        raise ApplicationHandlerStop
+
+    if stage == "time":
+        when = coach_newgame.parse_time(text)
+        if not when:
+            await msg.reply_text("Не понял время. Как «18:30»." + NG_CANCEL)
+            raise ApplicationHandlerStop
+        draft["time"], draft["stage"] = when, "arena"
+        screen, markup = await asyncio.to_thread(_ng_arena_screen, draft)
+        await msg.reply_text(screen, reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    if stage == "arena_text":
+        draft["arena"], draft["stage"] = text, "form"
+        screen, markup = _ng_form_screen()
+        await msg.reply_text(screen, reply_markup=markup)
+        raise ApplicationHandlerStop
 
 
 async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3135,7 +3312,8 @@ def _coach_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
-        [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games")],
+        [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games"),
+         InlineKeyboardButton("➕ Создать игру", callback_data="coach:ng")],
         [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
         [InlineKeyboardButton("💸 Долги", callback_data="coach:debts"),
          InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")],
@@ -4013,6 +4191,45 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(
                 f"🗓 {title}. Сейчас: {_sched_value(key)}.\n\n{hint}\n\n"
                 "Передумал — /start.")
+
+        elif what == "ng":
+            import coach_newgame
+            step = parts[2] if len(parts) > 2 else ""
+            draft = _newgame.get(user.id) or {}
+            if not step:
+                _newgame[user.id] = {"stage": "league"}
+                text, markup = _ng_leagues_screen()
+                await query.edit_message_text(text, reply_markup=markup)
+            elif step == "lg" and len(parts) > 3:
+                lg = coach_newgame.leagues()[int(parts[3])]
+                _newgame[user.id] = {"stage": "opponent", "key": lg["key"],
+                                     "source": lg["source"],
+                                     "league_title": lg["title"],
+                                     "our": _our_team_title(lg)}
+                await query.edit_message_text(
+                    "🏀 С кем играем?\n\nНапиши название команды или его часть."
+                    + NG_CANCEL)
+            elif step == "opp" and len(parts) > 3:
+                draft["opponent"] = draft.get("found", [])[int(parts[3])]
+                draft["stage"] = "date"
+                await query.edit_message_text(
+                    f"Соперник: {draft['opponent']}.\n\n📅 Дата игры? "
+                    "Например «09.08» или «09.08.2026»." + NG_CANCEL)
+            elif step == "ar" and len(parts) > 3:
+                draft["arena"] = draft.get("arena_list", [])[int(parts[3])]
+                draft["stage"] = "form"
+                text, markup = _ng_form_screen()
+                await query.edit_message_text(text, reply_markup=markup)
+            elif step == "arown":
+                draft["stage"] = "arena_text"
+                await query.edit_message_text("📍 Напиши место игры." + NG_CANCEL)
+            elif step == "form" and len(parts) > 3:
+                draft["form"] = parts[3] if parts[3] in coach_newgame.FORMS else ""
+                draft["stage"] = "preview"
+                text, markup = _ng_preview_screen(draft)
+                await query.edit_message_text(text, reply_markup=markup)
+            elif step == "send":
+                await _ng_send(query, user)
 
         elif what == "debts":
             text, markup = await asyncio.to_thread(_debts_screen)
@@ -5296,6 +5513,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_money_text), group=9)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_newgame_text), group=10)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
