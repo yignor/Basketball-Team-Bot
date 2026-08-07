@@ -338,13 +338,32 @@
   function rememberDoors(doors) {
     try { localStorage.setItem('doors', JSON.stringify(doors || [])); } catch (e) {}
   }
+  // Человек может закрепить свою дверь: у одних режется ts.net, у других
+  // Cloudflare, и порядок по умолчанию подходит не всем. Выбор живёт на
+  // устройстве — это его сеть, а не общая настройка команды.
+  function preferredDoor() {
+    try { return localStorage.getItem('doorPref') || ''; } catch (e) { return ''; }
+  }
+  function setPreferredDoor(url) {
+    try {
+      if (url) localStorage.setItem('doorPref', url);
+      else localStorage.removeItem('doorPref');
+    } catch (e) {}
+  }
+  window.setPreferredDoor = url => { setPreferredDoor(url); runDiag(); };
+
   function doorOrder() {
     const saved = savedDoors();
-    if (!saved || !saved.length) return API_LIST;
-    const off = new Set(saved.filter(d => !d.enabled).map(d => d.url));
-    const live = API_LIST.filter(u => !off.has(u));
+    const off = new Set((saved || []).filter(d => !d.enabled).map(d => d.url));
+    let live = API_LIST.filter(u => !off.has(u));
     // Все выключены — значит настройка испорчена; пробуем как обычно.
-    return live.length ? live : API_LIST;
+    if (!live.length) live = API_LIST.slice();
+    const pref = preferredDoor();
+    // Закреплённую ставим первой, но НЕ единственной: если она сегодня молчит,
+    // человек должен попасть в приложение через вторую, а не упереться в свой
+    // же выбор.
+    if (pref && live.includes(pref)) live = [pref, ...live.filter(u => u !== pref)];
+    return live;
   }
   // Сколько ждём ответа на пробе двери, прежде чем идти к следующей.
   const PROBE_TIMEOUT = 8000;
@@ -446,10 +465,17 @@
           'смотри строку про подпись ниже.';
 
     box.innerHTML = `<div class="banner">${head}</div>` +
-      rows.map(r => `<div class="card" style="cursor:default">` +
-        `<div class="info"><div class="pname">${r.name}</div>` +
-        `<div class="pstat">${r.verdict}</div>` +
-        `<div class="pstat plinks">${esc(r.base)}</div></div></div>`).join('') +
+      rows.map(r => {
+        const pinned = preferredDoor() === r.base;
+        return `<div class="card" style="cursor:default">` +
+          `<div class="info"><div class="pname">${r.name}` +
+          (pinned ? ' <span class="pteam">(основной)</span>' : '') + `</div>` +
+          `<div class="pstat">${r.verdict}</div>` +
+          `<div class="pstat plinks">${esc(r.base)}</div></div>` +
+          `<div class="ctrl"><button class="step wide" ` +
+          `onclick='setPreferredDoor(${jattr(pinned ? "" : r.base)})'>` +
+          `${pinned ? 'Сбросить' : 'Сделать основным'}</button></div></div>`;
+      }).join('') +
       `<div class="sect">Подпись и допуск</div><div class="pstat">${authLine}</div>` +
       `<div class="bar" style="padding-left:0;margin-top:8px">` +
       `<button class="chip" onclick="runDiag()">🔄 Проверить ещё раз</button>` +
@@ -462,7 +488,8 @@
     const d = window.__diag || {};
     const text = 'Проверка связи с фэнтези:\n'
       + (d.rows || []).map(r => `${r.name}: ${r.verdict}`).join('\n')
-      + `\nПодпись: ${(d.authLine || '').replace(/<[^>]+>/g, '')}`;
+      + `\nПодпись: ${(d.authLine || '').replace(/<[^>]+>/g, '')}`
+      + (preferredDoor() ? `\nЗакреплён канал: ${preferredDoor()}` : '');
     if (navigator.clipboard) navigator.clipboard.writeText(text);
     if (tg && tg.showAlert) tg.showAlert('Скопировано — пришли это админу.');
   }
