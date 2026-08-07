@@ -870,6 +870,27 @@ def _lookup_price(name: str, prices: Dict[str, Dict[str, Any]]) -> Dict[str, Any
     return {}
 
 
+_stats_cache: Dict[str, Dict[str, Any]] = {}
+STATS_TTL = 60          # секунд: статистика меняется после игры, не чаще
+
+
+def pool_with_stats_cached(pool: List[Dict[str, Any]],
+                           season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Тот же обогащённый пул, но не пересобираемый на каждый запрос.
+
+    Приложение открывает три экрана разом (пул, состав, таблица), и каждый
+    заново считал агрегаты по всей статистике. Пул одинаков для всех, поэтому
+    минуты жизни кеша достаточно, а ожидание у человека сокращается кратно."""
+    key = str((season or {}).get("id", ""))
+    hit = _stats_cache.get(key)
+    now = time.time()
+    if hit and now - hit["at"] < STATS_TTL:
+        return hit["data"]
+    data = _pool_with_stats(pool, season)
+    _stats_cache[key] = {"at": now, "data": data}
+    return data
+
+
 def _pool_with_stats(pool: List[Dict[str, Any]], season: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Дополняет пул суммарной статистикой игрока за всё время (для сортировки
     в Mini App). Агрегаты живут отдельно от пула — пул кешируется на час, а
@@ -1543,11 +1564,17 @@ async def handle_pool(request: web.Request) -> web.Response:
     if not _can_view(user):
         return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
-    pool = _pool_with_stats(await build_pool(season=season), season)
+    started = time.perf_counter()
+    raw = await build_pool(season=season)
+    built = time.perf_counter()
+    # В ПОТОК: это чистые вычисления по базе, а event loop у нас общий с ботом
+    # и фоновым циклом — блокировать его на время сборки пула нельзя.
+    pool = await asyncio.to_thread(pool_with_stats_cached, raw, season)
+    stats_done = time.perf_counter()
     # Список активных лиг — для переключателя в Mini App (когда их несколько).
     seasons = [{"id": s["id"], "name": s["name"], "format": s["format"]}
                for s in fantasy.active_seasons()]
-    return web.json_response({
+    resp = web.json_response({
         "season": season and {"id": season["id"], "name": season["name"], "format": season["format"],
                               "roster_size": fantasy.roster_size(season),
                               "max_per_player": fantasy.max_per_player(season),
@@ -1567,6 +1594,14 @@ async def handle_pool(request: web.Request) -> web.Response:
         # то же: играть может и тот, кто сам на площадку не выходит.
         "player": bool(await _my_card(user, season)),
     })
+    total = time.perf_counter() - started
+    # Жалобы «фэнтези не открывается» — почти всегда про ожидание. Пишем в лог
+    # только медленные ответы: по ним видно, что именно тормозит.
+    if total > 1.5:
+        log.warning("фэнтези-API /pool медленно: %.1fс (пул %.1fс, статистика "
+                    "%.1fс, остальное %.1fс)", total, built - started,
+                    stats_done - built, time.perf_counter() - stats_done)
+    return resp
 
 
 async def handle_get_roster(request: web.Request) -> web.Response:
@@ -1823,19 +1858,31 @@ async def handle_standings(request: web.Request) -> web.Response:
     # У каждого режима таблица своя: правила разные, и общий зачёт сравнивал бы
     # несравнимое. Отдаём все включённые сразу — переключение вкладок на фронте
     # не должно ходить в сеть.
+    started = time.perf_counter()
     enabled = fantasy_modes.enabled(season)
-    tables = {}
-    for m in enabled:
-        rows = fantasy.season_standings_live(season["id"], mode=m)
-        names = fantasy.display_names([r["user_id"] for r in rows])
-        for r in rows:
-            r["name"] = names.get(str(r["user_id"]), "")
-        tables[m] = rows
+
+    def _build_tables() -> Dict[str, Any]:
+        out = {}
+        for m in enabled:
+            rows = fantasy.season_standings_live(season["id"], mode=m)
+            names = fantasy.display_names([r["user_id"] for r in rows])
+            for r in rows:
+                r["name"] = names.get(str(r["user_id"]), "")
+            out[m] = rows
+        return out
+
+    # Считается по всей истории очков и по каждому режиму отдельно — это
+    # чистые вычисления, и держать на них общий event loop нельзя: рядом
+    # обслуживаются пул, состав и сам бот.
+    tables = await asyncio.to_thread(_build_tables)
     # standings — таблица режима, в котором играет сам участник: старые версии
     # приложения знают только это поле.
     roster = fantasy.get_roster_effective(str(user["id"]), season["id"],
                                           fantasy.active_selection(season)[0]) or {}
     mine = fantasy_modes.normalize(season, roster.get("mode"))
+    total = time.perf_counter() - started
+    if total > 1.5:
+        log.warning("фэнтези-API /standings медленно: %.1fс", total)
     return web.json_response({"standings": tables.get(mine, tables.get(enabled[0], [])),
                               "tables": tables, "my_mode": mine,
                               "modes": fantasy_modes.describe(season)})
