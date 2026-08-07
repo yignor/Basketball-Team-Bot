@@ -389,6 +389,24 @@
     } finally { clearTimeout(timer); }
   }
 
+  // Дверь открыта — это ещё не «работает». Дальше сервер должен принять подпись
+  // Telegram и признать человека своим, и именно на этих шагах чаще всего всё
+  // и ломается. Поэтому проверяем ВЕСЬ путь, а не только канал.
+  async function probeAuth(base) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT);
+    try {
+      const r = await fetch(base + '/fantasy/pool', {
+        signal: ctl.signal,
+        headers: {'X-Init-Data': (tg && tg.initData) || ''},
+      });
+      const data = await r.json().catch(() => ({}));
+      return {code: r.status, error: data.error || ''};
+    } catch (e) {
+      return {code: 0, error: e.name === 'AbortError' ? 'таймаут' : 'нет связи'};
+    } finally { clearTimeout(timer); }
+  }
+
   async function runDiag() {
     const box = $('diagBody');
     box.innerHTML = '<div class="pstat">Проверяю…</div>';
@@ -401,23 +419,42 @@
         : `❌ ${r.why} (${(r.ms / 1000).toFixed(1)} с)`;
       rows.push({name, base, verdict, ok: r.ok});
     }
+    const alive = rows.find(r => r.ok);
     const working = rows.filter(r => r.ok).length;
-    const head = working
-      ? `Рабочих каналов: ${working} из ${rows.length}. Приложение должно открываться.`
-      : 'Ни один канал не отвечает с этого устройства. Скорее всего режет провайдер — ' +
-        'попробуй мобильный интернет вместо Wi-Fi или наоборот.';
+
+    // Второй шаг: подпись и допуск — по первой живой двери.
+    let auth = null, authLine = '';
+    if (!tg) authLine = '❌ открыто не из Telegram — подписи нет вовсе';
+    else if (!tg.initData) authLine = '❌ Telegram не передал подпись: открывай ' +
+      'приложение кнопкой в боте, а не ссылкой';
+    else if (alive) {
+      auth = await probeAuth(alive.base);
+      authLine = auth.code === 200 ? '✅ подпись принята, данные идут напрямую'
+        : auth.code === 401 ? '❌ сервер не принял подпись (401) — обычно помогает ' +
+          'полностью закрыть приложение и открыть заново'
+        : auth.code === 403 ? '⚠️ сервер узнал тебя, но не пускает в эту лигу (403): '
+          + esc(auth.error || 'нет доступа')
+        : `⚠️ сервер ответил ${auth.code || auth.error}`;
+    }
+
+    const head = !working
+      ? 'Ни один канал не отвечает с этого устройства. Скорее всего режет провайдер — ' +
+        'попробуй мобильный интернет вместо Wi-Fi или наоборот.'
+      : auth && auth.code === 200
+        ? `Всё в порядке: данные идут через ${esc(alive.name)}.`
+        : `Каналы работают (${working} из ${rows.length}), но до данных дело не дошло — ` +
+          'смотри строку про подпись ниже.';
+
     box.innerHTML = `<div class="banner">${head}</div>` +
       rows.map(r => `<div class="card" style="cursor:default">` +
         `<div class="info"><div class="pname">${r.name}</div>` +
         `<div class="pstat">${r.verdict}</div>` +
         `<div class="pstat plinks">${esc(r.base)}</div></div></div>`).join('') +
-      `<div class="pstat" style="margin-top:10px">Сейчас работаю: ` +
-      `${live ? 'через живой канал ' + esc(API) : 'в запасном режиме, данные из кнопки бота'}` +
-      `</div>` +
+      `<div class="sect">Подпись и допуск</div><div class="pstat">${authLine}</div>` +
       `<div class="bar" style="padding-left:0;margin-top:8px">` +
       `<button class="chip" onclick="runDiag()">🔄 Проверить ещё раз</button>` +
       `<button class="chip" onclick="copyDiag()">📋 Скопировать для админа</button></div>`;
-    window.__diag = {rows, live, api: API, at: new Date().toISOString()};
+    window.__diag = {rows, authLine, at: new Date().toISOString()};
   }
   window.runDiag = runDiag;
 
@@ -425,7 +462,7 @@
     const d = window.__diag || {};
     const text = 'Проверка связи с фэнтези:\n'
       + (d.rows || []).map(r => `${r.name}: ${r.verdict}`).join('\n')
-      + `\nРежим: ${d.live ? 'живой (' + d.api + ')' : 'запасной'}`;
+      + `\nПодпись: ${(d.authLine || '').replace(/<[^>]+>/g, '')}`;
     if (navigator.clipboard) navigator.clipboard.writeText(text);
     if (tg && tg.showAlert) tg.showAlert('Скопировано — пришли это админу.');
   }
