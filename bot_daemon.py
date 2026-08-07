@@ -5134,6 +5134,16 @@ async def on_startup(app: Application) -> None:
     # качалку зовём первой — иначе пул соберётся на номерах.
     async def _boot_warm() -> None:
         await _sync_leagues()
+        # Свёрнутые суммы: собираем один раз, если их ещё нет. Дальше их
+        # правит только приход новой игры — пересчитывать всё подряд незачем,
+        # сыгранное не меняется.
+        try:
+            import fantasy_stats
+            if not await asyncio.to_thread(fantasy_stats.totals_ready):
+                rows = await asyncio.to_thread(fantasy_stats.refresh_totals, "", "", True)
+                log.info(f"Свёрнутая статистика собрана: строк {rows}")
+        except Exception as e:
+            log.warning(f"Свёртка статистики не собралась: {e}")
         await _warm_fantasy_pool(force=True)
 
     _warm = asyncio.create_task(_boot_warm())

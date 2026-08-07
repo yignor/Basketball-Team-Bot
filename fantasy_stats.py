@@ -213,6 +213,21 @@ def _store_game_meta(conn, source: str, game_id: Any, meta: Dict[str, Any]) -> N
     )
 
 
+# Игры, чью свёртку надо пересчитать. Копится внутри транзакции записи, а
+# разбирается сразу после выхода из неё: держать вторую запись в базу внутри
+# открытой транзакции — верный способ поймать блокировку на ровном месте.
+_totals_dirty: List[Tuple[str, str]] = []
+
+
+def _flush_totals() -> None:
+    while _totals_dirty:
+        source, game_id = _totals_dirty.pop()
+        try:
+            refresh_totals(source, game_id)
+        except Exception as exc:
+            logger.warning("Свёртка статистики %s/%s: %s", source, game_id, exc)
+
+
 def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
     """Сохраняет статистику всех игроков из BoxScore (slpro_game). Возвращает
     число сохранённых игроков. ФИО (display_name) НЕ сохраняем."""
@@ -246,7 +261,10 @@ def store_slpro_box(box, season_id: str = "", stage_id: Any = "") -> int:
                               stage_id=stage_id)
             count += 1
         _mark_fetched(conn, SOURCE_SLPRO, box.game_id, game_date)
+        _totals_dirty.append((SOURCE_SLPRO, str(box.game_id)))
         conn.commit()
+    # Свёртку обновляем ПОСЛЕ выхода из транзакции записи.
+    _flush_totals()
     return count
 
 
@@ -319,7 +337,10 @@ def store_infobasket_game(game_info: Dict[str, Any], season_id: str = "") -> int
             _store_player_row(conn, SOURCE_INFOBASKET, game_id, game_date, season_id, team_id, row)
             count += 1
         _mark_fetched(conn, SOURCE_INFOBASKET, game_id, game_date)
+        _totals_dirty.append((SOURCE_INFOBASKET, str(game_id)))
         conn.commit()
+    # Свёртку обновляем ПОСЛЕ выхода из транзакции записи.
+    _flush_totals()
     return count
 
 
@@ -581,6 +602,105 @@ AGG_DERIVED = {
 AGG_KEYS = AGG_COLUMNS + tuple(AGG_DERIVED)
 
 
+# ─── свёрнутые суммы: считаем один раз, обновляем только новое ──────────────
+
+TOTALS_COLUMNS = AGG_COLUMNS + ("secs",)
+_TOTALS_DERIVED = {
+    "miss": "SUM(MAX(fga - fgm, 0))",
+    "ftmiss": "SUM(MAX(fta - ftm, 0))",
+    "dd": f"SUM(CASE WHEN ({_DOUBLES}) = 2 THEN 1 ELSE 0 END)",
+    "td": f"SUM(CASE WHEN ({_DOUBLES}) >= 3 THEN 1 ELSE 0 END)",
+}
+
+
+def refresh_totals(source: str = "", game_id: Any = "",
+                   full: bool = False) -> int:
+    """Пересчитывает свёрнутые суммы. Возвращает число тронутых строк.
+
+    Сыгранная игра неизменна, поэтому пересчитывать всё подряд незачем: при
+    появлении новой игры трогаем ровно те строки (игрок × сезон × стадия), к
+    которым она относится. full=True — полная сборка: нужна один раз при
+    переходе и как ремонт, если суммы разъехались.
+    """
+    sheets_cache.init_db()
+    sums = ", ".join([f"SUM({c})" for c in TOTALS_COLUMNS] +
+                     [expr for expr in _TOTALS_DERIVED.values()])
+    cols = ", ".join(TOTALS_COLUMNS) + ", " + ", ".join(_TOTALS_DERIVED)
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        if full or not (source and game_id):
+            conn.execute("DELETE FROM player_totals")
+            cur = conn.execute(
+                f"""INSERT INTO player_totals
+                        (source, player_id, season_id, stage_id, games, {cols}, updated_at)
+                    SELECT source, player_id, COALESCE(season_id, ''),
+                           COALESCE(stage_id, ''), COUNT(*), {sums}, ?
+                      FROM game_player_stats
+                     GROUP BY source, player_id, COALESCE(season_id, ''),
+                              COALESCE(stage_id, '')""", (now,))
+            conn.commit()
+            return cur.rowcount
+
+        # Точечно: какие связки задела эта игра.
+        keys = conn.execute(
+            """SELECT DISTINCT player_id, COALESCE(season_id, '') AS season_id,
+                      COALESCE(stage_id, '') AS stage_id
+                 FROM game_player_stats WHERE source = ? AND game_id = ?""",
+            (str(source), str(game_id))).fetchall()
+        touched = 0
+        for k in keys:
+            conn.execute(
+                """DELETE FROM player_totals WHERE source = ? AND player_id = ?
+                     AND season_id = ? AND stage_id = ?""",
+                (str(source), k["player_id"], k["season_id"], k["stage_id"]))
+            cur = conn.execute(
+                f"""INSERT INTO player_totals
+                        (source, player_id, season_id, stage_id, games, {cols}, updated_at)
+                    SELECT source, player_id, COALESCE(season_id, ''),
+                           COALESCE(stage_id, ''), COUNT(*), {sums}, ?
+                      FROM game_player_stats
+                     WHERE source = ? AND player_id = ?
+                       AND COALESCE(season_id, '') = ? AND COALESCE(stage_id, '') = ?
+                     GROUP BY source, player_id, COALESCE(season_id, ''),
+                              COALESCE(stage_id, '')""",
+                (now, str(source), k["player_id"], k["season_id"], k["stage_id"]))
+            touched += cur.rowcount
+        conn.commit()
+        return touched
+
+
+def totals_ready() -> bool:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute("SELECT 1 FROM player_totals LIMIT 1").fetchone()
+    return bool(row)
+
+
+def _aggregates_from_totals(w: Dict[str, float],
+                            scope: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Суммы по игрокам из свёрнутой таблицы — без похода в сырые игры."""
+    keys = list(AGG_KEYS)
+    sums = ", ".join(f"SUM({c}) AS {c}" for c in TOTALS_COLUMNS + tuple(_TOTALS_DERIVED))
+    query = (f"SELECT source, player_id, SUM(games) AS games, {sums} "
+             f"FROM player_totals WHERE 1=1")
+    scope_sql, params = scope_where(scope)
+    query += scope_sql + " GROUP BY source, player_id"
+    out: Dict[str, Dict[str, Any]] = {}
+    with sheets_cache.get_connection() as conn:
+        for row in conn.execute(query, params).fetchall():
+            r = dict(row)
+            games = int(r["games"] or 0)
+            agg: Dict[str, Any] = {"games": games}
+            for c in keys:
+                # mins в свёрнутой таблице нет — она хранит секунды.
+                agg[c] = (round((r.get("secs") or 0) / 60.0, 2) if c == "mins"
+                          else int(r.get(c) or 0))
+            agg["fp"] = round(sum(float(agg.get(k, 0)) * coeff for k, coeff in w.items()), 2)
+            agg["fp_avg"] = round(agg["fp"] / games, 2) if games else 0.0
+            out[f"{r['source']}:{r['player_id']}"] = agg
+    return out
+
+
 def player_aggregates(weights: Optional[Dict[str, float]] = None,
                       date_from: Optional[str] = None,
                       date_to: Optional[str] = None,
@@ -592,6 +712,12 @@ def player_aggregates(weights: Optional[Dict[str, float]] = None,
     пересчётом по каждой игре."""
     sheets_cache.init_db()
     w = weights or DEFAULT_WEIGHTS
+    # Запрос без ограничения по датам — это «за всё время», и он же самый
+    # частый (пул, карточки, таблица). Отвечаем свёрнутыми суммами; сырые игры
+    # остаются для срезов по датам (топ за неделю/месяц), где свёртка не
+    # применима.
+    if not date_from and not date_to and totals_ready():
+        return _aggregates_from_totals(w, scope)
     sums = ", ".join([f"SUM({c}) AS {c}" for c in AGG_COLUMNS] +
                      [f"{expr} AS {name}" for name, expr in AGG_DERIVED.items()])
     query = f"SELECT source, player_id, COUNT(*) AS games, {sums} FROM game_player_stats WHERE 1=1"

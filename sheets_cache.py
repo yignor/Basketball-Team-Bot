@@ -663,6 +663,36 @@ CREATE TABLE IF NOT EXISTS coach_report_sent (
     PRIMARY KEY (source, team_id, game_id)
 );
 
+-- Свёрнутая статистика игрока: суммы по (источник, игрок, сезон, стадия).
+-- Сыгранная игра больше не меняется, поэтому пересчитывать 40+ тысяч строк на
+-- каждый запрос незачем: держим готовые суммы и трогаем только те строки, к
+-- которым относится новая игра. Все запросы «за всё время» читают отсюда, и
+-- вместо десятков тысяч строк складываются сотни.
+CREATE TABLE IF NOT EXISTS player_totals (
+    source      TEXT NOT NULL,
+    player_id   TEXT NOT NULL,
+    season_id   TEXT NOT NULL DEFAULT '',
+    stage_id    TEXT NOT NULL DEFAULT '',
+    games       INTEGER NOT NULL DEFAULT 0,
+    pts INTEGER NOT NULL DEFAULT 0, reb INTEGER NOT NULL DEFAULT 0,
+    reb_off INTEGER NOT NULL DEFAULT 0, reb_def INTEGER NOT NULL DEFAULT 0,
+    ast INTEGER NOT NULL DEFAULT 0, stl INTEGER NOT NULL DEFAULT 0,
+    blk INTEGER NOT NULL DEFAULT 0, tur INTEGER NOT NULL DEFAULT 0,
+    pf INTEGER NOT NULL DEFAULT 0, foul_on INTEGER NOT NULL DEFAULT 0,
+    fgm INTEGER NOT NULL DEFAULT 0, fga INTEGER NOT NULL DEFAULT 0,
+    tpm INTEGER NOT NULL DEFAULT 0, tpa INTEGER NOT NULL DEFAULT 0,
+    ftm INTEGER NOT NULL DEFAULT 0, fta INTEGER NOT NULL DEFAULT 0,
+    secs INTEGER NOT NULL DEFAULT 0,
+    -- Промахи и дабл-даблы суммой по играм не восстановишь, поэтому считаем
+    -- их здесь же, на уровне отдельных матчей, и складываем уже готовыми.
+    miss INTEGER NOT NULL DEFAULT 0, ftmiss INTEGER NOT NULL DEFAULT 0,
+    dd INTEGER NOT NULL DEFAULT 0, td INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (source, player_id, season_id, stage_id)
+);
+CREATE INDEX IF NOT EXISTS idx_player_totals_scope
+    ON player_totals(source, season_id, stage_id);
+
 -- Настройки бота, которые правит человек из интерфейса. Отдельно от листа
 -- «Конфиг»: тот про лиги и топики, а это про поведение самого бота, и менять
 -- их надо кнопкой, а не через таблицу.
