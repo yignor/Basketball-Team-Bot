@@ -3452,7 +3452,21 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
     elif posted:
         lines.append("✅ Состав в чате актуален.")
 
+    # Форма — рядом с составом: тренер решает её тогда же, когда собирает
+    # людей, и отдельный экран ради двух вариантов был бы лишним шагом.
+    form = game_roster.form_of(source, game_id)
+    lines.append("")
+    lines.append(f"👕 Форма: {game_roster.FORMS.get(form, 'не выбрана')}")
+
     rows: List[List[InlineKeyboardButton]] = []
+    rows.append([
+        InlineKeyboardButton(
+            f"{'✅ ' if form == 'dark' else ''}👕 Тёмная",
+            callback_data=f"rost:form:{source}:{game_id}:dark"),
+        InlineKeyboardButton(
+            f"{'✅ ' if form == 'light' else ''}👕 Светлая",
+            callback_data=f"rost:form:{source}:{game_id}:light"),
+    ])
     for v in waiting[:10]:
         if v["linked"]:
             rows.append([InlineKeyboardButton(
@@ -3763,6 +3777,20 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif what == "edit":
             await _update_roster_post(query, source, game_id)
             return
+        elif what == "form" and len(parts) > 4:
+            import game_roster
+            value = parts[4] if parts[4] in game_roster.FORMS else ""
+            # Повторное нажатие снимает выбор: передумал — не надо искать
+            # отдельную кнопку «сбросить».
+            if game_roster.form_of(source, game_id) == value:
+                value = ""
+            await asyncio.to_thread(game_roster.set_form, source, game_id, value)
+            # Если состав уже в чате — правим то же сообщение, а не шлём второе:
+            # форма меняется чаще состава, и каждое такое изменение новым
+            # сообщением превратило бы чат в ленту уточнений.
+            if await asyncio.to_thread(game_roster.is_posted, source, game_id):
+                await _update_roster_post(query, source, game_id)
+                return
 
         # Спорные фамилии из списка разбираем подряд, не возвращая тренера
         # каждый раз к общему экрану.

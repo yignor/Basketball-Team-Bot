@@ -138,8 +138,44 @@ def roster(source: str, game_id: str) -> List[Dict[str, Any]]:
         player = coach_payments.player_by_row(int(r["player_row"]))
         if player:
             out.append(player)
-    out.sort(key=lambda p: p["title"])
+    out.sort(key=_by_surname)
     return out
+
+
+# Форма на игру: тёмная или светлая. Хранится у игры, потому что зависит от
+# соперника, а не от команды вообще.
+FORMS = {"dark": "тёмная", "light": "светлая"}
+
+
+def _by_surname(player: Dict[str, Any]) -> Tuple[str, str]:
+    """Сортировка по-русски: без учёта регистра и с «ё» на своём месте.
+
+    Сортировка по строке целиком ставила «Ёлкина» перед «Абрамовым»: в юникоде
+    «Ё» стоит до «А», и алфавит рассыпался на ровном месте."""
+    def norm(text: Any) -> str:
+        return str(text or "").strip().lower().replace("ё", "е")
+    return norm(player.get("surname")), norm(player.get("name"))
+
+
+def form_of(source: str, game_id: str) -> str:
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT form FROM game_roster_state WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    return str((row["form"] if row else "") or "")
+
+
+def set_form(source: str, game_id: str, form: str) -> None:
+    """Ставит форму. Пустая строка — снять выбор."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO game_roster_state (source, game_id, form, posted_at)
+               VALUES (?, ?, ?, '')
+               ON CONFLICT(source, game_id) DO UPDATE SET form = excluded.form""",
+            (source, str(game_id), str(form or "")))
+        conn.commit()
 
 
 def add(source: str, game_id: str, player_row: int, by: str = "") -> bool:
@@ -257,7 +293,13 @@ def post_text(game: Dict[str, Any], people: List[Dict[str, Any]]) -> str:
     head = f"🏀 Состав на игру: {game_label(game)}"
     if not people:
         return head + "\n\nСостав пока не собран."
-    lines = [head, ""]
+    lines = [head]
+    # Форму пишем сразу под шапкой: это первое, что человек ищет перед выездом,
+    # и искать её в конце списка из одиннадцати фамилий неудобно.
+    form = form_of(game["source"], str(game["game_id"]))
+    if form in FORMS:
+        lines.append(f"👕 Форма: {FORMS[form]}")
+    lines.append("")
     for i, p in enumerate(people, start=1):
         lines.append(f"{i}. {p['title']}")
     lines += ["", f"Всего: {len(people)}."]

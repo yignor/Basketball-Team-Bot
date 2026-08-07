@@ -858,6 +858,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_meta", "video_seconds", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_video_sync", "tipoff_at", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_shifts", "start_left", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_roster_state", "form", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».
