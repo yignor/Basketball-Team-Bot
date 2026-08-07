@@ -295,6 +295,12 @@
   </div>
 
   <div id="msg">Загрузка…</div>
+  <!-- Проверка связи. Показывается по кнопке бота (#diag) и сама — когда до
+       сервера достучаться не удалось: человеку нужна причина, а не «ошибка». -->
+  <div id="diag" class="hidden">
+    <div class="sect">🔌 Проверка связи</div>
+    <div id="diagBody"></div>
+  </div>
 
 <script>
 (function () {
@@ -321,6 +327,25 @@
     CF, FUNNEL,
   ])].filter(Boolean);
   let API = API_LIST[0] || '';
+  // Админ может выключить дверь (например, Cloudflare лёг) — тогда её незачем
+  // пробовать вовсе. Список приходит с той двери, что ответила, и живёт в
+  // localStorage до следующего успешного ответа: в момент отказа спросить
+  // некого, а перебирать заведомо мёртвое — терять по 8 секунд.
+  function savedDoors() {
+    try { return JSON.parse(localStorage.getItem('doors') || 'null'); }
+    catch (e) { return null; }
+  }
+  function rememberDoors(doors) {
+    try { localStorage.setItem('doors', JSON.stringify(doors || [])); } catch (e) {}
+  }
+  function doorOrder() {
+    const saved = savedDoors();
+    if (!saved || !saved.length) return API_LIST;
+    const off = new Set(saved.filter(d => !d.enabled).map(d => d.url));
+    const live = API_LIST.filter(u => !off.has(u));
+    // Все выключены — значит настройка испорчена; пробуем как обычно.
+    return live.length ? live : API_LIST;
+  }
   // Сколько ждём ответа на пробе двери, прежде чем идти к следующей.
   const PROBE_TIMEOUT = 8000;
 
@@ -342,6 +367,70 @@
   const norm = t => (t || '').toLowerCase().replace(/ё/g, 'е').trim();
   function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
 
+  // ─── проверка связи ────────────────────────────────────────────────────────
+  //
+  // Страница живёт на GitHub Pages и открывается всегда, а вот до сервера
+  // человек может не дойти: у части провайдеров режется ts.net, у части —
+  // Cloudflare. Отсюда и диагностика: она пробует КАЖДУЮ дверь с устройства
+  // самого человека и показывает, что именно не работает. Это единственное
+  // место, где такое видно: с сервера обе двери всегда «в порядке».
+
+  async function probeDoor(base) {
+    const t0 = Date.now();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT);
+    try {
+      const r = await fetch(base + '/fantasy/ping', {signal: ctl.signal});
+      await r.json().catch(() => ({}));
+      return {ok: r.ok, code: r.status, ms: Date.now() - t0};
+    } catch (e) {
+      return {ok: false, code: 0, ms: Date.now() - t0,
+              why: e.name === 'AbortError' ? 'не ответил вовремя' : 'не достучались'};
+    } finally { clearTimeout(timer); }
+  }
+
+  async function runDiag() {
+    const box = $('diagBody');
+    box.innerHTML = '<div class="pstat">Проверяю…</div>';
+    const rows = [];
+    for (const base of [CF, FUNNEL]) {
+      const r = await probeDoor(base);
+      const name = base === CF ? 'Cloudflare' : 'Tailscale Funnel';
+      const verdict = r.ok ? `✅ отвечает за ${(r.ms / 1000).toFixed(1)} с`
+        : r.code ? `⚠️ ответил кодом ${r.code} за ${(r.ms / 1000).toFixed(1)} с`
+        : `❌ ${r.why} (${(r.ms / 1000).toFixed(1)} с)`;
+      rows.push({name, base, verdict, ok: r.ok});
+    }
+    const working = rows.filter(r => r.ok).length;
+    const head = working
+      ? `Рабочих каналов: ${working} из ${rows.length}. Приложение должно открываться.`
+      : 'Ни один канал не отвечает с этого устройства. Скорее всего режет провайдер — ' +
+        'попробуй мобильный интернет вместо Wi-Fi или наоборот.';
+    box.innerHTML = `<div class="banner">${head}</div>` +
+      rows.map(r => `<div class="card" style="cursor:default">` +
+        `<div class="info"><div class="pname">${r.name}</div>` +
+        `<div class="pstat">${r.verdict}</div>` +
+        `<div class="pstat plinks">${esc(r.base)}</div></div></div>`).join('') +
+      `<div class="pstat" style="margin-top:10px">Сейчас работаю: ` +
+      `${live ? 'через живой канал ' + esc(API) : 'в запасном режиме, данные из кнопки бота'}` +
+      `</div>` +
+      `<div class="bar" style="padding-left:0;margin-top:8px">` +
+      `<button class="chip" onclick="runDiag()">🔄 Проверить ещё раз</button>` +
+      `<button class="chip" onclick="copyDiag()">📋 Скопировать для админа</button></div>`;
+    window.__diag = {rows, live, api: API, at: new Date().toISOString()};
+  }
+  window.runDiag = runDiag;
+
+  function copyDiag() {
+    const d = window.__diag || {};
+    const text = 'Проверка связи с фэнтези:\n'
+      + (d.rows || []).map(r => `${r.name}: ${r.verdict}`).join('\n')
+      + `\nРежим: ${d.live ? 'живой (' + d.api + ')' : 'запасной'}`;
+    if (navigator.clipboard) navigator.clipboard.writeText(text);
+    if (tg && tg.showAlert) tg.showAlert('Скопировано — пришли это админу.');
+  }
+  window.copyDiag = copyDiag;
+
   // Тупиковый экран: кроме сообщения показывать нечего. Вкладки и фильтры
   // прячем — рабочий вид приложения над текстом ошибки только сбивает с толку.
   function deadEnd(text) {
@@ -350,6 +439,10 @@
       if (el) el.classList.add('hidden');
     }
     msg(text);
+    // Из тупика должен быть выход к причине: человек видит не «что-то пошло не
+    // так», а какой именно канал у него не работает.
+    const d = $('diag');
+    if (d) { d.classList.remove('hidden'); runDiag(); }
   }
 
   // Отказ в доступе объясняем с ником, который видит бот: причина почти всегда
@@ -451,6 +544,7 @@
       api('/fantasy/pool', null, timeoutMs), api('/fantasy/roster', null, timeoutMs),
       api('/fantasy/standings', null, timeoutMs),
     ]);
+    if (p.doors) rememberDoors(p.doors);
     if (!p.season) { msg('Сейчас нет активного сезона фэнтези.'); return false; }
     // Членство больше не пропуск: играть может любой желающий. Флаг остаётся
     // в ответе — по нему различаются командные мелочи, а не вход.
@@ -1997,6 +2091,14 @@
   // ─── старт ─────────────────────────────────────────────────────────────────
 
   async function init() {
+    // Открыли специально ради проверки связи (кнопка в боте даёт #diag) —
+    // показываем её сразу и не грузим остальное: человек пришёл за причиной.
+    if (/[#&]diag\b/.test(location.hash || '')) {
+      deadEnd('');
+      $('diag').classList.remove('hidden');
+      runDiag();
+      return;
+    }
     // Живой режим — если бэкенд доступен. Он даёт свежую статистику и позволяет
     // открывать приложение кнопкой меню (там sendData недоступен).
     let why = '';
@@ -2005,7 +2107,7 @@
     else if (!tg.initData) why = 'Telegram не передал подпись';
     else {
       let refusal = null;
-      for (const base of API_LIST) {
+      for (const base of doorOrder()) {
         API = base;
         try {
           // На ПРОБЕ ждём мало: одна из дверей бывает мигающей (у Cloudflare

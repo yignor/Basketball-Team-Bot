@@ -1558,6 +1558,8 @@ async def handle_pool(request: web.Request) -> web.Response:
                               "ranks": fantasy_prices.describe(season)},
         "seasons": seasons,
         "pool": pool,
+        # Двери — чтобы приложение знало, какую можно не пробовать.
+        "doors": doors_state(),
         "member": _is_team_member(str(user.get("id")), user.get("username", "")),
         "admin": _is_admin(user),
         # Нашёлся ли сам человек среди игроков пула — от этого зависит, есть ли
@@ -1839,6 +1841,31 @@ async def handle_standings(request: web.Request) -> web.Response:
                               "modes": fantasy_modes.describe(season)})
 
 
+# Двери наружу: id → (подпись, адрес, ключ настройки). Порядок — порядок
+# перебора во фронте: Cloudflare первым, у него охват шире.
+DOORS = [
+    ("cf", "Cloudflare", "https://api.one4two.ru", "door_cf_enabled"),
+    ("funnel", "Tailscale Funnel", FUNNEL_URL, "door_funnel_enabled"),
+]
+
+
+def doors_state() -> List[Dict[str, Any]]:
+    """Какие двери сейчас предлагаем фронту. Выключенную не перебираем: 8
+    секунд на заведомо мёртвом канале — это 8 секунд белого экрана."""
+    out = []
+    for key, title, url, setting in DOORS:
+        out.append({"id": key, "title": title, "url": url,
+                    "enabled": bool(sheets_cache.get_int_setting(setting, 1))})
+    return out
+
+
+async def handle_ping(request: web.Request) -> web.Response:
+    """Проба двери. Без подписи и без данных: этим эндпоинтом человек
+    проверяет, доходит ли он до сервера вообще, — и как раз в этот момент
+    подпись у него может не работать."""
+    return web.json_response({"ok": True, "doors": doors_state()})
+
+
 def create_app(bot_token: str) -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
     app["bot_token"] = bot_token
@@ -1853,6 +1880,7 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/history", handle_history),
         web.get("/fantasy/admin", handle_admin_state),
         web.post("/fantasy/admin", handle_admin_action),
+        web.get("/fantasy/ping", handle_ping),
         web.get("/health", lambda r: web.json_response({"ok": True})),
     ])
     return app

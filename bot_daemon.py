@@ -708,6 +708,13 @@ def _menu_markup(is_member: bool = False) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("😄 Шутки к фамилиям",
                                           callback_data="menu:jokes")])
     rows.append([InlineKeyboardButton("🔔 Мои подписки", callback_data="menu:subs")])
+    # Проверка связи — всем и всегда: жалоба «фэнтези не открывается» почти
+    # всегда про канал до сервера, а увидеть это можно только с устройства
+    # самого человека. Ссылка ведёт в приложение сразу на экран проверки.
+    url = _webapp_url()
+    if url:
+        rows.append([InlineKeyboardButton(
+            "🔌 Проверить связь", web_app=WebAppInfo(url=url + "#diag"))])
     rows.append([InlineKeyboardButton("💬 Написать админам",
                                       callback_data="menu:feedback")])
     return InlineKeyboardMarkup(rows)
@@ -1523,6 +1530,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
         [InlineKeyboardButton("⏱ Записи игр", callback_data="admin:video:list")],
         [InlineKeyboardButton("🎂 Дни рождения и ники", callback_data="admin:field:list:0")],
+        [InlineKeyboardButton("🔌 Каналы связи", callback_data="admin:doors:list")],
         [InlineKeyboardButton("📈 Моя статистика (скрытое)", callback_data="admin:menu:profile")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
@@ -1910,6 +1918,70 @@ def game_timeline_drop(source: str, game_id: str) -> None:
     """Снять ручную привязку. Обёртка, чтобы не тащить импорт в роутер."""
     import game_timeline
     game_timeline.drop_offset(source, game_id)
+
+
+# ─── каналы связи (двери к API) ─────────────────────────────────────────────
+#
+# У приложения две двери к одному серверу: Cloudflare и Tailscale Funnel.
+# У части игроков провайдер режет одну из них, и приложение честно перебирает
+# обе — но перебор стоит секунд. Выключенную дверь фронт не пробует вовсе.
+#
+# ВАЖНО: проверка отсюда — СЕРВЕРНАЯ. Она говорит «дверь открыта наружу», но
+# ничего не знает про провайдера конкретного игрока: у него может резаться
+# ровно та дверь, которая с сервера отвечает мгновенно. Поэтому у людей есть
+# своя кнопка «🔌 Проверить связь», а тут — состояние самой инфраструктуры.
+
+async def _probe_door(url: str, timeout: float = 8.0) -> Dict[str, Any]:
+    """Стучимся в дверь снаружи: код ответа и время. 401 — здоровый ответ."""
+    import time as _t
+    import aiohttp
+    started = _t.perf_counter()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{url}/fantasy/ping",
+                                   timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                await r.read()
+                code = r.status
+    except Exception as e:
+        return {"ok": False, "code": 0, "ms": int((_t.perf_counter() - started) * 1000),
+                "why": type(e).__name__}
+    return {"ok": code in (200, 401), "code": code,
+            "ms": int((_t.perf_counter() - started) * 1000)}
+
+
+async def _doors_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    import fantasy_api
+    import sheets_cache
+    lines = ["🔌 Каналы связи", "",
+             "Двери к одному и тому же серверу. Проверка отсюда, с сервера:", ""]
+    rows = []
+    for door in await asyncio.to_thread(fantasy_api.doors_state):
+        probe = await _probe_door(door["url"])
+        state = "включена" if door["enabled"] else "ВЫКЛЮЧЕНА"
+        verdict = (f"отвечает ({probe['code']}) за {probe['ms']} мс" if probe["ok"]
+                   else f"молчит ({probe.get('why') or probe['code']})")
+        lines.append(f"• {door['title']} — {state}, {verdict}")
+        lines.append(f"   {door['url']}")
+        rows.append([InlineKeyboardButton(
+            f"{'🔴 Выключить' if door['enabled'] else '🟢 Включить'} {door['title']}"[:60],
+            callback_data=f"admin:doors:toggle:{door['id']}")])
+    port = await asyncio.to_thread(_api_port_alive)
+    lines += ["", f"Сам API на сервере: {'слушает порт' if port else 'НЕ СЛУШАЕТ'}"]
+    lines += ["", "Выключенную дверь приложение не пробует — это экономит "
+              "игрокам секунды ожидания. Но помни: с сервера обе двери почти "
+              "всегда «в порядке», а режет их провайдер у игрока."]
+    rows.append([InlineKeyboardButton("🔄 Проверить снова", callback_data="admin:doors:list")])
+    rows.append(_back_button())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _api_port_alive() -> bool:
+    """Слушает ли фэнтези-API свой порт. Самый незаметный вид отказа: бот
+    отвечает на кнопки, а приложение у всех мёртво."""
+    import socket
+    with socket.socket() as sock:
+        sock.settimeout(1.5)
+        return sock.connect_ex(("127.0.0.1", FANTASY_API_PORT)) == 0
 
 
 # ─── дни рождения и ники ────────────────────────────────────────────────────
@@ -4243,7 +4315,20 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
-        if parts[1] == "field":
+        if parts[1] == "doors":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "toggle" and len(parts) > 3:
+                import fantasy_api
+                import sheets_cache
+                key = next((setting for did, _, _, setting in fantasy_api.DOORS
+                            if did == parts[3]), "")
+                if key:
+                    now = sheets_cache.get_int_setting(key, 1)
+                    await asyncio.to_thread(sheets_cache.set_setting, key,
+                                            0 if now else 1)
+            text, markup = await _doors_screen()
+            await query.edit_message_text(text, reply_markup=markup)
+        elif parts[1] == "field":
             what = parts[2] if len(parts) > 2 else "list"
             if what == "pick" and len(parts) > 3:
                 text, markup = await asyncio.to_thread(_field_card, int(parts[3]))
