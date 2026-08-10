@@ -1552,6 +1552,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⏱ Записи игр", callback_data="admin:video:list")],
         [InlineKeyboardButton("🎂 Дни рождения и ники", callback_data="admin:field:list:0")],
         [InlineKeyboardButton("🔌 Каналы связи", callback_data="admin:doors:list")],
+        [InlineKeyboardButton("💾 Резервная копия", callback_data="admin:backup")],
         [InlineKeyboardButton("📈 Моя статистика (скрытое)", callback_data="admin:menu:profile")],
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
     ])
@@ -5186,6 +5187,28 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 _awaiting_video.pop(user.id, None)
                 text, markup = await asyncio.to_thread(_video_screen)
                 await query.edit_message_text(text, reply_markup=markup)
+        elif parts[1] == "backup":
+            # Снимаем свежую и присылаем сюда же: проверить, что копии живы,
+            # человек должен с телефона, а не заходя на сервер по ssh.
+            import backup_db
+            await query.edit_message_text("⏳ Снимаю копию…")
+            info = await asyncio.to_thread(backup_db.make_local)
+            await asyncio.to_thread(backup_db.rotate_local)
+            got = await _backup_to_telegram(context.application, info["path"])
+            have = sorted(backup_db.LOCAL_DIR.glob(
+                f"{backup_db.PREFIX}*{backup_db.SUFFIX}"), reverse=True)
+            lines = [f"💾 Копия снята: {info['path'].name}",
+                     f"{info['bytes'] / 1024 / 1024:.1f} МБ (из "
+                     f"{info['raw_bytes'] / 1024 / 1024:.1f} МБ), "
+                     f"таблиц {info['tables']}", ""]
+            lines.append("Файл отправлен сюда же." if got
+                         else "⚠️ Файл отправить не вышло — см. лог.")
+            lines += ["", f"Всего копий на сервере: {len(have)}"]
+            lines += [f"   {p.name}" for p in have[:8]]
+            await query.edit_message_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:main")]))
+
         elif parts[1] == "menu":
             screen = parts[2] if len(parts) > 2 else "main"
             if screen == "main":
@@ -5931,23 +5954,45 @@ async def _nightly_backup(app: Application) -> None:
         log.error(f"Резервная копия не снялась: {e}")
         sheets_cache.report_error("backup", str(e), _get_spreadsheet())
         return
-    # Диск — отдельно: без него копия всё равно уже есть на сервере, и
-    # недоступный Google не должен выглядеть как провал всей задачи.
-    try:
-        sent = await asyncio.to_thread(_backup_to_drive, info["path"])
-        if sent:
-            log.info(f"Резервная копия на Диске: {sent}")
-    except Exception as e:
-        log.warning(f"Копия не уехала на Диск: {e}")
+    # Копию надо унести С СЕРВЕРА, иначе от «умер диск» она не спасает.
+    # Раз в неделю, а не каждый день: воскресную мы и так держим восемь недель,
+    # а семь файлов в неделю превращают переписку в свалку.
+    day = sheets_cache.get_int_setting("backup_send_weekday", 6)   # 6 — воскресенье
+    if now.weekday() == day:
+        await _backup_to_telegram(app, info["path"])
 
 
-def _backup_to_drive(path) -> str:
-    import backup_db
-    session, _ = backup_db._session()
-    parent = backup_db.folder_id(session)
-    got = backup_db.upload(session, path, parent)
-    backup_db.rotate_drive(session, parent)
-    return str(got.get("name") or "")
+async def _backup_to_telegram(app: Application, path) -> int:
+    """Отправляет копию админам в личку — это и есть её вторая площадка.
+
+    Google Диск не подошёл принципиально: служебные аккаунты не имеют своего
+    места, и файл, созданный от их имени, отвергается («Service Accounts do not
+    have storage quota») — хоть в своей папке, хоть в чужой. Обходятся это либо
+    общим диском (только для Workspace, у нас обычная почта), либо отдельным
+    OAuth от живого человека с его согласием.
+
+    Телеграм закрывает ту же задачу без единой новой учётки: файл уходит
+    владельцу в личку, лежит в облаке Телеграма, качается на любое устройство.
+    3 МБ при потолке в 50 МБ для ботов — запас на годы вперёд."""
+    import html
+    sent = 0
+    size = path.stat().st_size / 1024 / 1024
+    caption = (f"💾 Резервная копия базы\n{path.name} · {size:.1f} МБ\n\n"
+               "Разворачивается так:\n"
+               "<code>gunzip -c файл > data/bot.db</code>\n\n"
+               "Подробнее — deploy/BACKUP.md")
+    for uid in ADMIN_USER_IDS:
+        try:
+            with open(path, "rb") as f:
+                await app.bot.send_document(chat_id=int(uid), document=f,
+                                            filename=path.name, caption=caption,
+                                            parse_mode="HTML")
+            sent += 1
+        except Exception as e:
+            log.warning(f"Копию не отправил {uid}: {e}")
+    if sent:
+        log.info(f"Резервная копия отправлена админам: {sent}")
+    return sent
 
 
 async def _watch_broadcasts(app: Application) -> None:

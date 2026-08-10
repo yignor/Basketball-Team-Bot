@@ -20,8 +20,17 @@
 Хранение: 7 последних ежедневных плюс воскресные за 8 недель. Ежедневных хватает
 заметить свежую поломку, воскресные ловят ту, что тихо жила месяц.
 
-Про Google Диск: заливаем в папку, доступную владельцу таблицы. Файлы приватные —
-ими не делятся ни с кем, кроме него.
+Про Google Диск. Он тут не работает, и это не недоделка: **у служебных аккаунтов
+нет собственного места на Диске**. Файл, созданный от имени робота, отвергается
+(«Service Accounts do not have storage quota») — и в своей папке, и в чужой,
+куда его пустили. Проверено на боевых учётных данных. Остаются два пути: общий
+диск (Shared Drive, только в Google Workspace — на обычной почте их нет) или
+отдельный OAuth от живого человека с его согласием. Если общий диск появится,
+достаточно положить его id в BACKUP_DRIVE_FOLDER_ID — заливка включится сама.
+
+Поэтому вторая площадка — Телеграм: демон присылает копию админам в личку
+(bot_daemon._backup_to_telegram). Ни новых учёток, ни квот; файл лежит в облаке
+Телеграма и качается на любое устройство.
 """
 
 from __future__ import annotations
@@ -211,27 +220,17 @@ def _check(resp) -> Dict[str, Any]:
 
 
 def folder_id(session) -> str:
-    """Папка для копий: заданная в настройках либо своя, по имени."""
-    if DRIVE_FOLDER_ID:
-        return DRIVE_FOLDER_ID
-    q = ("mimeType='application/vnd.google-apps.folder' and trashed=false and "
-         f"name='{DRIVE_FOLDER_NAME}'")
-    found = _check(session.get(API, params={"q": q, "fields": "files(id,name)"}))
-    files = found.get("files") or []
-    if files:
-        return files[0]["id"]
-    made = _check(session.post(API, json={
-        "name": DRIVE_FOLDER_NAME,
-        "mimeType": "application/vnd.google-apps.folder"}))
-    fid = made["id"]
-    if DRIVE_OWNER:
-        # Доступ ровно одному человеку — владельцу таблицы. Ссылками не делимся:
-        # в базе телефоны команды, оплаты и telegram-id.
-        _check(session.post(f"{API}/{fid}/permissions",
-                            json={"type": "user", "role": "writer",
-                                  "emailAddress": DRIVE_OWNER}))
-        print(f"📂 Завёл папку «{DRIVE_FOLDER_NAME}» и открыл доступ {DRIVE_OWNER}")
-    return fid
+    """Папка для копий. Пусто — заливки нет, и это нормальное состояние.
+
+    Свою папку больше не заводим: проверено на боевых учётных данных — файл,
+    созданный служебным аккаунтом, Диск отвергает («Service Accounts do not
+    have storage quota»), и в собственной папке, и в чужой. Место на Диске
+    принадлежит человеку, а не роботу.
+
+    Работает только явно заданная папка на ОБЩЕМ диске (Shared Drive) — там
+    место принадлежит диску, а не создателю файла. Общие диски бывают лишь в
+    Google Workspace; на обычной почте остаётся OAuth от живого человека."""
+    return DRIVE_FOLDER_ID
 
 
 def upload(session, path: Path, parent: str) -> Dict[str, Any]:
@@ -244,6 +243,7 @@ def upload(session, path: Path, parent: str) -> Dict[str, Any]:
         }
         resp = session.post(UPLOAD_API,
                             params={"uploadType": "multipart",
+                                    "supportsAllDrives": "true",
                                     "fields": "id,name,size,createdTime"},
                             files=files)
     return _check(resp)
@@ -294,7 +294,7 @@ def main() -> int:
         print(f"Локально ({LOCAL_DIR}): {len(local)}")
         for p in local:
             print(f"  {p.name}  {human(p.stat().st_size)}")
-        if not args.no_drive:
+        if not args.no_drive and DRIVE_FOLDER_ID:
             try:
                 session, _ = _session()
                 parent = folder_id(session)
@@ -323,7 +323,7 @@ def main() -> int:
     for p in rotate_local():
         print(f"🧹 Убрал старую: {p.name}")
 
-    if args.no_drive:
+    if args.no_drive or not DRIVE_FOLDER_ID:
         return 0
 
     try:
