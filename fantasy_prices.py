@@ -328,9 +328,11 @@ def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
         else:
             _remember(MANUAL_SOURCE, datetime.now().strftime("%Y%m%d%H%M"), changes)
     changes.sort(key=lambda c: abs(c["new"] - c["old"]), reverse=True)
-    if not by_row:
+    if not by_row and not (source and game_id):
         # Молчаливое «ничего не сделал» — худший исход: цены стоят, а никто не
         # знает. Раньше так и было: в кроне реестр имён пуст, связок не было.
+        # Для КОНКРЕТНОЙ игры пустота нормальна: это может быть матч чужих
+        # команд, и предупреждать о нём каждые полчаса незачем.
         logging.getLogger(__name__).warning(
             "Пересчёт цен: не нашёл ни одного игрока (карточек в пуле %s, "
             "строк с ценой %s) — цены не двигались", len(pool), len(prices))

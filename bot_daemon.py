@@ -2080,16 +2080,19 @@ def _role_screen(row: int, source: str, game_id: str, sort: str) -> Tuple[str, I
     now = str(person.get("role") or "")
     keys = []
     line = []
-    for role in coach_lineup.ROLES:
+    # В кнопку кладём НОМЕР амплуа, а не название: Telegram ограничивает
+    # callback_data 64 байтами, а «Разыгрывающий» в кириллице занимает 26 —
+    # вместе с адресом игры кнопка не влезала и отвечала Button_data_invalid.
+    for idx, role in enumerate(coach_lineup.ROLES):
         line.append(InlineKeyboardButton(
             ("✅ " if role == now else "") + role,
-            callback_data=f"coach:setrole:{row}:{role}:{source}:{game_id}:{sort}"))
+            callback_data=f"coach:setrole:{row}:{idx}:{source}:{game_id}:{sort}"))
         if len(line) == 3:
             keys.append(line); line = []
     if line:
         keys.append(line)
     keys.append([InlineKeyboardButton("Снять амплуа",
-                                      callback_data=f"coach:setrole:{row}:-:{source}:{game_id}:{sort}")])
+                                      callback_data=f"coach:setrole:{row}:-1:{source}:{game_id}:{sort}")])
     keys.append([InlineKeyboardButton("⬅️ К составу",
                                       callback_data=f"coach:start:{source}:{game_id}:{sort}")])
     return (f"🎽 {person.get('title', '')}\n\nАмплуа сейчас: {now or 'не задано'}.\n\n"
@@ -4402,7 +4405,11 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif what == "setrole" and len(parts) > 6:
             import coach_lineup
-            role = "" if parts[3] == "-" else parts[3]
+            try:
+                idx = int(parts[3])
+            except ValueError:
+                idx = -1
+            role = coach_lineup.ROLES[idx] if 0 <= idx < len(coach_lineup.ROLES) else ""
             ok = await asyncio.to_thread(coach_lineup.set_role, int(parts[2]), role)
             await query.answer("Записал" if ok else "Таблица не приняла запись")
             text, markup = await asyncio.to_thread(
@@ -5402,8 +5409,10 @@ async def _catch_up_prices() -> None:
         except Exception as e:
             log.warning(f"Догон цен по игре {g['source']}/{g['game_id']}: {e}")
             continue
-        await asyncio.to_thread(training_dues.mark_event, key,
-                                f"движений {len(res.get('changes') or [])}")
+        moved = len(res.get("changes") or [])
+        await asyncio.to_thread(
+            training_dues.mark_event, key,
+            f"движений {moved}" if res.get("checked") else "наших игроков не было")
         if res.get("changes"):
             log.info(f"Цены после игры {g['source']}/{g['game_id']}: "
                      f"двинулось {len(res['changes'])}, записано {res.get('updated')}")
