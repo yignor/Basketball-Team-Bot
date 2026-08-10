@@ -5891,6 +5891,65 @@ async def _personal_digests(app: Application) -> None:
             await asyncio.to_thread(personal_game.mark_sent, item["key"], f"ошибка: {e}")
 
 
+async def _nightly_backup(app: Application) -> None:
+    """Ночная резервная копия базы — раз в сутки, из самого демона.
+
+    Не через cron: файл /etc/cron.d принадлежит root, а демон крутится под
+    botuser и о своей базе знает всё сам. Заодно копия переживает переустановку
+    сервиса — забыть «поставить ещё и крон» уже нельзя.
+
+    Почему это вообще нужно: составы фэнтези и зафиксированные по играм очки
+    не восстановимы ничем. В листы они не уезжают, а из API лиг не выводятся —
+    очки считаются один раз, в момент игры, и задним числом не пересчитываются
+    (см. deploy/BACKUP.md)."""
+    from datetime_utils import get_moscow_time
+    now = get_moscow_time()
+    hour = sheets_cache.get_int_setting("backup_hour", 3)
+    # Окно в два часа, а не ровно час: тик тридцатисекундный, но демон могли
+    # перезапустить ровно в это время, и одна пропущенная минута оставила бы
+    # сутки без копии.
+    if not (hour <= now.hour < hour + 2):
+        return
+    if sheets_cache.get_setting("backup_last_day") == now.date().isoformat():
+        return
+    try:
+        import backup_db
+        if backup_db.today_copy(now.date()):
+            await asyncio.to_thread(sheets_cache.set_setting, "backup_last_day",
+                                    now.date().isoformat())
+            return
+        info = await asyncio.to_thread(backup_db.make_local)
+        dropped = await asyncio.to_thread(backup_db.rotate_local)
+        await asyncio.to_thread(sheets_cache.set_setting, "backup_last_day",
+                                now.date().isoformat())
+        log.info(f"Резервная копия: {info['path'].name}, "
+                 f"{info['bytes'] / 1024 / 1024:.1f} МБ, таблиц {info['tables']}"
+                 + (f", убрано старых: {len(dropped)}" if dropped else ""))
+    except Exception as e:
+        # День без копии — это то, о чём надо знать сразу, а не когда
+        # понадобится восстановление.
+        log.error(f"Резервная копия не снялась: {e}")
+        sheets_cache.report_error("backup", str(e), _get_spreadsheet())
+        return
+    # Диск — отдельно: без него копия всё равно уже есть на сервере, и
+    # недоступный Google не должен выглядеть как провал всей задачи.
+    try:
+        sent = await asyncio.to_thread(_backup_to_drive, info["path"])
+        if sent:
+            log.info(f"Резервная копия на Диске: {sent}")
+    except Exception as e:
+        log.warning(f"Копия не уехала на Диск: {e}")
+
+
+def _backup_to_drive(path) -> str:
+    import backup_db
+    session, _ = backup_db._session()
+    parent = backup_db.folder_id(session)
+    got = backup_db.upload(session, path, parent)
+    backup_db.rotate_drive(session, parent)
+    return str(got.get("name") or "")
+
+
 async def _watch_broadcasts(app: Application) -> None:
     """Сторожит трансляции идущих матчей — тикает часто, работает редко.
 
@@ -6012,6 +6071,7 @@ async def _background_loop(app: Application) -> None:
             except Exception as e:
                 log.warning(f"Опознание по голосам: {e}")
             await _send_starting_lineups(app)
+            await _nightly_backup(app)
             await _watch_broadcasts(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()

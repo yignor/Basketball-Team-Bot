@@ -93,6 +93,16 @@ def snapshot(dst: Path) -> Dict[str, Any]:
     return {"tables": tables, "stats_rows": rows}
 
 
+def today_copy(today: Optional[date] = None) -> Optional[Path]:
+    """Сегодняшняя копия, если она уже снята и не пустая.
+
+    Нужна, чтобы задачу можно было звать откуда угодно — из cron, из демона,
+    руками — и она не делала одно и то же дважды."""
+    today = today or date.today()
+    path = LOCAL_DIR / f"{PREFIX}{today.isoformat()}{SUFFIX}"
+    return path if path.exists() and path.stat().st_size > 1024 else None
+
+
 def make_local() -> Dict[str, Any]:
     """Снимает базу, жмёт и кладёт в папку копий. Возвращает описание."""
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -249,7 +259,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Резервная копия базы бота")
     ap.add_argument("--no-drive", action="store_true", help="только локально")
     ap.add_argument("--list", action="store_true", help="показать, что уже есть")
+    ap.add_argument("--if-needed", action="store_true",
+                    help="ничего не делать, если сегодняшняя копия уже есть")
     args = ap.parse_args()
+
+    if args.if_needed and today_copy():
+        print(f"⏭️ Копия за сегодня уже есть: {today_copy().name}")
+        return 0
 
     if args.list:
         local = sorted(LOCAL_DIR.glob(f"{PREFIX}*{SUFFIX}"))
