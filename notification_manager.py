@@ -34,7 +34,8 @@ class NotificationManager:
         bot_token = os.getenv('BOT_TOKEN')
         if bot_token:
             try:
-                self.bot = Bot(token=bot_token)
+                import bot_factory
+                self.bot = bot_factory.make_bot(bot_token)
                 logger.info("✅ Бот инициализирован успешно")
             except Exception as e:
                 logger.error(f"❌ Ошибка инициализации бота: {e}")

@@ -580,7 +580,8 @@ async def send_all(year: int, month: int, dry_run: bool = False) -> int:
     if not token:
         print("❌ BOT_TOKEN не задан")
         return 2
-    bot = Bot(token)
+    import bot_factory
+    bot = bot_factory.make_bot(token)
     sent = skipped = empty = 0
     import subscriptions
     for uid in player_identity.linked_users():
@@ -683,7 +684,8 @@ def main() -> int:
         return 2
 
     async def send():
-        bot = Bot(token)
+        import bot_factory
+        bot = bot_factory.make_bot(token)
         for path in paths:
             with open(path, "rb") as f:
                 await bot.send_document(

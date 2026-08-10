@@ -82,7 +82,8 @@ class VotingPollConfig:
 
 class VotingPollsManager:
     def __init__(self) -> None:
-        self.bot: Optional[Bot] = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
+        import bot_factory
+        self.bot: Optional[Bot] = bot_factory.make_bot(BOT_TOKEN) if BOT_TOKEN else None
         self.chat_id: Optional[Any] = self._resolve_chat_id(CHAT_ID)
         self.automation_topics: Dict[str, Any] = {}
 

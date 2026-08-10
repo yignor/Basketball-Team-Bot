@@ -240,7 +240,8 @@ class GameSystemManager:
         
         if BOT_TOKEN:
             from telegram import Bot
-            self.bot = Bot(token=BOT_TOKEN)
+            import bot_factory
+            self.bot = bot_factory.make_bot(BOT_TOKEN)
     
     def _to_int(self, value: Any) -> Optional[int]:
         """Безопасно конвертирует значение в int"""

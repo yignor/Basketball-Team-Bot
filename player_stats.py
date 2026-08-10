@@ -761,7 +761,8 @@ async def main(person_id: int, out_file: str, target: Optional[str] = None) -> N
         return
     if target and BOT_TOKEN:
         from telegram import Bot
-        bot = Bot(token=BOT_TOKEN)
+        import bot_factory
+        bot = bot_factory.make_bot(BOT_TOKEN)
         chat_ids = [c.strip() for c in target.replace(",", " ").split() if c.strip()]
         for raw in chat_ids:
             cid: Any = int(raw) if raw.lstrip("-").isdigit() else raw

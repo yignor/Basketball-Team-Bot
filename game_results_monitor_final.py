@@ -47,7 +47,8 @@ class GameResultsMonitorFinal:
     def __init__(self):
         self.bot = None
         if BOT_TOKEN:
-            self.bot = Bot(token=BOT_TOKEN)
+            import bot_factory
+            self.bot = bot_factory.make_bot(BOT_TOKEN)
         
         # Создаем экземпляр менеджера игр
         self.game_manager = GameSystemManager()

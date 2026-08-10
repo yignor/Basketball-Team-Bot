@@ -323,7 +323,8 @@ async def main():
     print(f"\n🏀  Сбор голосов тренировок")
     print("=" * 50)
 
-    bot = Bot(token=BOT_TOKEN)
+    import bot_factory
+    bot = bot_factory.make_bot(BOT_TOKEN)
     spreadsheet = _init_sheets()
     await collect(bot, spreadsheet)
 

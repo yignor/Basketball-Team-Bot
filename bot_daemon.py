@@ -6305,7 +6305,8 @@ def main() -> None:
     # Трафик бота идёт через VPN-туннель с обфускацией (обход блокировки Telegram
     # провайдером), что добавляет джиттер задержки — дефолтные таймауты httpx
     # (5 сек) иногда не успевают, поднимаем их с запасом.
-    app = (
+    import bot_factory
+    builder = (
         Application.builder()
         .token(BOT_TOKEN)
         .connect_timeout(20)
@@ -6318,8 +6319,19 @@ def main() -> None:
         .concurrent_updates(True)
         .post_init(on_startup)
         .post_shutdown(on_shutdown)
-        .build()
     )
+    # Ограничитель скорости. Лимиты Телеграм считает НА ТОКЕН, а токеном
+    # пользуются ещё и десяток крон-задач (см. bot_factory) — каждая до сих пор
+    # считала себя единственной. При упоре в потолок прилетает 429, цикл
+    # рассылки обрывается, и часть людей сообщение не получает вовсе.
+    limiter = bot_factory.rate_limiter()
+    if limiter is not None:
+        builder = builder.rate_limiter(limiter)
+    app = builder.build()
+    log.info("Ограничитель скорости: "
+             + (f"{bot_factory.OVERALL_RATE:g}/с, {bot_factory.GROUP_RATE:g}/мин "
+                f"в группу, повторов при 429: {bot_factory.MAX_RETRIES}"
+                if limiter else "НЕ подключён (нет aiolimiter)"))
 
     app.add_handler(PollAnswerHandler(handle_poll_answer))
     app.add_handler(CommandHandler("start", handle_start))
