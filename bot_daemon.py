@@ -1985,6 +1985,56 @@ def _api_port_alive() -> bool:
         return sock.connect_ex(("127.0.0.1", FANTASY_API_PORT)) == 0
 
 
+async def _remind_debtors(query, kind: str) -> Tuple[int, int]:
+    """Ручная рассылка должникам: тренировки или игры. (дошло, не дошло).
+
+    Автоматика присылает такое по календарю, но деньги собирают когда удобно —
+    тренеру нужна кнопка «прямо сейчас», а не ожидание следующего срока."""
+    import coach_payments
+    import game_roster
+    import training_dues
+    targets: List[Tuple[int, str]] = []
+    if kind == "season":
+        period = training_dues.period_of(date.today())
+        for row in await asyncio.to_thread(training_dues.debtors, period):
+            targets.append((row["row"], training_dues.player_reminder(row)))
+    else:
+        for d in await asyncio.to_thread(game_roster.game_debts):
+            games_word = _plural(d["games"], "игру", "игры", "игр")
+            targets.append((d["row"],
+                            f"🏀 За {d['games']} {games_word} не закрыта оплата — "
+                            f"{d['amount']} ₽.\n\nРеквизиты у тренера."))
+    sent = skipped = 0
+    for row, text in targets:
+        uid = await asyncio.to_thread(training_dues.chat_id_of, row)
+        if not uid:
+            skipped += 1
+            continue
+        try:
+            await query.get_bot().send_message(chat_id=int(uid), text=text)
+            sent += 1
+        except Exception as e:
+            log.info(f"Напоминание строке {row} не доставлено: {e}")
+            skipped += 1
+    return sent, skipped
+
+
+def _clear_pending(uid: int) -> None:
+    """Сбрасывает все незаконченные диалоги пользователя.
+
+    Обработчики текста разложены по группам и срабатывают по очереди: у кого
+    в его словаре есть этот id, тот текст и забирает. Незакрытый диалог оплаты
+    перехватывал название команды при создании игры — бот искал «Тосно» среди
+    игроков и отвечал, что такого нет."""
+    _awaiting_payment.discard(uid)
+    _pay_draft.pop(uid, None)
+    _awaiting_video.pop(uid, None)
+    _awaiting_field.pop(uid, None)
+    _awaiting_money.pop(uid, None)
+    _newgame.pop(uid, None)
+    _roster_focus.pop(uid, None)
+
+
 # ─── игра, заведённая тренером ──────────────────────────────────────────────
 #
 # Организатор объявляет матч раньше, чем тот появляется в расписании лиги.
@@ -3309,19 +3359,41 @@ PLAYERS_PER_PAGE = 8
 
 
 def _coach_markup() -> InlineKeyboardMarkup:
+    """Корень раздела: два больших входа и разбор игр.
+
+    Плоский список из одиннадцати кнопок читался как свалка — деньги и игры
+    перемешивались, и нужное приходилось искать глазами каждый раз."""
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Оплата", callback_data="coach:money")],
+        [InlineKeyboardButton("🏀 Игры", callback_data="coach:play")],
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
+        [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
+    ])
+
+
+def _money_markup() -> InlineKeyboardMarkup:
+    """Всё про деньги в одном месте."""
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
-        [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games"),
-         InlineKeyboardButton("➕ Создать игру", callback_data="coach:ng")],
-        [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
         [InlineKeyboardButton("💸 Долги", callback_data="coach:debts"),
          InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")],
+        [InlineKeyboardButton("📨 Напомнить: тренировки", callback_data="coach:remind:season"),
+         InlineKeyboardButton("📨 Напомнить: игры", callback_data="coach:remind:game")],
+        [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
         [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe"),
          InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
         [InlineKeyboardButton("✏️ Изменить суммы", callback_data="coach:sums"),
          InlineKeyboardButton("🗑 Удалить оплату", callback_data="coach:delpay")],
-        [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
+        [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
+    ])
+
+
+def _play_markup() -> InlineKeyboardMarkup:
+    """Всё про игры."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games")],
+        [InlineKeyboardButton("➕ Создать игру", callback_data="coach:ng")],
+        [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
 
@@ -3674,6 +3746,10 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
         # они нужны и раньше — например, когда деньги собирают в зале.
         rows.append([InlineKeyboardButton(
             "💰 Кто не оплатил", callback_data=f"rost:debt:{source}:{game_id}")])
+        # Сразу после отправки состава деньги и собирают — кнопка тут, а не
+        # только в разделе оплат.
+        rows.append([InlineKeyboardButton(
+            "📨 Напомнить об оплате", callback_data="coach:remind:game")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(rows)
 
@@ -3985,6 +4061,9 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         text, markup = await asyncio.to_thread(_roster_screen, source, game_id)
         await query.edit_message_text(text, reply_markup=markup)
     except Exception as e:
+        if "not modified" in str(e).lower():
+            await query.answer("Уже открыто")
+            return
         log.error(f"Состав ({what}): {e}")
         await query.edit_message_text(f"⚠️ Не получилось: {e}")
 
@@ -4167,8 +4246,8 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "pay":
+            _clear_pending(user.id)
             _awaiting_payment.add(user.id)
-            _pay_draft.pop(user.id, None)
             await query.edit_message_text(PAY_ASK)
 
         elif what == "games":
@@ -4184,6 +4263,7 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             key = parts[2]
             title = next((t for k, t, _ in SCHED_FIELDS if k == key), key)
             unit = next((u for k, _, u in SCHED_FIELDS if k == key), "")
+            _clear_pending(user.id)
             _awaiting_money[user.id] = f"sched:{key}"
             hint = ("Пришли число месяца (1–28)." if unit == "число месяца"
                     else "Пришли час (0–23)." if unit == "час"
@@ -4197,6 +4277,7 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             step = parts[2] if len(parts) > 2 else ""
             draft = _newgame.get(user.id) or {}
             if not step:
+                _clear_pending(user.id)
                 _newgame[user.id] = {"stage": "league"}
                 text, markup = _ng_leagues_screen()
                 await query.edit_message_text(text, reply_markup=markup)
@@ -4231,6 +4312,29 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             elif step == "send":
                 await _ng_send(query, user)
 
+        elif what == "money":
+            await query.edit_message_text(
+                "💰 Оплата\n\nВзносы, долги и напоминания.",
+                reply_markup=_money_markup())
+
+        elif what == "play":
+            await query.edit_message_text(
+                "🏀 Игры\n\nСостав, создание игры.",
+                reply_markup=_play_markup())
+
+        elif what == "remind" and len(parts) > 2:
+            kind = parts[2]
+            sent, skipped = await _remind_debtors(query, kind)
+            what_title = "за тренировки" if kind == "season" else "за игры"
+            if not sent and not skipped:
+                await query.answer("Должников нет", show_alert=True)
+            else:
+                await query.edit_message_text(
+                    f"📨 Напоминание {what_title}: отправлено {sent}."
+                    + (f"\nНе дошло до {skipped} — не запускали бота."
+                       if skipped else ""),
+                    reply_markup=_money_markup())
+
         elif what == "debts":
             text, markup = await asyncio.to_thread(_debts_screen)
             await query.edit_message_text(text, reply_markup=markup,
@@ -4250,6 +4354,7 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("➕ Кому добавить долг?", reply_markup=markup)
 
         elif what == "debtwho" and len(parts) > 2:
+            _clear_pending(user.id)
             _awaiting_money[user.id] = f"debt:{parts[2]}"
             import coach_payments
             who = await asyncio.to_thread(coach_payments.player_by_row, int(parts[2]))
@@ -4268,6 +4373,7 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("👤 Чьи суммы меняем?", reply_markup=markup)
 
         elif what == "setsum" and len(parts) > 3:
+            _clear_pending(user.id)
             _awaiting_money[user.id] = f"sum:{parts[2]}:{parts[3]}"
             what_title = ("взнос за тренировки" if parts[3] == "season"
                           else "оплату одной игры")
@@ -4395,6 +4501,12 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
     except Exception as e:
+        # «Message is not modified» — не ошибка: экран уже показывает то, что
+        # нужно (тренер нажал ту же кнопку дважды). Показывать это как сбой —
+        # значит пугать человека на ровном месте.
+        if "not modified" in str(e).lower():
+            await query.answer("Уже открыто")
+            return
         log.error(f"Раздел тренера ({what}): {e}")
         await query.edit_message_text(f"⚠️ Не получилось: {e}",
                                       reply_markup=InlineKeyboardMarkup([back]))
@@ -4584,6 +4696,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 text, markup = await asyncio.to_thread(_field_card, int(parts[3]))
                 await query.edit_message_text(text, reply_markup=markup)
             elif what == "set" and len(parts) > 4:
+                _clear_pending(user.id)
                 _awaiting_field[user.id] = f"{parts[3]}:{parts[4]}"
                 ask = ("🎂 Пришли дату рождения: «22.09.2001» или без года «22.09»."
                        if parts[4] == "bd" else
@@ -4601,6 +4714,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 text, markup = await asyncio.to_thread(_video_screen)
                 await query.edit_message_text(text, reply_markup=markup)
             elif what == "set" and len(parts) > 4:
+                _clear_pending(user.id)
                 _awaiting_video[user.id] = f"{parts[3]}:{parts[4]}"
                 await query.edit_message_text(VIDEO_ASK)
             else:
@@ -5133,6 +5247,45 @@ async def _remind_players(app: Application, period: str,
     return stat
 
 
+async def _catch_up_prices() -> None:
+    """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
+
+    Цены пересчитывает кроновый обработчик результатов, и если он в тот момент
+    споткнулся (Google недоступен, лига молчала), движение не происходило уже
+    никогда: второго шанса не было. 09.08 из-за этого история цен осталась
+    пустой при 13 назревших движениях. Теперь демон догоняет сам."""
+    import fantasy
+    import fantasy_prices
+    import training_dues
+    season = await asyncio.to_thread(fantasy.get_active_season)
+    if not season:
+        return
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        games = [dict(r) for r in conn.execute(
+            """SELECT DISTINCT s.source, s.game_id, m.game_date
+                 FROM fantasy_game_scores s
+                 JOIN game_meta m ON m.source = s.source AND m.game_id = s.game_id
+                WHERE s.season_id = ? AND m.game_date >= ?
+                ORDER BY m.game_date""",
+            (season["id"], fantasy_prices.settings(season).get("since") or "0000"))]
+    for g in games:
+        key = f"price:{g['source']}:{g['game_id']}"
+        if await asyncio.to_thread(training_dues.event_done, key):
+            continue
+        try:
+            res = await asyncio.to_thread(fantasy_prices.recalc, season, None,
+                                          False, g["source"], g["game_id"])
+        except Exception as e:
+            log.warning(f"Догон цен по игре {g['source']}/{g['game_id']}: {e}")
+            continue
+        await asyncio.to_thread(training_dues.mark_event, key,
+                                f"движений {len(res.get('changes') or [])}")
+        if res.get("changes"):
+            log.info(f"Цены после игры {g['source']}/{g['game_id']}: "
+                     f"двинулось {len(res['changes'])}, записано {res.get('updated')}")
+
+
 async def _personal_digests(app: Application) -> None:
     """«Присылать после каждой игры» — настройка была, отправки не было.
 
@@ -5268,6 +5421,7 @@ async def _background_loop(app: Application) -> None:
             await _pay_schedule(app)
             await _game_schedule(app)
             await _personal_digests(app)
+            await _catch_up_prices()
             await _watch_broadcasts(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()
