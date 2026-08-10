@@ -462,10 +462,16 @@ def player_debt_text(game: Dict[str, Any], player: Dict[str, Any],
 # ─────────────────────── Что пора сделать сейчас ───────────────────────────
 
 def _game_start(game: Dict[str, Any]) -> Optional[datetime]:
-    """Начало игры как момент времени. Без времени в расписании — None."""
+    """Начало игры как момент времени по Москве. Без времени в расписании — None.
+
+    Со временнóй зоной, а не «голое» время: сравнивать это приходится с
+    get_moscow_time(), а naive и aware в Python не вычитаются — сложение таких
+    двух молча ломало весь фоновый цикл на первом же тике."""
+    from datetime_utils import get_moscow_time
     try:
         hh, mm = str(game.get("time") or "").split(":")[:2]
-        return datetime.combine(game["date"], time(int(hh), int(mm)))
+        return datetime.combine(game["date"], time(int(hh), int(mm)),
+                                tzinfo=get_moscow_time().tzinfo)
     except (ValueError, TypeError):
         return None
 

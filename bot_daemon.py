@@ -2061,7 +2061,7 @@ def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
     import coach_payments
     import game_roster
     from datetime_utils import get_moscow_time
-    now = get_moscow_time().replace(tzinfo=None)
+    now = get_moscow_time()
     # Только предстоящие: стартовая пятёрка — решение ПЕРЕД игрой. По сыгранной
     # выбирать нечего, а в списке она путается с ближайшей.
     games = []
