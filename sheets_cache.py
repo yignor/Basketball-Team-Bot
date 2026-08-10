@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS feature_access (
     tg_user_id  TEXT NOT NULL DEFAULT '',       -- заполнится при первом входе
     granted_at  TEXT NOT NULL DEFAULT '',
     granted_by  TEXT NOT NULL DEFAULT '',
+    until       TEXT NOT NULL DEFAULT '',       -- ISO-дата; пусто — бессрочно
     PRIMARY KEY (kind, username)
 );
 
@@ -864,6 +865,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_shifts", "start_left", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_roster_state", "form", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "role", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "feature_access", "until", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».
@@ -1699,22 +1701,61 @@ def _clean_nick(username: str) -> str:
     return (username or "").lstrip("@").strip().lower()
 
 
-def grant_access(kind: str, username: str, granted_by: str = "") -> bool:
-    """Открывает раздел по @нику. Числовой id подтянется при первом входе."""
+def grant_access(kind: str, username: str, granted_by: str = "",
+                 days: int = 0) -> bool:
+    """Открывает раздел по @нику. Числовой id подтянется при первом входе.
+
+    days > 0 — доступ на срок: он закончится сам, и о нём не придётся помнить.
+    Так проще выдавать разово (посмотреть отчёт перед турниром, помочь с
+    разбором), не превращая временное в постоянное."""
     nick = _clean_nick(username)
     if not nick or kind not in ACCESS_TITLES:
         return False
+    until = ""
+    if days > 0:
+        from datetime import date as _date, timedelta as _td
+        until = (_date.today() + _td(days=int(days))).isoformat()
     init_db()
     with _connection() as conn:
         conn.execute(
-            """INSERT INTO feature_access (kind, username, tg_user_id, granted_at, granted_by)
-               VALUES (?, ?, '', ?, ?)
+            """INSERT INTO feature_access (kind, username, tg_user_id, granted_at,
+                                           granted_by, until)
+               VALUES (?, ?, '', ?, ?, ?)
                ON CONFLICT(kind, username) DO UPDATE SET granted_at=excluded.granted_at,
-                                                         granted_by=excluded.granted_by""",
-            (kind, nick, _now_iso(), str(granted_by)))
+                                                         granted_by=excluded.granted_by,
+                                                         until=excluded.until""",
+            (kind, nick, _now_iso(), str(granted_by), until))
         conn.commit()
-    logger.info("Доступ «%s» выдан @%s (кем: %s)", ACCESS_TITLES[kind], nick, granted_by)
+    logger.info("Доступ «%s» выдан @%s%s (кем: %s)", ACCESS_TITLES[kind], nick,
+                f" до {until}" if until else " бессрочно", granted_by)
     return True
+
+
+def _access_expired(row: Any) -> bool:
+    """Истёк ли срок. Пустое поле — бессрочно."""
+    from datetime import date as _date
+    until = str((row["until"] if row else "") or "").strip()
+    if not until:
+        return False
+    try:
+        return _date.fromisoformat(until) < _date.today()
+    except ValueError:
+        return False
+
+
+def purge_expired_access() -> int:
+    """Снимает доступы, у которых вышел срок. Возвращает сколько снял."""
+    from datetime import date as _date
+    init_db()
+    today = _date.today().isoformat()
+    with _connection() as conn:
+        n = conn.execute(
+            "DELETE FROM feature_access WHERE until != '' AND until < ?",
+            (today,)).rowcount
+        conn.commit()
+    if n:
+        logger.info("Доступов с истёкшим сроком снято: %s", n)
+    return n
 
 
 def revoke_access(kind: str, username: str) -> bool:
@@ -1745,16 +1786,20 @@ def has_access(kind: str, tg_user_id: str, username: str = "") -> bool:
     uid, nick = str(tg_user_id), _clean_nick(username)
     init_db()
     with _connection() as conn:
-        if conn.execute("SELECT 1 FROM feature_access WHERE kind = ? AND tg_user_id = ?",
-                        (kind, uid)).fetchone():
-            return True
+        by_id = conn.execute(
+            "SELECT until FROM feature_access WHERE kind = ? AND tg_user_id = ?",
+            (kind, uid)).fetchone()
+        if by_id:
+            # Срок проверяем на каждом входе, а не только уборкой по расписанию:
+            # иначе между полуночью и первой уборкой доступ ещё живой.
+            return not _access_expired(by_id)
         if not nick:
             return False
         row = conn.execute(
-            "SELECT tg_user_id FROM feature_access WHERE kind = ? AND username = ?",
+            "SELECT tg_user_id, until FROM feature_access WHERE kind = ? AND username = ?",
             (kind, nick)).fetchone()
-        if not row or row["tg_user_id"]:
-            return False                    # нет доступа или ник занят другим id
+        if not row or row["tg_user_id"] or _access_expired(row):
+            return False                    # нет доступа, ник занят или срок вышел
         conn.execute(
             "UPDATE feature_access SET tg_user_id = ? WHERE kind = ? AND username = ?",
             (uid, kind, nick))

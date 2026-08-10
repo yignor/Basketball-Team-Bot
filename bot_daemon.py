@@ -354,6 +354,10 @@ def _can_see_personal(user) -> bool:
 # Подписи кнопок нижней клавиатуры. Она постоянная (is_persistent) и висит под
 # полем ввода независимо от того, куда пролистан чат, — команд стало много, и
 # держать их под рукой удобнее, чем искать сообщение с меню.
+# Сроки доступа: на игру, на турнир, на месяц — и бессрочно.
+ACCESS_PERIODS = [("На 1 день", 1), ("На неделю", 7), ("На месяц", 30),
+                  ("Бессрочно", 0)]
+
 ADMIN_KEYBOARD_LABEL = "📊 Админ-панель"
 PROGRESS_KEYBOARD_LABEL = "📈 Прогресс команды"
 MYSTATS_KEYBOARD_LABEL = "📊 Моя статистика"
@@ -3326,15 +3330,29 @@ COACH_ASK = ("Пришли @ник того, кому открыть разде�
 def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
     """Кому открыты закрытые разделы. Оба вида в одном месте — иначе админу
     пришлось бы помнить, в каком экране что выдаётся."""
+    # Заодно подчищаем истёкшие: список должен показывать то, что есть сейчас.
+    gone = sheets_cache.purge_expired_access()
     lines = ["🔑 Доступы к закрытым разделам", "",
              "Админам открыто всё и без списка. Остальным — по выдаче: "
              "по @нику, с закреплением за числовым id при первом входе.", ""]
+    if gone:
+        lines.append(f"⌛ Снял по истечении срока: {gone}.")
+        lines.append("")
     rows: List[List[InlineKeyboardButton]] = []
     for kind, title in sheets_cache.ACCESS_TITLES.items():
         people = sheets_cache.access_list(kind)
         lines.append(f"{title}: {len(people) or 'никому'}")
         for a in people:
             state = "вошёл" if a["tg_user_id"] else "ещё не заходил"
+            until = str(a.get("until") or "")
+            if until:
+                try:
+                    left = (date.fromisoformat(until) - date.today()).days
+                    state += f", до {date.fromisoformat(until):%d.%m} ({left} дн.)"
+                except ValueError:
+                    pass
+            else:
+                state += ", бессрочно"
             lines.append(f"   @{a['username']} — {state}")
         lines.append("")
         rows.append([InlineKeyboardButton(f"➕ Открыть «{title}»",
@@ -3378,15 +3396,20 @@ async def handle_coach_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_coach:
         return
-    kind = _awaiting_coach.pop(user.id)
+    pending = _awaiting_coach.pop(user.id)
+    kind, _, days_raw = str(pending).partition(":")
+    days = int(days_raw) if days_raw.isdigit() else 0
     title = sheets_cache.ACCESS_TITLES.get(kind, kind)
     nick = (msg.text or "").strip().split()[0] if (msg.text or "").strip() else ""
     if not nick.lstrip("@").replace("_", "").isalnum():
         await msg.reply_text("Это не похоже на @ник. Открой экран и попробуй ещё раз.")
         raise ApplicationHandlerStop
-    sheets_cache.grant_access(kind, nick, str(user.id))
+    sheets_cache.grant_access(kind, nick, str(user.id), days)
+    from datetime import timedelta as _td
+    until = ((date.today() + _td(days=days)).strftime("%d.%m.%Y") if days else "")
     await msg.reply_text(
-        f"✅ Раздел «{title}» открыт для {nick}.\n\n"
+        f"✅ Раздел «{title}» открыт для {nick}"
+        + (f" до {until}." if until else " бессрочно.") + "\n\n"
         "Кнопка появится у него после /start. Если он уже нажимал /start — "
         "пусть нажмёт ещё раз, клавиатура обновится.")
     raise ApplicationHandlerStop
@@ -4930,9 +4953,23 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             what = parts[2] if len(parts) > 2 else "list"
             if what == "add":
                 kind = parts[3]
-                _awaiting_coach[user.id] = kind
+                # Сначала срок, потом ник: доступ «на разок» — обычное дело
+                # (посмотреть отчёт перед турниром), и он должен заканчиваться
+                # сам, а не жить, пока о нём не вспомнят.
+                title = sheets_cache.ACCESS_TITLES.get(kind, kind)
+                rows = [[InlineKeyboardButton(label, callback_data=f"admin:acc:days:{kind}:{days}")]
+                        for label, days in ACCESS_PERIODS]
+                rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin:acc:list")])
                 await query.edit_message_text(
-                    COACH_ASK.format(title=sheets_cache.ACCESS_TITLES.get(kind, kind)))
+                    f"🔑 «{title}» — на какой срок открыть?",
+                    reply_markup=InlineKeyboardMarkup(rows))
+                return
+            if what == "days" and len(parts) > 4:
+                _clear_pending(user.id)
+                _awaiting_coach[user.id] = f"{parts[3]}:{parts[4]}"
+                title = sheets_cache.ACCESS_TITLES.get(parts[3], parts[3])
+                await query.edit_message_text(
+                    COACH_ASK.format(title=title))
                 return
             if what == "del":
                 sheets_cache.revoke_access(parts[3], parts[4])
@@ -5599,6 +5636,12 @@ async def _background_loop(app: Application) -> None:
             await _pay_schedule(app)
             await _game_schedule(app)
             await _personal_digests(app)
+            try:
+                dropped = await asyncio.to_thread(sheets_cache.purge_expired_access)
+                if dropped:
+                    log.info(f"Доступы с истёкшим сроком сняты: {dropped}")
+            except Exception as e:
+                log.warning(f"Уборка доступов: {e}")
             await _catch_up_prices()
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.
