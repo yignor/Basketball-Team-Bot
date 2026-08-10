@@ -191,6 +191,12 @@ class SlproManager:
             print(f"🔄 SLPRO: игра {sid} изменилась ({', '.join(bits)}), "
                   f"снято старых регистраций: {removed}")
 
+        # Эту игру мог завести тренер, пока её не было в расписании лиги.
+        # Тогда опрос уже висит — второй не нужен (подробности в game_link).
+        if not existing and await self.gsm._skip_if_coach_made("slpro", {
+                "game_id": sid, "date": game["game_date"]}, opp):
+            return False
+
         chat_ids = self._poll_chat_ids()
         if not chat_ids:
             print("❌ SLPRO: не настроены чаты для опросов")

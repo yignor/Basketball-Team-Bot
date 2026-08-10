@@ -1186,6 +1186,104 @@ class GameSystemManager:
                 best_game_id = rec_game_id_int
         return best
 
+    async def _skip_if_coach_made(self, source: str, game_info: Dict[str, Any],
+                                  opponent: str) -> bool:
+        """Не заводил ли эту игру тренер руками. True — опрос уже есть.
+
+        Тренер объявляет матч раньше лиги, и без этой проверки бот через день
+        рассылает второй опрос по той же игре: команда голосует дважды, состав
+        и оплата разъезжаются по двум записям. Так и случилось на боевых.
+
+        Совпадение по сопернику и дате считаем достаточным (подробнее почему —
+        в game_link). Перенос датой не связываем молча: бывало, что игру
+        отменили, а в API её просто передвинули, — про такое спрашиваем."""
+        import game_link
+        try:
+            game_id = str(game_info.get('game_id') or '')
+            if not game_id or game_link.decided(source, game_id):
+                return game_link.already_handled(source, game_id)
+            day = game_link._as_date(game_info.get('date'))
+            twin = game_link.find_twin(source, day, opponent or '')
+            if not twin:
+                return False
+            coach_id = str(twin.get('game_id') or '')
+            when = twin["day"].strftime('%d.%m')
+            if twin.get('same_day'):
+                game_link.link(source, game_id, coach_id, game_link.AUTO,
+                               f"{opponent} {when}")
+                print(f"🔗 Игра {game_id} — это заведённая тренером {coach_id} "
+                      f"({opponent}, {when}). Второй опрос не создаю.")
+                await self._notify_coach_link(source, game_id, coach_id,
+                                              opponent, twin, game_info)
+                return True
+            # Дата разъехалась — это перенос. Решает тренер.
+            await self._ask_coach_about_move(source, game_id, coach_id,
+                                             opponent, twin, game_info)
+            return True
+        except Exception as e:
+            # Развязка — удобство, а не условие работы: сломалась она — пусть
+            # опрос уйдёт как раньше, дубль лучше молчания.
+            print(f"⚠️ Проверка тренерской игры не удалась: {e}")
+            return False
+
+    async def _notify_coach_link(self, source: str, league_id: str, coach_id: str,
+                                 opponent: str, twin: Dict[str, Any],
+                                 game_info: Dict[str, Any]) -> None:
+        """Тренеру: «это та же игра, второй опрос не слал»."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        text = (f"🔗 {opponent}, {twin['day']:%d.%m} — эта игра появилась в "
+                f"расписании лиги.\n\n"
+                f"Опрос ты уже отправлял, второй я слать не стал: состав и "
+                f"оплата останутся на одной игре.\n\n"
+                f"Если это всё-таки разные матчи — скажи, и я заведу опрос.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🆕 Это разные игры", callback_data=f"gl:split:{source}:{league_id}")]])
+        await self._tell_coaches(text, markup)
+
+    async def _ask_coach_about_move(self, source: str, league_id: str, coach_id: str,
+                                    opponent: str, twin: Dict[str, Any],
+                                    game_info: Dict[str, Any]) -> None:
+        """Тренеру: «дата разъехалась — слать новый опрос?»"""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        import game_link
+        day = game_link._as_date(game_info.get('date'))
+        league_day = f"{day:%d.%m}" if day else "?"
+        text = (f"📅 {opponent}: в расписании лиги игра стоит на "
+                f"{league_day}, а твой опрос был на "
+                f"{twin['day']:%d.%m}.\n\n"
+                f"Похоже на перенос. Сам опрос не рассылаю: бывает, что игру "
+                f"отменили, а в расписании просто передвинули.\n\n"
+                f"Отправить новый опрос на дату лиги?")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📨 Отправить новый опрос",
+                                  callback_data=f"gl:new:{source}:{league_id}")],
+            [InlineKeyboardButton("🙅 Не надо, игра та же",
+                                  callback_data=f"gl:keep:{source}:{league_id}")]])
+        await self._tell_coaches(text, markup)
+        # Помечаем «спросили», иначе следующий прогон спросит снова. Состояние
+        # ставим «связано»: пока тренер не ответил, второго опроса быть не должно.
+        game_link.link(source, league_id, str(twin.get('game_id') or ''),
+                       game_link.AUTO, f"перенос? {opponent}")
+
+    async def _tell_coaches(self, text: str, markup=None) -> None:
+        """Только в личку тренерам: это рабочая переписка, а не новость для
+        команды (то же правило, что у разборов и оплат)."""
+        import sheets_cache
+        ids = {str(a["tg_user_id"]) for a in
+               sheets_cache.access_list(sheets_cache.ACCESS_TEAM)
+               if a.get("tg_user_id")}
+        ids |= {x.strip() for x in os.getenv(
+            "ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
+        if not self.bot:
+            print("⚠️ Бот не поднят — тренерам не сказал")
+            return
+        for uid in ids:
+            try:
+                await self.bot.send_message(chat_id=int(uid), text=text,
+                                            reply_markup=markup)
+            except Exception as e:
+                print(f"⚠️ Не сказал тренеру {uid}: {e}")
+
     def _register_superseded_game_for_monitoring(self, superseded: Dict[str, Any], game_info: Dict[str, Any]) -> None:
         """Регистрирует старый (переприсвоенный лигой) game_id как
         АНОНС_ИГРА, чтобы game_watcher и мониторинг результатов начали
@@ -1309,6 +1407,11 @@ class GameSystemManager:
                 if self._check_duplicate_by_date_time_opponent(date, time, opponent):
                     print(f"⏭️ Игра {date} {time} против {opponent} уже найдена в сервисном листе (дата, время и противник совпадают), пропускаем создание опроса")
                     return False
+
+            # Эту игру тренер мог завести руками, пока её не было в
+            # расписании. Тогда опрос уже висит, и второй не нужен.
+            if await self._skip_if_coach_made("infobasket", game_info, opponent):
+                return False
 
             # Тот же слот (дата/время/арена), но другой game_id — лига
             # переприсвоила ID той же игре (например, заменился соперник).

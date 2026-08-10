@@ -3634,6 +3634,43 @@ async def _access_tell(bot, kind: str, p: Dict[str, Any], until: str) -> bool:
         return False
 
 
+async def handle_gamelink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ответ тренера на вопрос «одна это игра или две».
+
+    Кнопки живут под сообщением, которое присылает менеджер игр — он работает
+    отдельным процессом по расписанию, а нажатие приходит сюда, в демон."""
+    import game_link
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not _can_see_reports(user):
+        if query:
+            await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else ""
+    source, league_id = (parts[2], parts[3]) if len(parts) > 3 else ("", "")
+    try:
+        if what == "keep":
+            await asyncio.to_thread(game_link.link, source, league_id,
+                                    (await asyncio.to_thread(game_link.alias_of, source,
+                                                             league_id) or {}).get("coach_game_id", ""),
+                                    game_link.CONFIRMED, "тренер подтвердил")
+            await query.edit_message_text(
+                "✅ Понял, игра одна. Новый опрос не отправляю — состав и "
+                "оплата остаются на той, что ты завёл.")
+            return
+        # «Разные игры» и «нужен новый опрос» ведут к одному: развязать, чтобы
+        # ближайший прогон менеджера завёл опрос как по обычной находке.
+        await asyncio.to_thread(game_link.split, source, league_id)
+        await query.edit_message_text(
+            "🆕 Развязал. Опрос по игре из расписания уйдёт ближайшим "
+            "прогоном — он ходит раз в час.")
+    except Exception as e:
+        log.error(f"Развязка игр: {e}")
+        await query.edit_message_text(f"⚠️ Не получилось: {e}")
+
+
 async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Кнопки «Прогресс команды». Отдельно от админских: сюда пускаем и
     тренеров, которым админ выдал доступ."""
@@ -6240,6 +6277,7 @@ def main() -> None:
         handle_access_date), group=11)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
+    app.add_handler(CallbackQueryHandler(handle_gamelink_callback, pattern=r"^gl:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
