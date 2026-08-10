@@ -1900,8 +1900,17 @@
     // Запасной режим: в payload лежат только суммарные очки за турнир, поэтому
     // честно показываем всё время и не притворяемся, что знаем срезы.
     if (!live) {
+      // Угадавших офлайн берём из общего зачёта — он и есть «за всё время».
+      // Заполняем их ДО проверки периода: список от периода тут не зависит, а
+      // при выходе по return вкладка «Угадали» оставалась пустой и писала
+      // «никто не набрал очков» — хотя очки есть, просто срезов в payload нет.
+      const guess = (standings || []).map(s => ({name: s.name, points: s.points}));
+      guessBlocks = guess.length
+        ? [{mode: '', title: 'Все участники', rows: guess}] : [];
+      renderGuessModes();
+      renderGuessList();
       if (period !== 'all') {
-        $('weekLabel').textContent = '';
+        $('weekLabel').textContent = tableTab === 'guess' ? GUESS_OFFLINE_NOTE : '';
         $('topList').innerHTML = '<div class="banner">Срезы по периодам доступны ' +
           'при связи с ботом. Здесь — только «Всё время».</div>';
         return;
@@ -1910,8 +1919,6 @@
         .map(p => ({ref: p.ref, name: p.name, games: p.st.games, fp: p.st.fp,
                     pts: p.st.pts, reb: p.st.reb, ast: p.st.ast}))
         .sort((a, b) => b.fp - a.fp).slice(0, 30);
-      // Угадавших офлайн берём из общего зачёта — он и есть «за всё время».
-      const guess = (standings || []).map(s => ({name: s.name, points: s.points}));
       renderTop({title: 'за всё время', top: rows, guessers: guess});
       return;
     }
@@ -1960,6 +1967,11 @@
   // топ режима, а не людей.
   let guessMode = '';
   let guessBlocks = [];
+
+  // В запасном режиме очки угадавших — суммарные за турнир, а чипы сверху
+  // показывают период. Про это надо сказать прямо, иначе человек читает
+  // «последняя игра» и не понимает, откуда там сотни очков.
+  const GUESS_OFFLINE_NOTE = 'Угадавшие — за всё время (срезы только при связи с ботом)';
 
   function renderGuessModes() {
     const bar = $('guessModes');
@@ -2025,7 +2037,13 @@
     const block = guessBlocks.find(b => b.mode === guessMode) || guessBlocks[0];
     const rows = (block && block.rows) || [];
     if (!rows.length) {
-      gl.innerHTML = '<div class="banner">За этот период никто не набрал очков.</div>';
+      // Разные причины — разные слова. В запасном режиме таблица могла просто
+      // не поместиться в кнопку (её выкидывают первой при урезании payload), и
+      // «никто не набрал очков» тут прямая неправда.
+      gl.innerHTML = live
+        ? '<div class="banner">За этот период никто не набрал очков.</div>'
+        : '<div class="banner">Таблица угадавших не поместилась в запасной вход. '
+          + 'Открой приложение при связи с ботом — она там есть.</div>';
       return;
     }
     rows.forEach((g, i) => {
