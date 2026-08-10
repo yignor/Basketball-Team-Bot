@@ -2035,6 +2035,67 @@ def _clear_pending(uid: int) -> None:
     _roster_focus.pop(uid, None)
 
 
+def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Игры, по которым можно смотреть стартовый состав — с уже собранным."""
+    import coach_payments
+    import game_roster
+    today = date.today()
+    games = [g for g in game_roster.games(from_day=today - timedelta(days=7))
+             if game_roster.roster(g["source"], g["game_id"])]
+    rows = [[InlineKeyboardButton(
+        f"{coach_payments._human_date(g['date'].isoformat())} · {g['opponent']}"[:60],
+        callback_data=f"coach:start:{g['source']}:{g['game_id']}:name")]
+        for g in games[:8]]
+    rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:play")])
+    head = ("🏁 Стартовый состав\n\nВыбери игру:" if games else
+            "🏁 Стартовый состав\n\nНи по одной игре состав ещё не собран.")
+    return head, InlineKeyboardMarkup(rows)
+
+
+def _start_screen(source: str, game_id: str, sort: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Состав с тренировками и амплуа + переключатели вида."""
+    import coach_lineup
+    data = coach_lineup.lineup(source, game_id, sort)
+    rows = [[InlineKeyboardButton(
+        ("✅ " if data["sort"] == key else "") + title,
+        callback_data=f"coach:start:{source}:{game_id}:{key}")]
+        for key, title in coach_lineup.SORTS.items()]
+    # Амплуа правится тут же: тренер и так смотрит на этот список, а отдельный
+    # экран «настройки игроков» означал бы держать в голове два места.
+    for p in data["rows"][:12]:
+        mark = f" · {p['role']}" if p["role"] else ""
+        rows.append([InlineKeyboardButton(
+            f"🎽 {p['title']}{mark}"[:60],
+            callback_data=f"coach:role:{p['row']}:{source}:{game_id}:{sort}")])
+    rows.append([InlineKeyboardButton(
+        "📨 Прислать тренерам", callback_data=f"coach:startsend:{source}:{game_id}:{sort}")])
+    rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:start")])
+    return coach_lineup.text(data), InlineKeyboardMarkup(rows)
+
+
+def _role_screen(row: int, source: str, game_id: str, sort: str) -> Tuple[str, InlineKeyboardMarkup]:
+    import coach_lineup
+    import coach_payments
+    person = coach_payments.player_by_row(int(row)) or {}
+    now = str(person.get("role") or "")
+    keys = []
+    line = []
+    for role in coach_lineup.ROLES:
+        line.append(InlineKeyboardButton(
+            ("✅ " if role == now else "") + role,
+            callback_data=f"coach:setrole:{row}:{role}:{source}:{game_id}:{sort}"))
+        if len(line) == 3:
+            keys.append(line); line = []
+    if line:
+        keys.append(line)
+    keys.append([InlineKeyboardButton("Снять амплуа",
+                                      callback_data=f"coach:setrole:{row}:-:{source}:{game_id}:{sort}")])
+    keys.append([InlineKeyboardButton("⬅️ К составу",
+                                      callback_data=f"coach:start:{source}:{game_id}:{sort}")])
+    return (f"🎽 {person.get('title', '')}\n\nАмплуа сейчас: {now or 'не задано'}.\n\n"
+            "На какой позиции обычно играет?", InlineKeyboardMarkup(keys))
+
+
 # ─── игра, заведённая тренером ──────────────────────────────────────────────
 #
 # Организатор объявляет матч раньше, чем тот появляется в расписании лиги.
@@ -3392,6 +3453,7 @@ def _play_markup() -> InlineKeyboardMarkup:
     """Всё про игры."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games")],
+        [InlineKeyboardButton("🏁 Стартовый состав", callback_data="coach:start")],
         [InlineKeyboardButton("➕ Создать игру", callback_data="coach:ng")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
@@ -4311,6 +4373,41 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 await query.edit_message_text(text, reply_markup=markup)
             elif step == "send":
                 await _ng_send(query, user)
+
+        elif what == "start":
+            if len(parts) > 4:
+                text, markup = await asyncio.to_thread(
+                    _start_screen, parts[2], parts[3], parts[4])
+            else:
+                text, markup = await asyncio.to_thread(_start_games_screen)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "startsend" and len(parts) > 4:
+            import coach_lineup
+            data = await asyncio.to_thread(coach_lineup.lineup, parts[2], parts[3], parts[4])
+            body = coach_lineup.text(data)
+            sent = 0
+            for uid in await asyncio.to_thread(_coach_recipients):
+                try:
+                    await query.get_bot().send_message(chat_id=int(uid), text=body)
+                    sent += 1
+                except Exception as e:
+                    log.warning(f"Стартовый состав тренеру {uid}: {e}")
+            await query.answer(f"Отправил тренерам: {sent}")
+
+        elif what == "role" and len(parts) > 5:
+            text, markup = await asyncio.to_thread(
+                _role_screen, int(parts[2]), parts[3], parts[4], parts[5])
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "setrole" and len(parts) > 6:
+            import coach_lineup
+            role = "" if parts[3] == "-" else parts[3]
+            ok = await asyncio.to_thread(coach_lineup.set_role, int(parts[2]), role)
+            await query.answer("Записал" if ok else "Таблица не приняла запись")
+            text, markup = await asyncio.to_thread(
+                _start_screen, parts[4], parts[5], parts[6])
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "money":
             await query.edit_message_text(
@@ -5247,6 +5344,32 @@ async def _remind_players(app: Application, period: str,
     return stat
 
 
+async def _send_starting_lineups(app: Application) -> None:
+    """За час до игры присылает тренерам стартовый состав.
+
+    Решение принимают перед игрой, и лезть в бота за списком в этот момент
+    неудобно — пусть придёт сам. Одна игра — одно сообщение."""
+    import coach_lineup
+    import training_dues
+    try:
+        games = await asyncio.to_thread(coach_lineup.upcoming, 1)
+    except Exception as e:
+        log.warning(f"Стартовый состав: список игр не собрался: {e}")
+        return
+    for g in games:
+        key = f"lineup:{g['source']}:{g['game_id']}"
+        if await asyncio.to_thread(training_dues.event_done, key):
+            continue
+        data = await asyncio.to_thread(coach_lineup.lineup, g["source"],
+                                       g["game_id"], "trainings")
+        if not data.get("rows"):
+            continue
+        sent = await _tell_coaches(app, coach_lineup.text(
+            data, "🏁 Стартовый состав — через час игра"))
+        await asyncio.to_thread(training_dues.mark_event, key, f"тренерам: {sent}")
+        log.info(f"Стартовый состав по игре {g['game_id']} ушёл тренерам ({sent})")
+
+
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -5422,6 +5545,7 @@ async def _background_loop(app: Application) -> None:
             await _game_schedule(app)
             await _personal_digests(app)
             await _catch_up_prices()
+            await _send_starting_lineups(app)
             await _watch_broadcasts(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()

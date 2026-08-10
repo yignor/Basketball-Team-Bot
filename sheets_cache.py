@@ -46,6 +46,9 @@ PLAYERS_PAY_GAME_HEADER = "Оплата игры"
 # по составу на игру, к этой отметке оплата игр отношения не имеет. С днём
 # рождения поздравляем всех из листа независимо от отметки.
 PLAYERS_ACTIVE_HEADER = "Активность"
+# Амплуа: «1»…«5», «Разыгрывающий», «Большой». Ведёт тренер — из бота или в
+# листе, бот только читает и пишет по его команде.
+PLAYERS_ROLE_HEADER = "Амплуа"
 PLAYERS_ACTIVE_MARK = "1"
 # «+» стоял в столбце до 03.08.2026 и означал то же самое. Читаем его наравне
 # с «1», пока лист не переписан; сам лист бот переписывает при старте.
@@ -103,6 +106,7 @@ CREATE TABLE IF NOT EXISTS players (
     pay_season    INTEGER NOT NULL DEFAULT 0,   -- «Оплата сезона»: сколько должен
     pay_game      INTEGER NOT NULL DEFAULT 0,   -- «Оплата игры»: цена одной игры
     active_mark   TEXT NOT NULL DEFAULT '',     -- «Активность»: «+» или пусто
+    role          TEXT NOT NULL DEFAULT '',     -- «Амплуа»: 1–5, разыгрывающий, большой
     synced_at     TEXT NOT NULL
 );
 
@@ -859,6 +863,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_video_sync", "tipoff_at", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_shifts", "start_left", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_roster_state", "form", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "players", "role", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».
@@ -936,6 +941,7 @@ def sync_players(spreadsheet) -> None:
                     _to_int(r.get(PLAYERS_PAY_SEASON_HEADER)),
                     _to_int(r.get(PLAYERS_PAY_GAME_HEADER)),
                     str(r.get(PLAYERS_ACTIVE_HEADER, "")).strip(),
+                    str(r.get(PLAYERS_ROLE_HEADER, "")).strip(),
                     now,
                 ))
             conn.execute("BEGIN")
@@ -943,8 +949,8 @@ def sync_players(spreadsheet) -> None:
             conn.executemany(
                 """
                 INSERT INTO players
-                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, active_mark, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, active_mark, role, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1262,6 +1268,7 @@ def write_player_prices(spreadsheet, updates: Dict[int, int]) -> int:
 PLAYER_FIELDS = {
     "bd": ("Дата рождения", "birthday", "🎂 Дата рождения"),
     "nick": ("Ник", "nickname", "✏️ Ник"),
+    "role": (PLAYERS_ROLE_HEADER, "role", "🎽 Амплуа"),
     # Суммы, которые ждём с человека. Правятся из раздела тренера, чтобы не
     # лезть в таблицу ради одной цифры.
     "season": (PLAYERS_PAY_SEASON_HEADER, "pay_season", "🏋️ Взнос за тренировки"),

@@ -241,6 +241,32 @@ def _is_team_member(telegram_id: Any, username: str = "") -> bool:
     return ensure_player_link(telegram_id, username)
 
 
+_players_reread_at = 0.0
+PLAYERS_REREAD_EVERY = 300      # секунд между перечитываниями листа
+
+
+def _reread_players() -> None:
+    """Перечитывает лист «Игроки», но не чаще раза в пять минут.
+
+    Тренер меняет @ники прямо в таблице, а зеркало обновлялось по расписанию —
+    человек уже исправлен, а бот всё ещё отвечает «тебя нет в составе». Ждать
+    следующей синхронизации в такой момент невыносимо, ходить в Google на
+    каждый запрос — тоже нельзя."""
+    global _players_reread_at
+    now = time.time()
+    if now - _players_reread_at < PLAYERS_REREAD_EVERY:
+        return
+    _players_reread_at = now
+    try:
+        import report_common
+        book = report_common.init_sheets()
+        if book is not None:
+            sheets_cache.sync_players(book)
+            log.info("Лист «Игроки» перечитан: ищем изменившиеся ники")
+    except Exception as exc:
+        log.warning(f"Перечитать лист «Игроки» не вышло: {exc}")
+
+
 def ensure_player_link(telegram_id: Any, username: str = "") -> bool:
     """Опознаёт человека как игрока команды и ЗАКРЕПЛЯЕТ за строкой листа.
 
@@ -282,6 +308,17 @@ def ensure_player_link(telegram_id: Any, username: str = "") -> bool:
         cand = conn.execute(
             """SELECT row_index FROM players
                WHERE lower(ltrim(telegram_id, '@')) = ? LIMIT 1""", (uname,)).fetchone()
+    if not cand:
+        # Ника нет в зеркале — возможно, тренер только что его поправил в
+        # листе. Перечитываем лист (не чаще раза в пять минут) и пробуем ещё
+        # раз: иначе человек слышит «тебя нет в составе» до следующей плановой
+        # синхронизации, хотя он там уже есть.
+        _reread_players()
+        with sheets_cache.get_connection() as conn:
+            cand = conn.execute(
+                """SELECT row_index FROM players
+                   WHERE lower(ltrim(telegram_id, '@')) = ? LIMIT 1""",
+                (uname,)).fetchone()
     if not cand:
         return False
     if sheets_cache.is_row_linked(cand["row_index"]):

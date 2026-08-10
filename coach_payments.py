@@ -246,8 +246,8 @@ def players() -> List[Dict[str, Any]]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            "SELECT row_index, surname, name, nickname, birthday, status, team, "
-            "pay_season, pay_game, active_mark FROM players "
+            "SELECT row_index, surname, name, nickname, birthday, role, status, "
+            "team, pay_season, pay_game, active_mark FROM players "
             "ORDER BY surname, name").fetchall()
     people = [r for r in rows if (r["surname"] or "").strip()
               or (r["name"] or "").strip()]
@@ -269,6 +269,7 @@ def players() -> List[Dict[str, Any]]:
             # со всеми (запрос всё равно один).
             "nickname": (r["nickname"] or "").strip(),
             "birthday": (r["birthday"] or "").strip(),
+            "role": (r["role"] or "").strip(),
             "status": (r["status"] or "").strip(),
             "team": (r["team"] or "").strip(),
             "pay_season": int(r["pay_season"] or 0),
@@ -652,7 +653,8 @@ def ensure_player_columns(spreadsheet) -> List[str]:
     header = ws.row_values(1)
     wanted = (sheets_cache.PLAYERS_PAY_SEASON_HEADER,
               sheets_cache.PLAYERS_PAY_GAME_HEADER,
-              sheets_cache.PLAYERS_ACTIVE_HEADER)
+              sheets_cache.PLAYERS_ACTIVE_HEADER,
+              sheets_cache.PLAYERS_ROLE_HEADER)
     missing = [t for t in wanted if t not in header]
     if not missing:
         return []
