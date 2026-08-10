@@ -3469,12 +3469,14 @@ SCHED_FIELDS = [
     ("dues_mid_day", "Повтор должникам", "число месяца"),
     ("dues_coach_warn", "Тренеру перед повтором", "за сколько дней"),
     ("dues_coach_end", "Тренеру перед концом месяца", "за сколько дней"),
+    ("game_pay_before_hour", "Оплата игры: накануне", "час"),
     ("game_pay_hour", "Оплата игры: утро", "час"),
     ("game_pay_evening_hour", "Оплата игры: вечер следующего дня", "час"),
     ("roster_collect_days", "Собрать состав на игру", "за сколько дней"),
 ]
 
 SCHED_LIMITS = {"game_pay_hour": (0, 23), "game_pay_evening_hour": (0, 23),
+                "game_pay_before_hour": (0, 23),
                 "roster_collect_days": (0, 14)}
 
 
@@ -3485,6 +3487,7 @@ def _sched_value(key: str) -> int:
     if key in training_dues.SCHEDULE:
         return training_dues.day(key)
     defaults = {"game_pay_hour": 9, "game_pay_evening_hour": 19,
+                "game_pay_before_hour": 12,
                 "roster_collect_days": game_roster.COLLECT_BEFORE_DAYS}
     return sheets_cache.get_int_setting(key, defaults[key])
 
@@ -5277,6 +5280,16 @@ async def _game_schedule(app: Application) -> None:
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"должников {len(rows)}, тренерам {sent}")
                 log.info(f"Долги за игру {source}:{gid}: {len(rows)}, тренерам {sent}")
+            elif kind == "player_before":
+                stat = await _remind_game_debtors(app, game, ahead=True)
+                await _tell_coaches(
+                    app, f"💰 Завтра игра {game_roster.game_label(game)} — "
+                         f"напомнил про оплату {len(stat['sent'])} игрокам."
+                         + (f"\nНе дошло до {len(stat['failed']) + len(stat['unknown'])}."
+                            if stat["failed"] or stat["unknown"] else ""))
+                await asyncio.to_thread(training_dues.mark_event, key,
+                                        f"дошло {len(stat['sent'])}")
+
             elif kind == "player_next":
                 stat = await _remind_game_debtors(app, game)
                 report = await asyncio.to_thread(
@@ -5292,7 +5305,8 @@ async def _game_schedule(app: Application) -> None:
             log.error(f"Событие по игре ({key}) не отработало: {e}")
 
 
-async def _remind_game_debtors(app: Application, game: Dict[str, Any]) -> Dict[str, List[str]]:
+async def _remind_game_debtors(app: Application, game: Dict[str, Any],
+                               ahead: bool = False) -> Dict[str, List[str]]:
     import game_roster
     import training_dues
     stat: Dict[str, List[str]] = {"sent": [], "failed": [], "unknown": []}
@@ -5303,8 +5317,9 @@ async def _remind_game_debtors(app: Application, game: Dict[str, Any]) -> Dict[s
             stat["unknown"].append(p["title"])
             continue
         try:
-            await app.bot.send_message(chat_id=int(uid),
-                                       text=game_roster.player_debt_text(game, p))
+            await app.bot.send_message(
+                chat_id=int(uid),
+                text=game_roster.player_debt_text(game, p, ahead=ahead))
             stat["sent"].append(p["title"])
         except Exception as e:
             log.info(f"Напоминание об игре {p['title']} не доставлено: {e}")

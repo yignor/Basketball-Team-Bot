@@ -443,9 +443,18 @@ def coach_debt_text(game: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def player_debt_text(game: Dict[str, Any], player: Dict[str, Any]) -> str:
-    return (f"💰 Оплата игры: {game_label(game)} — "
-            f"{coach_payments.game_price(player)} ₽.\n\n"
+def player_debt_text(game: Dict[str, Any], player: Dict[str, Any],
+                    ahead: bool = False) -> str:
+    """Напоминание об оплате игры. ahead — накануне, а не вдогонку.
+
+    Накануне человек ещё ничего не нарушил, и разговор другой: деньги за игру
+    везут с собой, поэтому и напоминаем заранее."""
+    price = coach_payments.game_price(player)
+    if ahead:
+        return (f"🏀 Завтра игра: {game_label(game)}.\n\n"
+                f"Не забудь оплату — {price} ₽. Возьми с собой или переведи "
+                "тренеру заранее.")
+    return (f"💰 Оплата игры: {game_label(game)} — {price} ₽.\n\n"
             "Переведи, пожалуйста, тренеру и скинь ему чек — он отметит. "
             "Если уже оплатил, ничего делать не надо.")
 
@@ -485,6 +494,11 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
             continue
         morning = sheets_cache.get_int_setting("game_pay_hour", 9)
         evening = sheets_cache.get_int_setting("game_pay_evening_hour", 19)
+        # Накануне — напоминание СОСТАВУ: деньги обычно везут с собой, и
+        # узнавать о долге уже в зале поздно.
+        before = sheets_cache.get_int_setting("game_pay_before_hour", 12)
+        if left == 1 and now.hour >= before:
+            out.append((f"game:{ref}:player_before", game, "player_before"))
         if left == 0 and now.hour >= morning:
             out.append((f"game:{ref}:coach_day", game, "coach_day"))
         elif left == -1 and now.hour >= morning:
