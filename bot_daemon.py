@@ -5905,10 +5905,10 @@ async def _nightly_backup(app: Application) -> None:
     from datetime_utils import get_moscow_time
     now = get_moscow_time()
     hour = sheets_cache.get_int_setting("backup_hour", 3)
-    # Окно в два часа, а не ровно час: тик тридцатисекундный, но демон могли
-    # перезапустить ровно в это время, и одна пропущенная минута оставила бы
-    # сутки без копии.
-    if not (hour <= now.hour < hour + 2):
+    # Не «ровно в три», а «в три или при первой возможности после». Демон могли
+    # перезапустить ровно в этот момент, сервер — простоять всё утро; правило
+    # «одна копия в сутки» важнее круглого часа. До трёх ночи ждём: там тихо.
+    if now.hour < hour:
         return
     if sheets_cache.get_setting("backup_last_day") == now.date().isoformat():
         return

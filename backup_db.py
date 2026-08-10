@@ -63,6 +63,28 @@ UPLOAD_API = "https://www.googleapis.com/upload/drive/v3/files"
 # ─────────────────────────── снимок ────────────────────────────────────────
 
 
+def _open_source() -> sqlite3.Connection:
+    """Соединение с живой базой для снятия копии.
+
+    Обычным соединением, а не `mode=ro`: в режиме WAL читателю нужно право
+    писать в служебный файл `-shm`, и «только чтение» спотыкается ровно там,
+    где база принадлежит другому пользователю. Копию снимает владелец базы,
+    поэтому обычное открытие — нормальный путь; писать в неё мы всё равно не
+    будем, `backup()` только читает.
+
+    Запасной путь оставлен для случая, когда базу читают со стороны (разбор
+    копии, отладка): тогда WAL обычно уже слит и `mode=ro` проходит."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return conn
+    except sqlite3.Error as exc:
+        try:
+            return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=30)
+        except sqlite3.Error:
+            raise exc
+
+
 def snapshot(dst: Path) -> Dict[str, Any]:
     """Согласованная копия живой базы + проверка целостности.
 
@@ -71,7 +93,7 @@ def snapshot(dst: Path) -> Dict[str, Any]:
     годится ли то, что мы только что сняли."""
     if not DB_PATH.exists():
         raise FileNotFoundError(f"База не найдена: {DB_PATH}")
-    src = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=30)
+    src = _open_source()
     out = sqlite3.connect(dst)
     try:
         src.backup(out)
