@@ -57,17 +57,21 @@ def rate_limiter() -> Optional[Any]:
     global _warned
     try:
         from telegram.ext import AIORateLimiter
-    except ImportError:
+        return AIORateLimiter(overall_max_rate=OVERALL_RATE,
+                              overall_time_period=OVERALL_PERIOD,
+                              group_max_rate=GROUP_RATE,
+                              group_time_period=GROUP_PERIOD,
+                              max_retries=MAX_RETRIES)
+    except Exception as exc:
+        # Ловим ВСЁ, а не только ImportError: сам класс импортируется всегда, а
+        # про отсутствующий aiolimiter он сообщает RuntimeError уже из
+        # конструктора. На этом бот и слёг при первом деплое — предохранитель,
+        # который не срабатывает, хуже отсутствующего.
         if not _warned:
-            logger.warning("Ограничитель скорости не подключён: нет aiolimiter "
-                           "(pip install 'python-telegram-bot[rate-limiter]')")
+            logger.warning("Ограничитель скорости не подключён (%s). "
+                           "Ставится: pip install aiolimiter", exc)
             _warned = True
         return None
-    return AIORateLimiter(overall_max_rate=OVERALL_RATE,
-                          overall_time_period=OVERALL_PERIOD,
-                          group_max_rate=GROUP_RATE,
-                          group_time_period=GROUP_PERIOD,
-                          max_retries=MAX_RETRIES)
 
 
 def make_bot(token: str = "") -> Any:
