@@ -247,6 +247,10 @@ def pending() -> List[Dict[str, Any]]:
     titles = {"slpro": "SLPRO", "infobasket": "Инфобаскет"}
     out: List[Dict[str, Any]] = []
     for uid in player_identity.linked_users():
+        # Разбор с таймкодами — платная часть личной статистики, а не общая
+        # рассылка. Кому раздел не открыт, тому и не уходит.
+        if not personal_report.stats_open(uid):
+            continue
         prefs = personal_report.get_prefs(uid)
         if (prefs.get("notify_mode") or "game") != "game":
             continue

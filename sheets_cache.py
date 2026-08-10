@@ -1702,31 +1702,83 @@ def _clean_nick(username: str) -> str:
 
 
 def grant_access(kind: str, username: str, granted_by: str = "",
-                 days: int = 0) -> bool:
+                 days: int = 0, until: str = "") -> bool:
     """Открывает раздел по @нику. Числовой id подтянется при первом входе.
 
     days > 0 — доступ на срок: он закончится сам, и о нём не придётся помнить.
     Так проще выдавать разово (посмотреть отчёт перед турниром, помочь с
-    разбором), не превращая временное в постоянное."""
+    разбором), не превращая временное в постоянное.
+
+    until — конкретная дата (ISO). Она сильнее days: доступ продают до числа
+    («оплатил месяц» — это до такого-то), а не на «столько-то суток от
+    сегодня»."""
     nick = _clean_nick(username)
     if not nick or kind not in ACCESS_TITLES:
         return False
-    until = ""
-    if days > 0:
+    return _write_access(kind, nick, "", granted_by, _until_value(days, until))
+
+
+def grant_access_id(kind: str, tg_user_id: str = "", username: str = "",
+                    granted_by: str = "", until: str = "") -> bool:
+    """Открывает раздел конкретному человеку — по id, нику или обоим.
+
+    Тренер выдаёт доступ из списка игроков, а не по нику: он знает людей по
+    фамилии, и половина команды ник вообще не показывает. Поэтому ключом
+    строки может быть и числовой id — тогда ник не нужен вовсе и первый вход
+    ничего не «закрепляет», доступ работает сразу.
+
+    Если строка на этот id уже есть, продлеваем её, а не заводим вторую: иначе
+    у человека, сменившего ник, копились бы дубли с разными сроками."""
+    uid, nick = str(tg_user_id or "").strip(), _clean_nick(username)
+    if kind not in ACCESS_TITLES or not (uid or nick):
+        return False
+    key = nick or f"id:{uid}"
+    if uid:
+        init_db()
+        with _connection() as conn:
+            row = conn.execute(
+                "SELECT username FROM feature_access WHERE kind = ? AND tg_user_id = ?",
+                (kind, uid)).fetchone()
+        if row:
+            key = str(row["username"])
+    return _write_access(kind, key, uid, granted_by, _until_value(0, until))
+
+
+def _until_value(days: int, until: str) -> str:
+    """Дата окончания доступа в ISO. Пусто — бессрочно."""
+    text = str(until or "").strip()
+    if text:
+        from datetime import date as _date
+        try:
+            return _date.fromisoformat(text[:10]).isoformat()
+        except ValueError:
+            return ""
+    if int(days or 0) > 0:
         from datetime import date as _date, timedelta as _td
-        until = (_date.today() + _td(days=int(days))).isoformat()
+        return (_date.today() + _td(days=int(days))).isoformat()
+    return ""
+
+
+def _write_access(kind: str, key: str, tg_user_id: str, granted_by: str,
+                  until: str) -> bool:
+    """Одна запись о доступе. Уже известный id не затираем пустым: строку
+    могли завести по нику, а человек с тех пор зашёл и закрепился."""
     init_db()
     with _connection() as conn:
         conn.execute(
             """INSERT INTO feature_access (kind, username, tg_user_id, granted_at,
                                            granted_by, until)
-               VALUES (?, ?, '', ?, ?, ?)
-               ON CONFLICT(kind, username) DO UPDATE SET granted_at=excluded.granted_at,
-                                                         granted_by=excluded.granted_by,
-                                                         until=excluded.until""",
-            (kind, nick, _now_iso(), str(granted_by), until))
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(kind, username) DO UPDATE SET
+                   granted_at=excluded.granted_at,
+                   granted_by=excluded.granted_by,
+                   until=excluded.until,
+                   tg_user_id=CASE WHEN excluded.tg_user_id != ''
+                                   THEN excluded.tg_user_id
+                                   ELSE feature_access.tg_user_id END""",
+            (kind, key, str(tg_user_id), _now_iso(), str(granted_by), until))
         conn.commit()
-    logger.info("Доступ «%s» выдан @%s%s (кем: %s)", ACCESS_TITLES[kind], nick,
+    logger.info("Доступ «%s» выдан %s%s (кем: %s)", ACCESS_TITLES[kind], key,
                 f" до {until}" if until else " бессрочно", granted_by)
     return True
 
@@ -1765,6 +1817,50 @@ def revoke_access(kind: str, username: str) -> bool:
                          (kind, _clean_nick(username))).rowcount
         conn.commit()
     return bool(n)
+
+
+def revoke_access_id(kind: str, tg_user_id: str = "", username: str = "") -> bool:
+    """Закрывает раздел человеку — и по id, и по нику.
+
+    Обе стороны сразу: доступ мог быть выдан по нику до того, как человек
+    зашёл, и снять надо оба следа, иначе закрытый доступ откроется обратно при
+    первом же входе."""
+    uid, nick = str(tg_user_id or "").strip(), _clean_nick(username)
+    init_db()
+    n = 0
+    with _connection() as conn:
+        if uid:
+            n += conn.execute(
+                "DELETE FROM feature_access WHERE kind = ? AND tg_user_id = ?",
+                (kind, uid)).rowcount
+        if nick:
+            n += conn.execute(
+                "DELETE FROM feature_access WHERE kind = ? AND username = ?",
+                (kind, nick)).rowcount
+        conn.commit()
+    return bool(n)
+
+
+def access_until(kind: str, tg_user_id: str = "", username: str = "") -> Optional[str]:
+    """До какого числа открыт раздел: None — не открыт, '' — бессрочно.
+
+    Отличать «нет доступа» от «бессрочно» приходится явно: и то и другое —
+    пустая дата, а на экране это противоположные состояния."""
+    uid, nick = str(tg_user_id or "").strip(), _clean_nick(username)
+    init_db()
+    with _connection() as conn:
+        row = None
+        if uid:
+            row = conn.execute(
+                "SELECT until FROM feature_access WHERE kind = ? AND tg_user_id = ?",
+                (kind, uid)).fetchone()
+        if row is None and nick:
+            row = conn.execute(
+                "SELECT until FROM feature_access WHERE kind = ? AND username = ?",
+                (kind, nick)).fetchone()
+    if row is None or _access_expired(row):
+        return None
+    return str(row["until"] or "")
 
 
 def access_list(kind: str = "") -> List[Dict[str, Any]]:

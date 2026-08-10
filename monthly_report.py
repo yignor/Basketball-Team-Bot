@@ -584,6 +584,9 @@ async def send_all(year: int, month: int, dry_run: bool = False) -> int:
     sent = skipped = empty = 0
     import subscriptions
     for uid in player_identity.linked_users():
+        if not personal_report.stats_open(uid):
+            skipped += 1          # раздел платный: не открыт — не отправляем
+            continue
         prefs = personal_report.get_prefs(uid)
         if not personal_report.monthly_file_due(prefs):
             skipped += 1

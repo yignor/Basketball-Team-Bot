@@ -14,11 +14,15 @@
 ФИО нигде не хранится. Отчёт уходит ТОЛЬКО в личку.
 """
 
+import logging
+import os
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import sheets_cache
 import fantasy_stats
+
+logger = logging.getLogger(__name__)
 
 # Каталог показателей: ключ в БД -> (название, «больше — лучше»). Игрок сам
 # выбирает, что отслеживать: одному важны подборы, другому фолы, и общий набор
@@ -260,6 +264,30 @@ NOTIFY_MODES = {
 DEFAULT_PREFS = {"compare_mode": "all", "compare_since": "",
                  "notify_mode": "game", "last_sent": "",
                  "metrics": ",".join(DEFAULT_METRICS)}
+
+
+def stats_open(tg_user_id: Any) -> bool:
+    """Открыта ли человеку личная статистика.
+
+    Раздел платный и закрытый: доступ выдаёт тренер или админ на срок, и
+    проверка нужна не только на кнопке, но и на рассылках — разбор после игры
+    с таймкодами и месячный файл и есть тот самый продукт. Без этой проверки
+    закрытая кнопка ничего не меняла бы: то же самое продолжало бы приходить
+    само.
+
+    Админам открыто без записи в таблице — как и везде."""
+    uid = str(tg_user_id or "").strip()
+    if not uid:
+        return False
+    admins = {x.strip() for x in os.getenv(
+        "ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
+    if uid in admins:
+        return True
+    try:
+        return sheets_cache.has_access(sheets_cache.ACCESS_PERSONAL, uid)
+    except Exception as exc:                       # база занята — не рассылаем
+        logger.warning("Проверка доступа к личной статистике: %s", exc)
+        return False
 
 
 def get_prefs(tg_user_id: Any) -> Dict[str, Any]:
