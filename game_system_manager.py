@@ -738,27 +738,47 @@ class GameSystemManager:
             game_info['team2_id'] = widget_data['team_b_id']
 
     def _game_record_matches(self, record: Dict[str, Any], game_info: Dict[str, Any]) -> bool:
+        """Та же самая игра, что мы уже объявляли?
+
+        Сравниваем дату, время и команды — то, ради чего анонс переотправляют.
+        ЗАЛ намеренно не сравниваем: лига то заполняет его, то отдаёт
+        «Неизвестно» (виджет отвечает не всегда), и от этого мигания анонс
+        уходил в чат по второму и третьему разу. 09.08 так и вышло: в 09:00
+        анонс с залом «Марвелхолл», а вечером лига вернула «Неизвестно» — и
+        команда получила то же сообщение ещё дважды.
+        """
         if not record:
             return False
         record_date = (record.get('game_date') or '').strip()
         record_time = self._normalize_time_string(record.get('game_time'))
-        record_arena = (record.get('arena') or '').strip()
         record_team_a = (record.get('team_a_id') or '').strip()
         record_team_b = (record.get('team_b_id') or '').strip()
 
         game_date = (game_info.get('date') or '').strip()
         game_time = self._normalize_time_string(game_info.get('time'))
-        game_arena = (game_info.get('venue') or '').strip()
         game_team_a = str(game_info.get('team1_id') or '').strip()
         game_team_b = str(game_info.get('team2_id') or '').strip()
 
-        return (
+        same = (
             record_date == game_date
             and record_time == game_time
-            and record_arena == game_arena
             and record_team_a == game_team_a
             and record_team_b == game_team_b
         )
+        if not same:
+            # Пишем, ЧТО именно разошлось: следующий лишний анонс не придётся
+            # расследовать заново.
+            diff = []
+            if record_date != game_date:
+                diff.append(f"дата {record_date!r} → {game_date!r}")
+            if record_time != game_time:
+                diff.append(f"время {record_time!r} → {game_time!r}")
+            if record_team_a != game_team_a or record_team_b != game_team_b:
+                diff.append(f"команды {record_team_a}/{record_team_b} → "
+                            f"{game_team_a}/{game_team_b}")
+            print(f"🔄 Игра {game_info.get('game_id')} отличается от записанной: "
+                  f"{'; '.join(diff)}")
+        return same
 
     def _detect_game_changes(
         self,
