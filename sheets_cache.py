@@ -1544,6 +1544,45 @@ def get_bot_users_page(offset: int = 0, limit: int = 8) -> Dict[str, Any]:
     return {"rows": rows, "total": total, "offset": offset, "limit": limit}
 
 
+def link_from_votes() -> List[Dict[str, Any]]:
+    """Опознаёт по голосам в опросах тех, кто в личку бота не заходил.
+
+    Привязка «человек ↔ строка листа» рождалась только при /start или открытии
+    приложения. Но человек может год голосовать в общем чате и ни разу не
+    написать боту — и оставаться «не игроком команды»: ровно так вышло с
+    @prikolexa, который голосовал и в играх, и в тренировках.
+
+    В голосе есть и числовой id, и @ник — этого достаточно. Окно доверия то
+    же, что при /start: ник должен совпасть, а строка листа быть свободной."""
+    init_db()
+    linked: List[Dict[str, Any]] = []
+    with _connection() as conn:
+        voters = conn.execute(
+            """SELECT user_id, username FROM (
+                   SELECT user_id, username FROM game_votes
+                   UNION SELECT user_id, username FROM attendance)
+                WHERE username != ''
+                  AND user_id NOT IN (SELECT tg_user_id FROM player_links)""").fetchall()
+        rows = conn.execute(
+            """SELECT row_index, surname, name, telegram_id FROM players
+                WHERE telegram_id != ''
+                  AND row_index NOT IN (SELECT player_row FROM player_links)""").fetchall()
+    # Сравнение в Python: lower() в SQLite не знает кириллицы, а ники бывают
+    # записаны и с «@», и без, и в другом регистре.
+    free = {str(r["telegram_id"]).lstrip("@").strip().lower(): dict(r) for r in rows}
+    for v in voters:
+        nick = str(v["username"] or "").lstrip("@").strip().lower()
+        target = free.get(nick)
+        if not target:
+            continue
+        if link_player(str(v["user_id"]), nick, int(target["row_index"])):
+            free.pop(nick, None)
+            linked.append({"tg_user_id": str(v["user_id"]), "username": nick,
+                           "player_row": int(target["row_index"]),
+                           "title": f"{target['surname']} {target['name']}".strip()})
+    return linked
+
+
 def unlinked_bot_users() -> List[Dict[str, Any]]:
     """Кто нажимал /start, но не сопоставлен ни с одной строкой листа.
 

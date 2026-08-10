@@ -2643,6 +2643,9 @@ def _render_link_list() -> Tuple[str, InlineKeyboardMarkup]:
     # Заодно сверяем: строки листа могли сдвинуться с прошлого раза, и связка
     # уже указывает на соседа по алфавиту.
     drifted = sheets_cache.reconcile_player_links()
+    # Голосовавшие в общем чате опознаются сами: заходить в личку ради этого
+    # человек не обязан.
+    by_votes = sheets_cache.link_from_votes()
     people = sheets_cache.unlinked_bot_users()
     free = sheets_cache.free_player_rows()
     lines = ["🔗 Опознание игроков", ""]
@@ -2652,6 +2655,10 @@ def _render_link_list() -> Tuple[str, InlineKeyboardMarkup]:
         for d in drifted:
             lines.append(f"   @{d['username'] or d['tg_user_id']}: было «{d['was']}» → "
                          f"стало «{d['now']}»")
+        lines.append("")
+    if by_votes:
+        lines.append(f"🗳 Опознал по голосам в опросах: {len(by_votes)} — "
+                     + ", ".join(f["title"] for f in by_votes[:5]))
         lines.append("")
     if people:
         lines += [f"В боте, но не сопоставлены с листом: {len(people)}.",
@@ -5705,6 +5712,13 @@ async def on_startup(app: Application) -> None:
     # качалку зовём первой — иначе пул соберётся на номерах.
     async def _boot_warm() -> None:
         await _sync_leagues()
+        try:
+            found = await asyncio.to_thread(sheets_cache.link_from_votes)
+            if found:
+                log.info("Опознаны по голосам в опросах: "
+                         + ", ".join(f"{f['title']} (@{f['username']})" for f in found))
+        except Exception as e:
+            log.warning(f"Опознание по голосам: {e}")
         # Свёрнутые суммы: собираем один раз, если их ещё нет. Дальше их
         # правит только приход новой игры — пересчитывать всё подряд незачем,
         # сыгранное не меняется.
