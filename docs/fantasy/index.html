@@ -1346,7 +1346,12 @@
     return head + form + up + down + next + games;
   }
 
-  function statLine(g) {
+  // Показатели за ОДНУ игру — внутри карточки игрока. Имя не `statLine`:
+  // так уже называется строка под фамилией в общем списке, а объявления
+  // функций в одной области видимости затирают друг друга по имени. Второе
+  // молча перекрывало первое, и весь список писал «В протоколе одни нули»
+  // вместо очков за последнюю игру.
+  function gameStatLine(g) {
     const bits = [];
     if (g.pts) bits.push(`Очки ${g.pts}`);
     if (g.reb) bits.push(`Подборы ${g.reb}`);
@@ -1370,7 +1375,7 @@
     const head = [when, g.title, g.vs, g.score].filter(Boolean).map(esc).join(' · ');
     const shots = shotLine(g);
     const body =
-      `<div class="pstat">${esc(statLine(g))}</div>` +
+      `<div class="pstat">${esc(gameStatLine(g))}</div>` +
       (g.mins ? `<div class="pstat">${g.mins} мин на площадке</div>` : '') +
       (shots ? `<div class="pstat">${esc(shots)}</div>` : '');
     return `<details class="guess"><summary class="row">` +
