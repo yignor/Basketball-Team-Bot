@@ -5439,6 +5439,15 @@ async def _personal_digests(app: Application) -> None:
     Ждём, пока протокол игры окажется в базе (иначе разбирать нечего), и шлём
     короткий разбор в личку. Одна игра — одно сообщение, повторов нет."""
     import personal_game
+    from datetime_utils import get_moscow_time
+    # Протокол игры приходит когда угодно — 10.08 он лёг в 04:31 по Москве, и
+    # люди получили разбор ночью. Личные сообщения ждут утра: раньше девяти
+    # никто их не ждёт, а телефон звенит.
+    hour = get_moscow_time().hour
+    quiet_from = sheets_cache.get_int_setting("quiet_hour_to", 9)
+    quiet_to = sheets_cache.get_int_setting("quiet_hour_from", 22)
+    if not (quiet_from <= hour < quiet_to):
+        return
     try:
         todo = await asyncio.to_thread(personal_game.pending)
     except Exception as e:

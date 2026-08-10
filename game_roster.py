@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import coach_payments
@@ -461,6 +461,15 @@ def player_debt_text(game: Dict[str, Any], player: Dict[str, Any],
 
 # ─────────────────────── Что пора сделать сейчас ───────────────────────────
 
+def _game_start(game: Dict[str, Any]) -> Optional[datetime]:
+    """Начало игры как момент времени. Без времени в расписании — None."""
+    try:
+        hh, mm = str(game.get("time") or "").split(":")[:2]
+        return datetime.combine(game["date"], time(int(hh), int(mm)))
+    except (ValueError, TypeError):
+        return None
+
+
 def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any], str]]:
     """[(ключ, игра, вид)] — что должно сработать в этот момент по Москве.
 
@@ -495,9 +504,10 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
         morning = sheets_cache.get_int_setting("game_pay_hour", 9)
         evening = sheets_cache.get_int_setting("game_pay_evening_hour", 19)
         # Накануне — напоминание СОСТАВУ: деньги обычно везут с собой, и
-        # узнавать о долге уже в зале поздно.
-        before = sheets_cache.get_int_setting("game_pay_before_hour", 12)
-        if left == 1 and now.hour >= before:
+        # узнавать о долге уже в зале поздно. Отсчёт РОВНО от начала игры, а не
+        # в условный час: игра в 18:30 — напоминание в 18:30 накануне.
+        start = _game_start(game)
+        if start and timedelta(hours=23, minutes=45) <= (start - now) <= timedelta(hours=24, minutes=30):
             out.append((f"game:{ref}:player_before", game, "player_before"))
         if left == 0 and now.hour >= morning:
             out.append((f"game:{ref}:coach_day", game, "coach_day"))

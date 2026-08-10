@@ -1194,9 +1194,12 @@ def weekly_personal(season_id: int, week_start: str, tg_user_id: Any
             games[key]["picked"] = round(float(r["points"] or 0), 1)
 
         # Как игрок: его собственная строка в протоколе той же недели.
-        import player_identity
-        for ident in player_identity.get_identities(uid):
-            src, pid = str(ident["source"]), str(ident["player_id"])
+        #
+        # Профиль лиги привязан у единиц — большинство ссылку не присылали, и
+        # раньше им честно писалось «0 как игрок», хотя они играли. Поэтому
+        # берём ещё и связку «строка листа → ФИО → карточка пула», ту же, что
+        # у цены: тренер ведёт ФИО в листе, и это единственный общий мостик.
+        for src, pid in _player_ids_of(uid):
             for r in conn.execute(
                     """SELECT * FROM game_player_stats
                        WHERE source = ? AND player_id = ?
@@ -1225,6 +1228,38 @@ def weekly_personal(season_id: int, week_start: str, tg_user_id: Any
     return out
 
 
+def _player_ids_of(tg_user_id: Any) -> List[Tuple[str, str]]:
+    """[(источник, id в лиге)] для человека: привязанный профиль или связка
+    «строка листа → карточка пула», которую демон складывает в price_refs.
+
+    Через ФИО в памяти делать нельзя: недельная рассылка идёт из кронового
+    процесса, реестр имён там пуст, и мостик рассыпался бы молча — ровно так
+    же, как это было с ценами. price_refs лежит на диске и переживает
+    перезапуск."""
+    import fantasy_stats
+    import player_identity
+    out = [(str(i["source"]), str(i["player_id"]))
+           for i in player_identity.get_identities(tg_user_id)]
+    if out:
+        return out
+    try:
+        link = sheets_cache.get_player_link(str(tg_user_id))
+        if not link:
+            return out
+        sheets_cache.init_db()
+        with sheets_cache.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT ref FROM price_refs WHERE player_row = ?",
+                (int(link["player_row"]),)).fetchall()
+        for r in rows:
+            for one in fantasy_stats.expand_refs([str(r["ref"])]):
+                src, pid = fantasy_stats.parse_ref(one)
+                out.append((src, pid))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Свои игры по строке листа: %s", exc)
+    return out
+
+
 def format_weekly_personal(season_id: int, week_start: str, tg_user_id: Any) -> str:
     """Личная разбивка по играм. Пусто — значит человек на этой неделе не
     выбирал и не играл, и слать ему нечего."""
@@ -1250,7 +1285,13 @@ def format_weekly_personal(season_id: int, week_start: str, tg_user_id: Any) -> 
         total_picked += g["picked"]
         total_played += g["played"]
     lines.append("")
-    lines.append(f"Итого: {total_picked:g} как участник, {total_played:g} как игрок.")
+    # Не играл — про «0 как игрок» молчим: это не результат, а лишний укол
+    # человеку, который на этой неделе просто не выходил на площадку.
+    if total_played:
+        lines.append(f"Итого: {total_picked:g} как участник, "
+                     f"{total_played:g} как игрок.")
+    else:
+        lines.append(f"Итого за выбор: {total_picked:g}.")
     return "\n".join(lines)
 
 
