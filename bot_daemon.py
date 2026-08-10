@@ -2039,16 +2039,26 @@ def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
     """Игры, по которым можно смотреть стартовый состав — с уже собранным."""
     import coach_payments
     import game_roster
-    today = date.today()
-    games = [g for g in game_roster.games(from_day=today - timedelta(days=7))
-             if game_roster.roster(g["source"], g["game_id"])]
+    from datetime_utils import get_moscow_time
+    now = get_moscow_time().replace(tzinfo=None)
+    # Только предстоящие: стартовая пятёрка — решение ПЕРЕД игрой. По сыгранной
+    # выбирать нечего, а в списке она путается с ближайшей.
+    games = []
+    for g in game_roster.games(from_day=now.date()):
+        start = game_roster._game_start(g)
+        if start and start < now:
+            continue
+        if not game_roster.roster(g["source"], g["game_id"]):
+            continue
+        games.append(g)
     rows = [[InlineKeyboardButton(
         f"{coach_payments._human_date(g['date'].isoformat())} · {g['opponent']}"[:60],
         callback_data=f"coach:start:{g['source']}:{g['game_id']}:name")]
         for g in games[:8]]
     rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:play")])
     head = ("🏁 Стартовый состав\n\nВыбери игру:" if games else
-            "🏁 Стартовый состав\n\nНи по одной игре состав ещё не собран.")
+            "🏁 Стартовый состав\n\nБлижайших игр с собранным составом нет. "
+            "По сыгранным пятёрку не выбирают.")
     return head, InlineKeyboardMarkup(rows)
 
 
