@@ -1584,18 +1584,42 @@ def link_from_votes() -> List[Dict[str, Any]]:
 
 
 def unlinked_bot_users() -> List[Dict[str, Any]]:
-    """Кто нажимал /start, но не сопоставлен ни с одной строкой листа.
+    """Кого бот видел, но не сопоставил со строкой листа.
 
-    Это те, кому бот отвечает «не игрок команды»: сменил @ник, ника в листе нет
-    вовсе — или он вообще посторонний. Разобрать может только человек, поэтому
-    список выносим в админку."""
+    Считаем всех, о ком вообще что-то знаем: и нажимавших /start, и просто
+    голосовавших в общем чате. Голосующие важнее — их большинство, а в личку
+    бота заходят единицы; раньше они в этот список не попадали вовсе, и
+    привязать их вручную было негде.
+
+    Автоматика опознаёт только точное совпадение ника (link_from_votes), а
+    здесь остаются те, у кого ник в листе устарел: сравнить «@Gudi» из листа с
+    «@gudi20» из голоса может только человек."""
     init_db()
     with _connection() as conn:
         rows = conn.execute(
-            """SELECT telegram_id, username, first_name, first_seen_at FROM bot_users
-               WHERE telegram_id NOT IN (SELECT tg_user_id FROM player_links)
-               ORDER BY first_seen_at DESC""").fetchall()
-    return [dict(r) for r in rows]
+            """SELECT telegram_id, username, first_name, first_seen_at, source FROM (
+                   SELECT telegram_id, username, first_name, first_seen_at,
+                          'бот' AS source
+                     FROM bot_users
+                   UNION
+                   SELECT user_id, username, first_name, MAX(updated_at),
+                          'опрос' AS source
+                     FROM (SELECT user_id, username, first_name, updated_at FROM game_votes
+                           UNION ALL
+                           SELECT user_id, username, first_name, updated_at FROM attendance)
+                    GROUP BY user_id)
+                WHERE telegram_id NOT IN (SELECT tg_user_id FROM player_links)
+                ORDER BY first_seen_at DESC""").fetchall()
+    # Один и тот же человек мог и голосовать, и запускать бота — оставляем по
+    # одной строке на числовой id.
+    seen, out = set(), []
+    for r in rows:
+        key = str(r["telegram_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(r))
+    return out
 
 
 def free_player_rows() -> List[Dict[str, Any]]:

@@ -2661,14 +2661,19 @@ def _render_link_list() -> Tuple[str, InlineKeyboardMarkup]:
                      + ", ".join(f["title"] for f in by_votes[:5]))
         lines.append("")
     if people:
-        lines += [f"В боте, но не сопоставлены с листом: {len(people)}.",
+        lines += [f"Не сопоставлены с листом: {len(people)}.",
+                  "🗳 — знаем по голосам в чате, в личку бота не заходили. "
+                  "Обычно у них просто сменился ник.",
                   "Нажми на человека — предложу, кому он может быть.", ""]
     else:
         lines.append("Все, кто нажимал /start, сопоставлены с игроками. ✅")
     rows: List[List[InlineKeyboardButton]] = []
     for p in people[:12]:
         nick = f"@{p['username']}" if p["username"] else "без ника"
-        title = f"{p['first_name'] or 'без имени'} · {nick}"
+        # Откуда знаем человека: из личного /start или из голосов в чате.
+        # Для голосующих это единственный способ попасть в этот список.
+        mark = "🗳 " if p.get("source") == "опрос" else ""
+        title = f"{mark}{p['first_name'] or 'без имени'} · {nick}"
         rows.append([InlineKeyboardButton(title[:64],
                                           callback_data=f"admin:link:pick:{p['telegram_id']}:0")])
     if free:
@@ -5595,6 +5600,15 @@ async def _background_loop(app: Application) -> None:
             await _game_schedule(app)
             await _personal_digests(app)
             await _catch_up_prices()
+            # Новые голосующие появляются каждую неделю, а ники меняются ещё
+            # чаще: опознаём по ходу, а не только при перезапуске демона.
+            try:
+                found = await asyncio.to_thread(sheets_cache.link_from_votes)
+                if found:
+                    log.info("Опознаны по голосам: "
+                             + ", ".join(f"{f['title']} (@{f['username']})" for f in found))
+            except Exception as e:
+                log.warning(f"Опознание по голосам: {e}")
             await _send_starting_lineups(app)
             await _watch_broadcasts(app)
             await _refresh_pay_summary()
