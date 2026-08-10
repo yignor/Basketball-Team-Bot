@@ -50,9 +50,12 @@ ANNOUNCE_MAX_AGE_DAYS = 3
 # Трансляция появляется в группе около начала матча, поэтому смотреть начинаем
 # заранее и продолжаем, пока игра идёт. Раньше бот искал только ЗАПИСИ уже
 # сыгранных игр — ссылка приходила на следующий день, когда смотреть незачем.
-LIVE_LEAD_MINUTES = 15          # за сколько до начала начинаем смотреть
+# Эфир включают за 10–20 минут до игры, а пост со ссылкой лига публикует
+# когда придётся — 09.08 через три часа после начала. Поэтому смотрим раньше и
+# чаще, а ищем в первую очередь среди видео группы, а не в постах.
+LIVE_LEAD_MINUTES = 30          # за сколько до начала начинаем смотреть
 LIVE_TAIL_HOURS = 3             # сколько ещё смотрим после начала
-LIVE_SCAN_SECONDS = 180         # как часто дёргаем VK по одной игре
+LIVE_SCAN_SECONDS = 60          # как часто дёргаем VK по одной игре
 
 
 _env_loaded = False
@@ -216,6 +219,58 @@ def _video_link(post: Dict[str, Any]) -> str:
     # Видео может лежать не вложением, а ссылкой в тексте.
     m = re.search(r"https?://(?:www\.)?vk\.com/video-?\d+_\d+\S*", post.get("text") or "")
     return m.group(0) if m else ""
+
+
+async def find_live_video(team_a: str, team_b: str,
+                          game_date: str = "") -> str:
+    """Ищет ИДУЩИЙ эфир прямо в видео группы, не дожидаясь поста.
+
+    Так и вышло 09.08: ВК говорит, что эфир начался в 18:35, а пост с ним
+    появился только вечером — бот честно смотрел стену и ничего не находил,
+    ссылка ушла в чат через три часа после начала игры. Список видео группы
+    показывает трансляцию сразу, как её включили.
+
+    Ищем по названию: соперника в заголовке пишут почти всегда, своё название —
+    не обязательно."""
+    want = [_norm(t) for t in (team_a, team_b) if t]
+    if not want:
+        return ""
+    for g in groups():
+        params: Dict[str, Any] = {"count": 30}
+        owner = str(g).lstrip("@")
+        if owner.lstrip("-").isdigit():
+            params["owner_id"] = -abs(int(owner))
+        else:
+            # video.get не понимает короткое имя — сначала спрашиваем id.
+            info = await _call("groups.getById", group_id=owner)
+            items = (info or {}).get("groups") or (info if isinstance(info, list) else [])
+            gid = (items[0] or {}).get("id") if items else None
+            if not gid:
+                continue
+            params["owner_id"] = -abs(int(gid))
+        res = await _call("video.get", **params)
+        for v in (res or {}).get("items") or []:
+            title = _norm(v.get("title") or "")
+            if not any(w and w in title for w in want):
+                continue
+            live = str(v.get("live_status") or "")
+            # Берём идущий эфир или свежее видео этого дня: закончившуюся
+            # трансляцию найдёт обычный поиск записей.
+            if live not in ("started", "waiting") and game_date:
+                import datetime as _dt
+                try:
+                    when = _dt.datetime.fromtimestamp(int(v.get("date") or 0)).date()
+                    if when.isoformat() != game_date:
+                        continue
+                except (ValueError, OSError):
+                    continue
+            owner_id, vid = v.get("owner_id"), v.get("id")
+            if owner_id is None or vid is None:
+                continue
+            link = f"https://vk.com/video{owner_id}_{vid}"
+            key = v.get("access_key")
+            return f"{link}?list={key}" if key else link
+    return ""
 
 
 async def find_for_game(game_date: str, team_a: str, team_b: str,
@@ -448,14 +503,21 @@ async def watch_live(bot: Any = None, chat_ids: Optional[List[Any]] = None,
         out["watching"] += 1
         # Ищем по сопернику: своё название команды в постах группы лиги
         # пишут не всегда, а соперника — почти обязательно.
-        link = await find_for_game(g["game_date"], g["opponent"], "")
+        # Сначала — список видео группы: эфир там появляется сразу, а пост со
+        # ссылкой лига публикует когда придётся (09.08 — через три часа).
+        link = await find_live_video(g["opponent"], "", g["game_date"])
+        how = "видео группы"
+        if not link:
+            link = await find_for_game(g["game_date"], g["opponent"], "")
+            how = "пост в группе"
         if not link:
             continue
         if not store(g["source"], g["game_id"], link, g["game_date"],
                      g["home_name"], g["guest_name"]):
             continue
         out["found"] += 1
-        print(f"📺 VK: трансляция {g['opponent']} ({g['game_date']}): {link}")
+        print(f"📺 VK: трансляция {g['opponent']} ({g['game_date']}) — "
+              f"нашлась через {how}: {link}")
         if bot is not None:
             try:
                 res = await announce(bot, g, link, chat_ids, topic_id, live=True)
