@@ -2560,15 +2560,15 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def handle_access_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Дата, до которой тренер открывает игроку личную статистику."""
+    """Дата, до которой админ открывает раздел: и игроку из списка, и по нику."""
     import coach_newgame
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_access:
         return
-    if not _can_see_reports(user):
+    if not _is_admin(user):
         _awaiting_access.pop(user.id, None)
         return
-    row = int(_awaiting_access[user.id])
+    kind, how, who = str(_awaiting_access[user.id]).split(":", 2)
     raw = (msg.text or "").strip()
     forever = raw.lower().replace("ё", "е") in ("бессрочно", "навсегда", "без срока")
     until = ""
@@ -2584,13 +2584,25 @@ async def handle_access_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
             raise ApplicationHandlerStop
         until = day.isoformat()
     _awaiting_access.pop(user.id, None)
-    p = await asyncio.to_thread(_access_open, row, until, str(user.id))
+    when = f"до {date.fromisoformat(until):%d.%m.%Y}" if until else "бессрочно"
+    title = sheets_cache.ACCESS_TITLES.get(kind, kind)
+
+    if how == "nick":
+        await asyncio.to_thread(sheets_cache.grant_access, kind, who,
+                                str(user.id), 0, until)
+        text, markup = _render_access_list()
+        await msg.reply_text(
+            f"✅ «{title}» открыт для @{who} {when}.\n\n"
+            "Кнопка появится у него после /start.\n\n" + text, reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    row = int(who)
+    p = await asyncio.to_thread(_access_open, kind, row, until, str(user.id))
     if not p:
         await msg.reply_text("Не нашёл, кому открывать.")
         raise ApplicationHandlerStop
-    told = await _access_tell(msg.get_bot(), p, until)
-    text, markup = await asyncio.to_thread(_access_who, row)
-    when = f"до {date.fromisoformat(until):%d.%m.%Y}" if until else "бессрочно"
+    told = await _access_tell(msg.get_bot(), kind, p, until)
+    text, markup = await asyncio.to_thread(_access_who, kind, row)
     head = (f"✅ {p['title']}: открыл {when}."
             + ("" if told else " Сказать ему не смог — не запускал бота."))
     await msg.reply_text(f"{head}\n\n{text}", reply_markup=markup)
@@ -3388,11 +3400,11 @@ def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
     # Заодно подчищаем истёкшие: список должен показывать то, что есть сейчас.
     gone = sheets_cache.purge_expired_access()
     lines = ["🔑 Доступы к закрытым разделам", "",
-             "Админам открыто всё и без списка. Остальным — по выдаче: "
-             "по @нику, с закреплением за числовым id при первом входе.", "",
-             "«Личную статистику» удобнее выдавать в разделе тренера "
-             "(💰 Оплата → 🔑 Доступ): там список игроков по фамилиям и дата "
-             "окончания, а не ник наугад.", ""]
+             "Админам открыто всё и без списка. Остальным — по выдаче.", "",
+             "«👥 Из списка игроков» — для своих: по фамилии, до конкретной "
+             "даты, доступ работает сразу. «➕ Открыть по @нику» — для тех, "
+             "кого в листе нет (помощник, родитель); он закрепится за числовым "
+             "id при первом входе.", ""]
     if gone:
         lines.append(f"⌛ Снял по истечении срока: {gone}.")
         lines.append("")
@@ -3413,7 +3425,9 @@ def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
                 state += ", бессрочно"
             lines.append(f"   @{a['username']} — {state}")
         lines.append("")
-        rows.append([InlineKeyboardButton(f"➕ Открыть «{title}»",
+        rows.append([InlineKeyboardButton(f"👥 «{title}» — из списка игроков",
+                                          callback_data=f"admin:acc:who:{kind}:0")])
+        rows.append([InlineKeyboardButton(f"➕ «{title}» — по @нику",
                                           callback_data=f"admin:acc:add:{kind}")])
         for a in people:
             rows.append([InlineKeyboardButton(
@@ -3421,6 +3435,203 @@ def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
                 callback_data=f"admin:acc:del:{kind}:{a['username']}")])
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+# ─────────────── Выдача доступа из списка игроков ──────────────────────────
+#
+# Выдаёт только админ: это он получает деньги за личную статистику и решает,
+# кому открыть раздел тренера. Тренеру такой кнопки нет.
+#
+# Второй способ рядом с выдачей по @нику, а не вместо неё. По нику — для тех,
+# кого нет в листе (помощник, родитель). Из списка — для своих: админ знает их
+# по фамилиям, а половина команды ник не показывает вовсе, и тогда выдавать
+# просто не на что. Привязка (player_links) даёт числовой id — по нему доступ
+# работает сразу, без «первого входа».
+
+# Кто вводит дату окончания доступа руками: {user_id: "вид:row:N" | "вид:nick:X"}.
+_awaiting_access: Dict[int, str] = {}
+
+ACCESS_ASK = ("📅 До какого числа открыть доступ?\n\n"
+              "Напиши дату: «10.09» или «10.09.2026». Без года возьму "
+              "ближайшую будущую.\n\n"
+              "«бессрочно» — открыть насовсем.\n\nПередумал — /start.")
+
+# Быстрые сроки: сколько месяцев прибавить. Год отдельной кнопкой не нужен —
+# для «насовсем» есть ручной ввод.
+ACCESS_MONTHS = [(1, "месяц"), (3, "3 месяца"), (6, "полгода")]
+
+
+def _add_months(day: date, months: int) -> date:
+    """Та же дата через N месяцев. 31-е в коротком месяце — последнее число."""
+    import calendar
+    total = day.year * 12 + (day.month - 1) + int(months)
+    year, month = divmod(total, 12)
+    month += 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def _access_people(kind: str) -> List[Dict[str, Any]]:
+    """Игроки с состоянием доступа к разделу.
+
+    Сначала те, кому открыто (у кого срок ближе — выше): важно видеть, у кого
+    вот-вот кончится оплаченное. Дальше остальные по алфавиту."""
+    import coach_payments
+    people = coach_payments.players()
+    with sheets_cache.get_connection() as conn:
+        links = {int(r["player_row"]): str(r["tg_user_id"])
+                 for r in conn.execute(
+                     "SELECT player_row, tg_user_id FROM player_links")}
+    grants = sheets_cache.access_list(kind)
+    by_id = {str(g["tg_user_id"]): g for g in grants if g["tg_user_id"]}
+    by_nick = {str(g["username"]).lstrip("@").lower(): g for g in grants}
+    out = []
+    for p in people:
+        uid = links.get(int(p["row"]), "")
+        nick = str(p.get("nickname") or "").lstrip("@").strip().lower()
+        grant = by_id.get(uid) if uid else None
+        if grant is None and nick:
+            grant = by_nick.get(nick)
+        until = str((grant or {}).get("until") or "")
+        left = None
+        if grant and until:
+            try:
+                left = (date.fromisoformat(until) - date.today()).days
+            except ValueError:
+                until = ""
+        out.append({"row": int(p["row"]), "title": p["title"], "uid": uid,
+                    "nick": nick, "open": grant is not None,
+                    "until": until, "left": left,
+                    # Ни привязки, ни ника — выдавать некому: доступ не к кому
+                    # прикрепить, человек его просто не увидит.
+                    "reachable": bool(uid or nick)})
+    out.sort(key=lambda r: (not r["open"],
+                            r["left"] if r["left"] is not None else 10 ** 6,
+                            r["title"]))
+    return out
+
+
+def _access_mark(p: Dict[str, Any]) -> str:
+    """Одной строкой: открыто ли и до какого числа."""
+    if not p["open"]:
+        return "закрыто" if p["reachable"] else "закрыто, нет ни ника, ни привязки"
+    if not p["until"]:
+        return "открыто бессрочно"
+    when = date.fromisoformat(p["until"]).strftime("%d.%m.%Y")
+    return f"до {when} ({p['left']} дн.)"
+
+
+def _access_screen(kind: str, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кому открыт раздел и до какого числа — списком по фамилиям."""
+    title = sheets_cache.ACCESS_TITLES.get(kind, kind)
+    people = _access_people(kind)
+    opened = [p for p in people if p["open"]]
+    soon = [p for p in opened if p["left"] is not None and p["left"] <= 7]
+    lines = [f"🔑 {title}: кому открыто", "",
+             "Раздел закрытый: открываешь до нужного числа, срок кончится сам — "
+             "помнить о нём не надо.", "",
+             f"Открыто: {len(opened)} из {len(people)}."]
+    if soon:
+        lines.append("⏳ Заканчивается на днях: "
+                     + ", ".join(f"{p['title']} ({p['left']} дн.)" for p in soon))
+    lines.append("")
+    start = max(0, int(page)) * PLAYERS_PER_PAGE
+    chunk = people[start:start + PLAYERS_PER_PAGE]
+    rows: List[List[InlineKeyboardButton]] = []
+    for p in chunk:
+        lines.append(f"{'✅' if p['open'] else '🔒'} {p['title']} — {_access_mark(p)}")
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if p['open'] else '🔒'} {p['title']}"[:60],
+            callback_data=f"admin:acc:w:{kind}:{p['row']}")])
+    nav = []
+    if start:
+        nav.append(InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"admin:acc:who:{kind}:{page - 1}"))
+    if start + PLAYERS_PER_PAGE < len(people):
+        nav.append(InlineKeyboardButton(
+            "Ещё ➡️", callback_data=f"admin:acc:who:{kind}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ К доступам", callback_data="admin:acc:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _access_who(kind: str, row: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Экран одного игрока: сроки одной кнопкой или своя дата."""
+    title = sheets_cache.ACCESS_TITLES.get(kind, kind)
+    back = [InlineKeyboardButton("⬅️ К списку",
+                                 callback_data=f"admin:acc:who:{kind}:0")]
+    people = _access_people(kind)
+    p = next((x for x in people if x["row"] == int(row)), None)
+    if not p:
+        return "Не нашёл игрока.", InlineKeyboardMarkup([back])
+    lines = [f"👤 {p['title']}", "", f"🔑 {title}: {_access_mark(p)}", ""]
+    if not p["reachable"]:
+        lines.append("У человека не привязан телеграм и не заполнен ник в листе "
+                     "«Игроки» — открывать некому. Пусть нажмёт /start и "
+                     "проголосует, бот его опознает.")
+        return "\n".join(lines), InlineKeyboardMarkup([back])
+
+    # Продлеваем от конца оплаченного, а не от сегодня: человек платит второй
+    # месяц подряд — он должен получить его целиком, а не потерять остаток.
+    base = date.today()
+    if p["open"] and p["until"]:
+        base = max(base, date.fromisoformat(p["until"]))
+    forever = p["open"] and not p["until"]
+    lines.append("Доступ бессрочный — продлевать нечего." if forever
+                 else "Открыть " + ("ещё на:" if p["open"] else "на:"))
+    rows: List[List[InlineKeyboardButton]] = []
+    if not forever:
+        for months, label in ACCESS_MONTHS:
+            end = _add_months(base, months)
+            rows.append([InlineKeyboardButton(
+                f"📅 {label} — до {end:%d.%m.%Y}",
+                callback_data=f"admin:acc:set:{kind}:{row}:{months}")])
+    rows.append([InlineKeyboardButton(
+        "✍️ Своя дата", callback_data=f"admin:acc:day:{kind}:{row}")])
+    if p["open"]:
+        rows.append([InlineKeyboardButton(
+            "✂️ Закрыть доступ", callback_data=f"admin:acc:off:{kind}:{row}")])
+    rows.append(back)
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _access_open(kind: str, row: int, until: str, by: str) -> Dict[str, Any]:
+    """Открывает доступ игроку. Возвращает его карточку для сообщения."""
+    people = _access_people(kind)
+    p = next((x for x in people if x["row"] == int(row)), None)
+    if not p or not p["reachable"]:
+        return {}
+    sheets_cache.grant_access_id(kind, p["uid"], p["nick"], by, until)
+    return p
+
+
+# Что человек получает — своими словами, а не названием раздела в базе.
+ACCESS_INTRO = {
+    sheets_cache.ACCESS_PERSONAL:
+        ("📊 Личная статистика открыта{when}.\n\n"
+         "Нажми /start — внизу появится кнопка «📊 Моя статистика». Там твои "
+         "игры, разбор после каждого матча и таймкоды выходов на площадку "
+         "в записи."),
+    sheets_cache.ACCESS_TEAM:
+        ("🧑‍🏫 Раздел тренера открыт{when}.\n\n"
+         "Нажми /start — внизу появится кнопка «🧑‍🏫 Тренер». Там разбор игр, "
+         "составы и учёт оплат."),
+}
+
+
+async def _access_tell(bot, kind: str, p: Dict[str, Any], until: str) -> bool:
+    """Сообщает человеку, что раздел открыт. Молча выдавать бессмысленно —
+    кнопка появится, а он о ней не узнает."""
+    if not p.get("uid"):
+        return False
+    when = f" до {date.fromisoformat(until):%d.%m.%Y}" if until else " бессрочно"
+    body = ACCESS_INTRO.get(kind, "Доступ открыт{when}.").format(when=when)
+    try:
+        await bot.send_message(chat_id=int(p["uid"]), text=body)
+        return True
+    except Exception as e:
+        log.info(f"Не сказал про доступ {p['uid']}: {e}")
+        return False
 
 
 async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3461,6 +3672,13 @@ async def handle_coach_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     nick = (msg.text or "").strip().split()[0] if (msg.text or "").strip() else ""
     if not nick.lstrip("@").replace("_", "").isalnum():
         await msg.reply_text("Это не похоже на @ник. Открой экран и попробуй ещё раз.")
+        raise ApplicationHandlerStop
+    # «До определённой даты»: ник взяли, теперь спрашиваем число. Двумя шагами,
+    # а не одной строкой «@ник до 10.09» — разбирать вольный ввод в вещи,
+    # которую потом никто не перепроверит, себе дороже.
+    if days_raw == "date":
+        _awaiting_access[user.id] = f"{kind}:nick:{nick.lstrip('@')}"
+        await msg.reply_text(f"Кому: {nick}. Раздел: «{title}».\n\n" + ACCESS_ASK)
         raise ApplicationHandlerStop
     sheets_cache.grant_access(kind, nick, str(user.id), days)
     from datetime import timedelta as _td
@@ -3551,10 +3769,6 @@ def _money_markup() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
         [InlineKeyboardButton("✏️ Изменить суммы", callback_data="coach:sums"),
          InlineKeyboardButton("🗑 Удалить оплату", callback_data="coach:delpay")],
-        # Личная статистика — платный раздел, и открывают его сразу после
-        # оплаты: кнопка стоит там, где тренер в этот момент и находится.
-        [InlineKeyboardButton("🔑 Доступ к личной статистике",
-                              callback_data="coach:acc")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -3745,192 +3959,6 @@ def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
             callback_data=f"coach:delpay:{it['id']}")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
-
-
-# ─────────────── Доступ к личной статистике (у тренера) ────────────────────
-#
-# Раздел платный: человек оплачивает, тренер выдаёт чек и открывает доступ до
-# конкретного числа. Поэтому кнопка живёт в блоке «💰 Оплата» — там, где тренер
-# и так находится, когда деньги пришли.
-#
-# Выдаём не по @нику, как в админке, а по строке листа: тренер знает людей по
-# фамилиям, а половина команды ник не показывает вовсе. Привязка (player_links)
-# даёт числовой id — по нему доступ работает сразу, без «первого входа».
-
-# Кто вводит дату окончания доступа руками: {user_id: строка листа}.
-_awaiting_access: Dict[int, str] = {}
-
-ACCESS_ASK = ("📅 До какого числа открыть доступ?\n\n"
-              "Напиши дату: «10.09» или «10.09.2026». Без года возьму "
-              "ближайшую будущую.\n\n"
-              "«бессрочно» — открыть насовсем.\n\nПередумал — /start.")
-
-# Быстрые сроки: сколько месяцев прибавить. Год отдельной кнопкой не нужен —
-# для «насовсем» есть ручной ввод.
-ACCESS_MONTHS = [(1, "месяц"), (3, "3 месяца"), (6, "полгода")]
-
-
-def _add_months(day: date, months: int) -> date:
-    """Та же дата через N месяцев. 31-е в коротком месяце — последнее число."""
-    import calendar
-    total = day.year * 12 + (day.month - 1) + int(months)
-    year, month = divmod(total, 12)
-    month += 1
-    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
-
-
-def _access_people() -> List[Dict[str, Any]]:
-    """Игроки с состоянием доступа к личной статистике.
-
-    Сначала те, кому открыто (у кого срок ближе — выше): тренеру важно видеть,
-    у кого вот-вот кончится оплаченное. Дальше остальные по алфавиту."""
-    import coach_payments
-    people = coach_payments.players()
-    with sheets_cache.get_connection() as conn:
-        links = {int(r["player_row"]): str(r["tg_user_id"])
-                 for r in conn.execute(
-                     "SELECT player_row, tg_user_id FROM player_links")}
-    grants = sheets_cache.access_list(sheets_cache.ACCESS_PERSONAL)
-    by_id = {str(g["tg_user_id"]): g for g in grants if g["tg_user_id"]}
-    by_nick = {str(g["username"]).lstrip("@").lower(): g for g in grants}
-    out = []
-    for p in people:
-        uid = links.get(int(p["row"]), "")
-        nick = str(p.get("nickname") or "").lstrip("@").strip().lower()
-        grant = by_id.get(uid) if uid else None
-        if grant is None and nick:
-            grant = by_nick.get(nick)
-        until = str((grant or {}).get("until") or "")
-        left = None
-        if grant and until:
-            try:
-                left = (date.fromisoformat(until) - date.today()).days
-            except ValueError:
-                until = ""
-        out.append({"row": int(p["row"]), "title": p["title"], "uid": uid,
-                    "nick": nick, "open": grant is not None,
-                    "until": until, "left": left,
-                    # Ни привязки, ни ника — выдавать некому: доступ не к кому
-                    # прикрепить, человек его просто не увидит.
-                    "reachable": bool(uid or nick)})
-    out.sort(key=lambda r: (not r["open"],
-                            r["left"] if r["left"] is not None else 10 ** 6,
-                            r["title"]))
-    return out
-
-
-def _access_mark(p: Dict[str, Any]) -> str:
-    """Одной строкой: открыто ли и до какого числа."""
-    if not p["open"]:
-        return "закрыто" if p["reachable"] else "закрыто, нет ни ника, ни привязки"
-    if not p["until"]:
-        return "открыто бессрочно"
-    when = date.fromisoformat(p["until"]).strftime("%d.%m.%Y")
-    return f"до {when} ({p['left']} дн.)"
-
-
-def _access_screen(page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
-    """Кому открыта личная статистика и до какого числа."""
-    people = _access_people()
-    opened = [p for p in people if p["open"]]
-    soon = [p for p in opened if p["left"] is not None and p["left"] <= 7]
-    lines = ["🔑 Доступ к личной статистике", "",
-             "Раздел платный: человек оплатил — открываешь до нужного числа. "
-             "Срок кончится сам, помнить о нём не надо.", "",
-             f"Открыто: {len(opened)} из {len(people)}."]
-    if soon:
-        lines.append("⏳ Заканчивается на днях: "
-                     + ", ".join(f"{p['title']} ({p['left']} дн.)" for p in soon))
-    lines.append("")
-    start = max(0, int(page)) * PLAYERS_PER_PAGE
-    chunk = people[start:start + PLAYERS_PER_PAGE]
-    rows: List[List[InlineKeyboardButton]] = []
-    for p in chunk:
-        lines.append(f"{'✅' if p['open'] else '🔒'} {p['title']} — {_access_mark(p)}")
-        rows.append([InlineKeyboardButton(
-            f"{'✅' if p['open'] else '🔒'} {p['title']}"[:60],
-            callback_data=f"coach:accw:{p['row']}")])
-    nav = []
-    if start:
-        nav.append(InlineKeyboardButton("⬅️ Назад",
-                                        callback_data=f"coach:accp:{page - 1}"))
-    if start + PLAYERS_PER_PAGE < len(people):
-        nav.append(InlineKeyboardButton("Ещё ➡️",
-                                        callback_data=f"coach:accp:{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:money")])
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
-
-
-def _access_who(row: int) -> Tuple[str, InlineKeyboardMarkup]:
-    """Экран одного игрока: сроки одной кнопкой или своя дата."""
-    people = _access_people()
-    p = next((x for x in people if x["row"] == int(row)), None)
-    if not p:
-        return "Не нашёл игрока.", InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ К списку", callback_data="coach:acc")]])
-    lines = [f"👤 {p['title']}", "", f"📊 Личная статистика: {_access_mark(p)}", ""]
-    if not p["reachable"]:
-        lines.append("У человека не привязан телеграм и не заполнен ник в листе "
-                     "«Игроки» — открывать некому. Пусть нажмёт /start и "
-                     "проголосует, бот его опознает.")
-        return "\n".join(lines), InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ К списку", callback_data="coach:acc")]])
-
-    # Продлеваем от конца оплаченного, а не от сегодня: человек платит второй
-    # месяц подряд — он должен получить его целиком, а не потерять остаток.
-    base = date.today()
-    if p["open"] and p["until"]:
-        base = max(base, date.fromisoformat(p["until"]))
-    if p["open"] and not p["until"]:
-        lines.append("Доступ бессрочный — продлевать нечего.")
-    else:
-        lines.append("Открыть " + ("ещё на:" if p["open"] else "на:"))
-    rows: List[List[InlineKeyboardButton]] = []
-    if not (p["open"] and not p["until"]):
-        for months, title in ACCESS_MONTHS:
-            end = _add_months(base, months)
-            rows.append([InlineKeyboardButton(
-                f"📅 {title} — до {end:%d.%m.%Y}",
-                callback_data=f"coach:accset:{row}:{months}")])
-    rows.append([InlineKeyboardButton("✍️ Своя дата",
-                                      callback_data=f"coach:accday:{row}")])
-    if p["open"]:
-        rows.append([InlineKeyboardButton("✂️ Закрыть доступ",
-                                          callback_data=f"coach:accoff:{row}")])
-    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="coach:acc")])
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
-
-
-def _access_open(row: int, until: str, by: str) -> Dict[str, Any]:
-    """Открывает доступ игроку. Возвращает его карточку для сообщения."""
-    people = _access_people()
-    p = next((x for x in people if x["row"] == int(row)), None)
-    if not p or not p["reachable"]:
-        return {}
-    sheets_cache.grant_access_id(sheets_cache.ACCESS_PERSONAL, p["uid"],
-                                 p["nick"], by, until)
-    return p
-
-
-async def _access_tell(bot, p: Dict[str, Any], until: str) -> bool:
-    """Сообщает человеку, что раздел открыт. Молча выдавать бессмысленно —
-    кнопка появится, а он о ней не узнает."""
-    if not p.get("uid"):
-        return False
-    when = (f" до {date.fromisoformat(until):%d.%m.%Y}" if until else " бессрочно")
-    try:
-        await bot.send_message(
-            chat_id=int(p["uid"]),
-            text=("📊 Личная статистика открыта" + when + ".\n\n"
-                  "Нажми /start — внизу появится кнопка «📊 Моя статистика». "
-                  "Там твои игры, разбор после каждого матча и таймкоды "
-                  "выходов на площадку в записи."))
-        return True
-    except Exception as e:
-        log.info(f"Не сказал про доступ {p['uid']}: {e}")
-        return False
 
 
 def _my_games_video(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -4712,51 +4740,6 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 _start_screen, parts[4], parts[5], parts[6])
             await query.edit_message_text(text, reply_markup=markup)
 
-        elif what == "acc":
-            text, markup = await asyncio.to_thread(_access_screen, 0)
-            await query.edit_message_text(text, reply_markup=markup)
-
-        elif what == "accp" and len(parts) > 2:
-            text, markup = await asyncio.to_thread(_access_screen, int(parts[2]))
-            await query.edit_message_text(text, reply_markup=markup)
-
-        elif what == "accw" and len(parts) > 2:
-            text, markup = await asyncio.to_thread(_access_who, int(parts[2]))
-            await query.edit_message_text(text, reply_markup=markup)
-
-        elif what == "accset" and len(parts) > 3:
-            row, months = int(parts[2]), int(parts[3])
-            people = await asyncio.to_thread(_access_people)
-            p = next((x for x in people if x["row"] == row), None)
-            base = date.today()
-            if p and p["open"] and p["until"]:
-                base = max(base, date.fromisoformat(p["until"]))
-            until = _add_months(base, months).isoformat()
-            p = await asyncio.to_thread(_access_open, row, until, str(user.id))
-            if not p:
-                await query.answer("Некому открывать", show_alert=True)
-                return
-            told = await _access_tell(query.get_bot(), p, until)
-            text, markup = await asyncio.to_thread(_access_who, row)
-            head = (f"✅ Открыл до {date.fromisoformat(until):%d.%m.%Y}."
-                    + ("" if told else " Сказать ему не смог — не запускал бота."))
-            await query.edit_message_text(f"{head}\n\n{text}", reply_markup=markup)
-
-        elif what == "accday" and len(parts) > 2:
-            _clear_pending(user.id)
-            _awaiting_access[user.id] = parts[2]
-            await query.edit_message_text(ACCESS_ASK)
-
-        elif what == "accoff" and len(parts) > 2:
-            people = await asyncio.to_thread(_access_people)
-            p = next((x for x in people if x["row"] == int(parts[2])), None)
-            if p:
-                await asyncio.to_thread(sheets_cache.revoke_access_id,
-                                        sheets_cache.ACCESS_PERSONAL,
-                                        p["uid"], p["nick"])
-            text, markup = await asyncio.to_thread(_access_who, int(parts[2]))
-            await query.edit_message_text(f"✂️ Закрыл.\n\n{text}", reply_markup=markup)
-
         elif what == "money":
             await query.edit_message_text(
                 "💰 Оплата\n\nВзносы, долги и напоминания.",
@@ -5252,6 +5235,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 title = sheets_cache.ACCESS_TITLES.get(kind, kind)
                 rows = [[InlineKeyboardButton(label, callback_data=f"admin:acc:days:{kind}:{days}")]
                         for label, days in ACCESS_PERIODS]
+                rows.append([InlineKeyboardButton(
+                    "✍️ До определённой даты", callback_data=f"admin:acc:days:{kind}:date")])
                 rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin:acc:list")])
                 await query.edit_message_text(
                     f"🔑 «{title}» — на какой срок открыть?",
@@ -5263,6 +5248,50 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 title = sheets_cache.ACCESS_TITLES.get(parts[3], parts[3])
                 await query.edit_message_text(
                     COACH_ASK.format(title=title))
+                return
+            # Выдача из списка игроков — второй способ рядом с выдачей по нику.
+            if what == "who" and len(parts) > 3:
+                page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+                text, markup = await asyncio.to_thread(_access_screen, parts[3], page)
+                await query.edit_message_text(text, reply_markup=markup)
+                return
+            if what == "w" and len(parts) > 4:
+                text, markup = await asyncio.to_thread(_access_who, parts[3], int(parts[4]))
+                await query.edit_message_text(text, reply_markup=markup)
+                return
+            if what == "set" and len(parts) > 5:
+                kind, row, months = parts[3], int(parts[4]), int(parts[5])
+                people = await asyncio.to_thread(_access_people, kind)
+                p = next((x for x in people if x["row"] == row), None)
+                base = date.today()
+                if p and p["open"] and p["until"]:
+                    base = max(base, date.fromisoformat(p["until"]))
+                until = _add_months(base, months).isoformat()
+                p = await asyncio.to_thread(_access_open, kind, row, until, str(user.id))
+                if not p:
+                    await query.answer("Некому открывать", show_alert=True)
+                    return
+                told = await _access_tell(query.get_bot(), kind, p, until)
+                text, markup = await asyncio.to_thread(_access_who, kind, row)
+                head = (f"✅ Открыл до {date.fromisoformat(until):%d.%m.%Y}."
+                        + ("" if told else " Сказать ему не смог — не запускал бота."))
+                await query.edit_message_text(f"{head}\n\n{text}", reply_markup=markup)
+                return
+            if what == "day" and len(parts) > 4:
+                _clear_pending(user.id)
+                _awaiting_access[user.id] = f"{parts[3]}:row:{parts[4]}"
+                await query.edit_message_text(ACCESS_ASK)
+                return
+            if what == "off" and len(parts) > 4:
+                kind, row = parts[3], int(parts[4])
+                people = await asyncio.to_thread(_access_people, kind)
+                p = next((x for x in people if x["row"] == row), None)
+                if p:
+                    await asyncio.to_thread(sheets_cache.revoke_access_id,
+                                            kind, p["uid"], p["nick"])
+                text, markup = await asyncio.to_thread(_access_who, kind, row)
+                await query.edit_message_text(f"✂️ Закрыл.\n\n{text}",
+                                              reply_markup=markup)
                 return
             if what == "del":
                 sheets_cache.revoke_access(parts[3], parts[4])
