@@ -86,3 +86,9 @@ test-results/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+
+# Резервные копии базы. Репозиторий публичный (с него же раздаётся Mini App),
+# а в копии — фамилии команды, telegram-id и оплаты: такой файл в истории git
+# уже не спрячешь.
+backups/
+*.sqlite.gz
