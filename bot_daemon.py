@@ -5964,7 +5964,12 @@ async def _background_loop(app: Application) -> None:
             raise
         except Exception as e:
             # Один плохой тик не должен убивать демон и останавливать вотчер навсегда.
-            log.error(f"Ошибка в фоновом цикле: {e}")
+            # С трассировкой: тик делает полтора десятка дел, и по одной строке
+            # «can't subtract offset-naive and offset-aware datetimes» непонятно
+            # даже, в каком файле искать. Тик при этом обрывается на первой же
+            # ошибке — всё, что стояло после неё, в этот раз не выполняется, так
+            # что молчать об этом нельзя.
+            log.exception(f"Ошибка в фоновом цикле: {e}")
             sheets_cache.report_error("background_loop", str(e), _get_spreadsheet())
 
 
