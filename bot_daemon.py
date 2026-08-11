@@ -2503,9 +2503,21 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if pending == "debtwho":
         found = await asyncio.to_thread(_find_people, text)
         if not found:
+            # Никого не нашли — предлагаем завести долг на введённое имя, как
+            # это уже сделано с соперником в мастере игры. Долг бывает и за
+            # тем, кого в листе нет: гость на одну игру, родитель. Заводить
+            # его в «Игроки» ради этого нельзя — он попадёт и в опросы, и в
+            # состав, и в статистику.
+            _free_debt[user.id] = text
+            _awaiting_money[user.id] = "debtwho"      # ждём другую фамилию
             await msg.reply_text(
-                f"Не нашёл никого по «{text}». Попробуй иначе или выбери из "
-                "списка. Передумал — /start.")
+                f"В листе «Игроки» никого похожего на «{text}» нет.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"✍️ Записать долг на «{text}»"[:BTN_TEXT],
+                                          callback_data="coach:debtfree")],
+                    [InlineKeyboardButton("🔍 Искать заново",
+                                          callback_data="coach:adddebt")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="coach:main")]]))
             raise ApplicationHandlerStop
         if len(found) == 1:
             p = found[0]
@@ -2541,6 +2553,22 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await asyncio.to_thread(sheets_cache.set_setting, key, amount)
         screen, markup = await asyncio.to_thread(_sched_screen)
         await msg.reply_text(f"Записал.\n\n{screen}", reply_markup=markup,
+                             parse_mode="HTML")
+        raise ApplicationHandlerStop
+
+    if pending == "debtfree":
+        name = _free_debt.pop(user.id, "")
+        if not name:
+            await msg.reply_text("Имя потерялось — начни заново.")
+            raise ApplicationHandlerStop
+        await asyncio.to_thread(coach_payments.add_debt, 0, amount, note,
+                                str(user.id), name)
+        head = (f"Добавил долг: {name} (не из состава) — {amount} ₽"
+                + (f" ({note})" if note else "")
+                + "\n\nНапоминание такому человеку бот не пошлёт — телеграма "
+                  "его он не знает.")
+        screen, markup = await asyncio.to_thread(_debts_screen)
+        await msg.reply_text(f"{head}\n\n{screen}", reply_markup=markup,
                              parse_mode="HTML")
         raise ApplicationHandlerStop
 
@@ -3909,6 +3937,10 @@ def _sched_screen() -> Tuple[str, InlineKeyboardMarkup]:
 # Что тренер сейчас вводит: id → «долг:строка» или «сумма:строка:вид».
 _awaiting_money: Dict[int, str] = {}
 
+# Имя для долга человеку не из листа. Отдельно от callback_data: фамилия
+# кириллицей легко перебирает лимит в 64 байта, а класть её в кнопку незачем.
+_free_debt: Dict[int, str] = {}
+
 
 def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
     """Кто и сколько должен — тремя блоками: тренировки, игры, добавленное.
@@ -3955,18 +3987,21 @@ def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
     if extra:
         lines += ["", "📌 <b>Добавлено вручную</b>"]
         for d in extra:
-            who = (coach_payments.player_by_row(d["player_row"]) or {}).get("title", "?")
+            who = coach_payments.debt_title(d)
             note = f" — {d['note']}" if d["note"] else ""
-            lines.append(f"   • {who}: {d['amount']} ₽{note}")
+            # Кого нет в листе, помечаем: тренер должен видеть, что напоминание
+            # такому человеку бот не отправит — телеграма его он не знает.
+            mark = "" if int(d.get("player_row") or 0) > 0 else " (не из состава)"
+            lines.append(f"   • {who}{mark}: {d['amount']} ₽{note}")
 
     total = (sum(r["debt"] for _, people in train for r in people)
              + sum(g["amount"] for g in games)
              + sum(d["amount"] for d in extra))
     lines += ["", f"Итого: {total} ₽" if total else "Долгов нет."]
 
-    rows = [[InlineKeyboardButton(f"✅ Погасить: {(coach_payments.player_by_row(d['player_row']) or {}).get('title', '?')}"[:BTN_TEXT],
-                                  callback_data=f"coach:closedebt:{d['id']}")]
-            for d in extra[:5]]
+    rows = [[InlineKeyboardButton(
+        f"✅ Погасить: {coach_payments.debt_title(d)}"[:BTN_TEXT],
+        callback_data=f"coach:closedebt:{d['id']}")] for d in extra[:5]]
     rows.append([InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -4902,6 +4937,20 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(
                 "➕ Кому добавить долг?\n\nВыбери из списка или напиши фамилию.",
                 reply_markup=markup)
+
+        elif what == "debtfree":
+            name = _free_debt.get(user.id, "")
+            if not name:
+                text, markup = await asyncio.to_thread(_debts_screen)
+                await query.edit_message_text(
+                    "Имя потерялось — начни заново.\n\n" + text,
+                    reply_markup=markup, parse_mode="HTML")
+                return
+            _awaiting_money[user.id] = "debtfree"
+            await query.edit_message_text(
+                f"➕ Долг для «{name}» (в листе «Игроки» такого нет).\n\n"
+                "Пришли сумму и за что: «500 мяч» или просто «500».\n\n"
+                "Передумал — /start.")
 
         elif what == "debtwho" and len(parts) > 2:
             _clear_pending(user.id)

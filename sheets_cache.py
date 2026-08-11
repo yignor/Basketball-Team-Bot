@@ -866,6 +866,9 @@ def init_db() -> None:
         _ensure_column(conn, "game_roster_state", "form", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "role", "TEXT NOT NULL", "''")
         _ensure_column(conn, "feature_access", "until", "TEXT NOT NULL", "''")
+        # Долг человеку, которого нет в листе «Игроки»: гость на одну игру,
+        # соперник, кто угодно. Тогда player_row = 0, а имя лежит здесь.
+        _ensure_column(conn, "extra_debts", "who", "TEXT NOT NULL", "''")
         # Колонка появилась вместе с выбором показателей в личной статистике:
         # на сервере таблица уже существовала, и кнопка настроек падала на
         # «no column named metrics».

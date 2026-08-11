@@ -541,23 +541,39 @@ def record(player_row: int, amount: int, kind: str, games: int,
 
 # ─────────────────────── Долги, добавленные руками ──────────────────────────
 
-def add_debt(player_row: int, amount: int, note: str = "", by: str = "") -> int:
-    """Разовый долг сверх регулярных взносов. Возвращает id записи."""
+def add_debt(player_row: int, amount: int, note: str = "", by: str = "",
+             who: str = "") -> int:
+    """Разовый долг сверх регулярных взносов. Возвращает id записи.
+
+    `who` — имя для того, кого нет в листе «Игроки»: гость на одну игру,
+    родитель, кто угодно. Тогда player_row = 0. Заводить такого человека в лист
+    ради одного долга неправильно — он не игрок команды и не должен попадать
+    ни в состав, ни в опросы, ни в статистику."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         cur = conn.execute(
-            """INSERT INTO extra_debts (player_row, amount, note, added_by, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO extra_debts (player_row, amount, note, added_by,
+                                        created_at, who)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (int(player_row), int(amount), str(note), str(by),
-             datetime.now().isoformat(timespec="seconds")))
+             datetime.now().isoformat(timespec="seconds"), str(who).strip()))
         conn.commit()
         return int(cur.lastrowid)
+
+
+def debt_title(debt: Dict[str, Any]) -> str:
+    """Чей долг — по строке листа или по вписанному имени."""
+    if int(debt.get("player_row") or 0) > 0:
+        card = player_by_row(int(debt["player_row"]))
+        if card:
+            return card["title"]
+    return str(debt.get("who") or "").strip() or "?"
 
 
 def extra_debts(player_row: Optional[int] = None) -> List[Dict[str, Any]]:
     """Открытые разовые долги, свежие сверху."""
     sheets_cache.init_db()
-    sql = ("SELECT id, player_row, amount, note, created_at FROM extra_debts "
+    sql = ("SELECT id, player_row, amount, note, created_at, who FROM extra_debts "
            "WHERE closed_at = ''")
     args: List[Any] = []
     if player_row is not None:
