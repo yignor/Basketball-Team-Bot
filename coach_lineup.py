@@ -152,6 +152,53 @@ def trainings_count(until: date, days: int = WINDOW_DAYS) -> Dict[int, int]:
     return out
 
 
+def averages(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, float]]:
+    """{строка листа: средние за игру} — очки, подборы, потери.
+
+    Мост от строки листа к статистике лиг — price_refs: там уже сведено, кто
+    из листа кем играет в лиге (эту связку ведёт фэнтези-пул). Через
+    player_identities нельзя: ссылку на свой профиль прислал один человек.
+
+    Считаем по ВСЕЙ доступной истории, а не по текущему турниру: за один
+    короткий турнир у половины команды две игры, и среднее по ним ничего не
+    говорит."""
+    import fantasy_stats
+    sheets_cache.init_db()
+    want = {int(r["row"]) for r in rows}
+    pairs: Dict[int, List[Tuple[str, str]]] = {}
+    with sheets_cache.get_connection() as conn:
+        for r in conn.execute("SELECT ref, player_row FROM price_refs"):
+            row = int(r["player_row"] or 0)
+            if row not in want:
+                continue
+            for one in fantasy_stats.expand_refs([str(r["ref"])]):
+                src, pid = fantasy_stats.parse_ref(one)[:2]
+                if src and pid:
+                    pairs.setdefault(row, []).append((src, pid))
+    out: Dict[int, Dict[str, float]] = {}
+    if not pairs:
+        return out
+    with sheets_cache.get_connection() as conn:
+        for row, ids in pairs.items():
+            games = pts = reb = tur = 0
+            for src, pid in set(ids):
+                got = conn.execute(
+                    """SELECT SUM(games) g, SUM(pts) p, SUM(reb) r, SUM(tur) t
+                         FROM player_totals WHERE source = ? AND player_id = ?""",
+                    (src, str(pid))).fetchone()
+                if got and got["g"]:
+                    games += int(got["g"] or 0)
+                    pts += int(got["p"] or 0)
+                    reb += int(got["r"] or 0)
+                    tur += int(got["t"] or 0)
+            if games:
+                out[row] = {"games": games,
+                            "pts": round(pts / games, 1),
+                            "reb": round(reb / games, 1),
+                            "tur": round(tur / games, 1)}
+    return out
+
+
 def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
     """Состав на игру с тренировками и амплуа, в нужном порядке."""
     import coach_payments
@@ -166,6 +213,9 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
     for p in people:
         rows.append({**p, "trainings": counts.get(int(p["row"]), 0),
                      "role": str(p.get("role") or "")})
+    stats = averages(rows)
+    for r in rows:
+        r["avg"] = stats.get(r["row"], {})
     picked = start_five(source, str(game_id))
     if sort == "trainings":
         # Больше тренировок — выше; при равенстве по алфавиту, иначе порядок
@@ -182,14 +232,34 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
             "start": [r for r in picked if any(x["row"] == r for x in rows)]}
 
 
-def text(data: Dict[str, Any], title: str = "🏁 Стартовая пятёрка") -> str:
-    """Сообщение тренеру: сначала пятёрка, потом остальной состав.
+def player_card(p: Dict[str, Any], number: str = "") -> List[str]:
+    """Игрок тремя строками: кто, на какой позиции, чем полезен.
 
-    Раньше всё шло одним списком «• Фамилия — 7 трен. · 2», и голая цифра
-    амплуа рядом с числом тренировок читалась как вторая цифра неизвестно
-    чего. Теперь пятёрка отделена и пронумерована, амплуа названо словами, а
-    тренировки — только у тех, кого ещё выбирают: при готовой пятёрке они уже
-    не решают."""
+    Раньше всё жалось в одну строку — «• Фамилия — 7 трен. · 2», — и тренер
+    читал это как ребус. Три коротких строки читаются с телефона одним
+    взглядом, а лишние показатели (передачи, перехваты, фолы) сюда не тащим:
+    решение о старте принимают по очкам, подборам и потерям."""
+    head = f"{number}{p['title']}" if number else p["title"]
+    lines = [head]
+    role = role_title(p.get("role", ""))
+    lines.append(f"    {role}" if role else "    амплуа не задано")
+    bits = [f"{p['trainings']} трен."]
+    avg = p.get("avg") or {}
+    if avg:
+        bits += [f"{avg['pts']:g} очк", f"{avg['reb']:g} подб",
+                 f"{avg['tur']:g} пот"]
+    import coach_payments
+    lines.append("    " + " · ".join(bits)
+                 + (f"   (за {coach_payments.plural(avg['games'], 'игру', 'игры', 'игр')})"
+                    if avg else ""))
+    return lines
+
+
+def text(data: Dict[str, Any], title: str = "🏁 Стартовый состав") -> str:
+    """Сообщение тренеру: два раздела — старт и скамейка.
+
+    Разделы, а не один список: это разные решения. В старте важен порядок и
+    позиции, на скамейке — кто готов выйти."""
     import game_roster
     game, rows = data.get("game"), data.get("rows") or []
     picked = data.get("start") or []
@@ -201,29 +271,25 @@ def text(data: Dict[str, Any], title: str = "🏁 Стартовая пятёр�
 
     by_row = {r["row"]: r for r in rows}
     lines = [head, ""]
+    lines.append(f"━━ СТАРТ ({len(picked)} из {START_SIZE}) ━━")
     if picked:
-        lines.append(f"Выбрано {len(picked)} из {START_SIZE}:")
         for i, row in enumerate(picked, start=1):
             p = by_row.get(row)
-            if not p:
-                continue
-            role = role_title(p["role"])
-            lines.append(f"{i}. {p['title']}" + (f" — {role}" if role else ""))
-        lines.append("")
+            if p:
+                lines += player_card(p, f"{i}. ")
     else:
-        lines.append(f"Пятёрка не выбрана. Нажми на фамилию — поставлю в старт.")
-        lines.append("")
+        lines.append("Пусто. Нажми на фамилию — поставлю в старт.")
+    lines.append("")
 
     rest = [r for r in rows if r["row"] not in picked]
+    lines.append(f"━━ СКАМЕЙКА ({len(rest)}) ━━")
     if rest:
-        lines.append("Остальные в составе:")
         for p in rest:
-            role = role_title(p["role"])
-            bits = [f"{p['trainings']} трен."]
-            if role:
-                bits.insert(0, role)
-            lines.append(f"   {p['title']} — {', '.join(bits)}")
-        lines += ["", f"Тренировки — за {WINDOW_DAYS} дней до игры."]
+            lines += player_card(p)
+    else:
+        lines.append("Пусто.")
+    lines += ["", f"Тренировки — за {WINDOW_DAYS} дней до игры, "
+              "средние — по всем сыгранным."]
     return "\n".join(lines)
 
 
