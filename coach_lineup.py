@@ -152,20 +152,71 @@ def trainings_count(until: date, days: int = WINDOW_DAYS) -> Dict[int, int]:
     return out
 
 
-def averages(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, float]]:
+def current_scopes() -> List[Dict[str, str]]:
+    """Турниры, которые команда играет СЕЙЧАС — из листа «Конфиг».
+
+    Тот же список, по которому бот ищет игры и считает очки фэнтези: держать
+    для тренерского экрана свой было бы верным способом разойтись."""
+    out: List[Dict[str, str]] = []
+    try:
+        import league_sync
+        for team in league_sync.our_teams():
+            out.append({"source": str(team.get("source") or ""),
+                        "season_id": str(team.get("season_id") or ""),
+                        "stage_id": str(team.get("stage_id") or "")})
+    except Exception as exc:
+        logger.warning("Текущие турниры не прочитались: %s", exc)
+    # У Инфобаскета турнир — это comp_id, и их в «Конфиге» может быть
+    # несколько на одну команду (у нас 140825 и 142849). Справочник команд
+    # держит по одной строке на команду и второй турнир теряет, поэтому
+    # дочитываем прямо из зеркала «Конфига».
+    try:
+        import config_sheet
+        rows = _config_rows()
+        for row in config_sheet.split(rows).get(config_sheet.GAME, []):
+            kind = str(row[0] if row else "").strip().lower()
+            comp = str(row[1] if len(row) > 1 else "").strip()
+            if kind.startswith("инфобаскет") and comp.isdigit():
+                out.append({"source": "infobasket", "season_id": comp, "stage_id": ""})
+    except Exception as exc:
+        logger.warning("Турниры из «Конфига» не прочитались: %s", exc)
+    seen, uniq = set(), []
+    for sc in out:
+        key = (sc["source"], sc["season_id"], sc["stage_id"])
+        if sc["source"] and sc["season_id"] and key not in seen:
+            seen.add(key)
+            uniq.append(sc)
+    return uniq
+
+
+def _config_rows() -> List[List[str]]:
+    """Лист «Конфиг» из зеркала — списком строк, как его видит парсер."""
+    sheets_cache.init_db()
+    cols = [f"col_{c}" for c in "abcdefghij"]
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(cols)} FROM config_rows "
+            "ORDER BY CAST(row_index AS INTEGER)").fetchall()
+    return [[str(r[c] or "") for c in cols] for r in rows]
+
+
+def averages(rows: List[Dict[str, Any]],
+             scopes: Optional[List[Dict[str, str]]] = None) -> Dict[int, Dict[str, float]]:
     """{строка листа: средние за игру} — очки, подборы, потери.
 
-    Мост от строки листа к статистике лиг — price_refs: там уже сведено, кто
-    из листа кем играет в лиге (эту связку ведёт фэнтези-пул). Через
-    player_identities нельзя: ссылку на свой профиль прислал один человек.
+    Считаем ТОЛЬКО по турнирам, которые команда играет сейчас (лист «Конфиг»).
+    По всей истории выходило нечестно: у одного 137 игр за четыре года, у
+    другого 7 за этот месяц, и рядом эти средние сравнивать нельзя — состав
+    соперников и роль игрока за годы меняются полностью.
 
-    Считаем по ВСЕЙ доступной истории, а не по текущему турниру: за один
-    короткий турнир у половины команды две игры, и среднее по ним ничего не
-    говорит."""
+    Мост от строки листа к статистике лиг — price_refs: там уже сведено, кто
+    из листа кем играет в лиге (связку ведёт фэнтези-пул). Через
+    player_identities нельзя: ссылку на свой профиль прислал один человек."""
     import fantasy_stats
+    scopes = current_scopes() if scopes is None else scopes
     sheets_cache.init_db()
     want = {int(r["row"]) for r in rows}
-    pairs: Dict[int, List[Tuple[str, str]]] = {}
+    pairs: Dict[int, set] = {}
     with sheets_cache.get_connection() as conn:
         for r in conn.execute("SELECT ref, player_row FROM price_refs"):
             row = int(r["player_row"] or 0)
@@ -174,23 +225,32 @@ def averages(rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, float]]:
             for one in fantasy_stats.expand_refs([str(r["ref"])]):
                 src, pid = fantasy_stats.parse_ref(one)[:2]
                 if src and pid:
-                    pairs.setdefault(row, []).append((src, pid))
+                    pairs.setdefault(row, set()).add((src, str(pid)))
     out: Dict[int, Dict[str, float]] = {}
-    if not pairs:
+    if not pairs or not scopes:
         return out
     with sheets_cache.get_connection() as conn:
         for row, ids in pairs.items():
             games = pts = reb = tur = 0
-            for src, pid in set(ids):
-                got = conn.execute(
-                    """SELECT SUM(games) g, SUM(pts) p, SUM(reb) r, SUM(tur) t
-                         FROM player_totals WHERE source = ? AND player_id = ?""",
-                    (src, str(pid))).fetchone()
-                if got and got["g"]:
-                    games += int(got["g"] or 0)
-                    pts += int(got["p"] or 0)
-                    reb += int(got["r"] or 0)
-                    tur += int(got["t"] or 0)
+            for src, pid in ids:
+                for sc in scopes:
+                    if sc["source"] != src:
+                        continue
+                    sql = ("SELECT SUM(games) g, SUM(pts) p, SUM(reb) r, SUM(tur) t "
+                           "FROM player_totals WHERE source = ? AND player_id = ? "
+                           "AND season_id = ?")
+                    args = [src, pid, sc["season_id"]]
+                    # Стадия есть только у SLPRO; у Инфобаскета сезон и есть
+                    # турнир, и требовать пустую стадию значит ничего не найти.
+                    if sc["stage_id"]:
+                        sql += " AND stage_id = ?"
+                        args.append(sc["stage_id"])
+                    got = conn.execute(sql, args).fetchone()
+                    if got and got["g"]:
+                        games += int(got["g"] or 0)
+                        pts += int(got["p"] or 0)
+                        reb += int(got["r"] or 0)
+                        tur += int(got["t"] or 0)
             if games:
                 out[row] = {"games": games,
                             "pts": round(pts / games, 1),
@@ -288,7 +348,7 @@ def text(data: Dict[str, Any], title: str = "🏁 Стартовый соста�
     else:
         lines += ["Пусто.", ""]
     lines.append(f"<i>Тренировки — за {WINDOW_DAYS} дней до игры, "
-                 "средние — по всем сыгранным.</i>")
+                 "средние — по текущим турнирам.</i>")
     return "\n".join(lines)
 
 
