@@ -4220,7 +4220,9 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
     if stale:
         lines.append("⚠️ В чате висит прежний состав — обнови сообщение.")
     elif posted:
-        lines.append("✅ Состав в чате актуален.")
+        author = game_roster.posted_by(source, game_id)
+        lines.append("✅ Состав в чате актуален."
+                     + (f" Отправил {author}." if author else ""))
 
     # Форма — рядом с составом: тренер решает её тогда же, когда собирает
     # людей, и отдельный экран ради двух вариантов был бы лишним шагом.
@@ -4658,8 +4660,13 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
             posts.append({"chat_id": chat_id, "message_id": m.message_id})
         except Exception as e:
             log.warning(f"Состав не ушёл в чат {chat_id}: {e}")
+    who = f"@{user.username}" if getattr(user, "username", "") else str(user.id)
     if posts:
-        await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts)
+        await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts, who)
+    # В журнал — с именем: это единственное сообщение бота, которое видит вся
+    # команда, и на вопрос «бот сам или человек?» должны отвечать данные.
+    log.info(f"Состав {source}:{game_id} отправлен в чат ({len(people)} чел.) "
+             f"кнопкой, нажал {who} (id {user.id})")
     screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
     note = (f"📣 Состав отправлен ({len(people)} чел.)." if posts
             else "⚠️ Не смог отправить состав в чат.")
