@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="multi-test-"))
 os.environ["MULTI_DATA_DIR"] = str(TMP)
 
-from multi import db, tenants          # noqa: E402  (после подмены папки)
+from multi import db, onboarding, schema, tenants   # noqa: E402
 
 bad: list = []
 
@@ -160,10 +160,98 @@ def test_paid_and_forget() -> None:
     check(len(tenants.all_teams()) == 2, "в активных его больше нет")
 
 
+def test_parsers() -> None:
+    print("\n=== разбор того, что пишет тренер ===")
+    for text, want in (
+            ("среда и пятница 20:30", ([2, 4], "20:30")),
+            ("ср, пт 20.30", ([2, 4], "20:30")),
+            ("понедельник четверг 19:00", ([0, 3], "19:00")),
+            ("вторник 7:05", ([1], "07:05")),
+    ):
+        got = onboarding.parse_trainings(text)
+        ok = got and (got["days"], got["time"]) == want
+        check(bool(ok), f"«{text}» -> {got}")
+    check(onboarding.parse_trainings("по вторникам") is None,
+          "без времени — переспрашиваем, а не выдумываем")
+    check(onboarding.parse_trainings("25:99") is None, "чушь во времени отвергаем")
+
+    check(onboarding.parse_dues("5000 и 500") == {"season": 5000, "game": 500},
+          "две суммы")
+    check(onboarding.parse_dues("5000") == {"season": 5000, "game": 0},
+          "одна сумма — это месяц")
+    check(onboarding.parse_dues("потом") is None, "без чисел — не угадываем")
+
+    people = onboarding.parse_roster(
+        "1. Иванов Иван\n2) Петров Пётр @petrov 7\n\nСидоров\n")
+    check(len(people) == 3, f"строк разобрано: {len(people)}")
+    check(people[1] == {"surname": "Петров", "name": "Пётр",
+                        "username": "petrov", "number": "7"},
+          f"ник и номер отделены: {people[1]}")
+    check(people[2]["surname"] == "Сидоров" and people[2]["name"] == "",
+          "одна фамилия тоже годится")
+
+
+def test_wizard() -> None:
+    print("\n=== мастер подключения ===")
+    uid = "5551"
+    onboarding.drop(uid)
+    st = onboarding.start(uid)
+    check(st["step"] == "chat", "без чата первым делом просим добавить в чат")
+    check("ничего вводить" in onboarding.question(uid)["text"].lower(),
+          "и обещаем, что вводить ничего не нужно")
+
+    onboarding.set_chat(uid, "-100777", title="Соколы")
+    q = onboarding.question(uid)
+    check(q["step"] == "title" and "Соколы" in q["text"],
+          "название группы предложено как название команды")
+
+    # Пустой ответ = «да, предложенное подходит»: тренер жмёт кнопку, а не
+    # перепечатывает название своей же группы.
+    res = onboarding.accept(uid, "")
+    check(res["ok"] and res["step"] == "trainings",
+          "пустой ответ принимает предложенное название")
+    check(onboarding.state(uid)["data"]["title"] == "Соколы",
+          "и запоминает именно его")
+
+    bad_res = onboarding.accept(uid, "по вторникам")
+    check(not bad_res["ok"] and "дни и время" in bad_res["error"],
+          f"непонятное расписание объясняется: {bad_res['error']}")
+    check(onboarding.state(uid)["step"] == "trainings",
+          "после ошибки шаг не съехал")
+
+    check(onboarding.accept(uid, "вт и чт 20:00")["step"] == "dues", "расписание принято")
+    check(onboarding.accept(uid, "пропустить")["step"] == "roster",
+          "взносы можно пропустить")
+    res = onboarding.accept(uid, "Орлов Пётр @orlov 10\nСоколов Иван")
+    check(res["ok"] and res["done"], "состав принят, мастер дошёл до конца")
+
+    text = onboarding.summary(uid)
+    check("Соколы" in text and "вторник" in text and "2" in text,
+          f"итог показывает собранное:\n{text}")
+
+    made = onboarding.finish(uid)
+    team = made["team"]
+    check(team["chat_id"] == "-100777", "команда заведена с тем самым чатом")
+    check(made["players"] == 2, "состав перенесён")
+    check(onboarding.state(uid) is None, "мастер за собой прибрал")
+
+    with db.use(team["slug"]):
+        check(schema.setting("training_time") == "20:00", "расписание сохранено")
+        check(schema.setting("coach_id") == uid, "тренер запомнен")
+        check(schema.setting("dues_season") == "", "пропущенное не выдумано")
+        names = [p["title"] for p in schema.players()]
+        check(names == ["Орлов Пётр", "Соколов Иван"], f"состав по алфавиту: {names}")
+        me = schema.link_player("9001", username="orlov")
+        check(me and me["surname"] == "Орлов", "игрок опознан по нику из списка")
+        check(schema.link_player("9002", username="orlov") is None,
+              "второй раз тот же ник не отдаётся")
+
+
 def main() -> int:
     print(f"песочница: {TMP}")
     for fn in (test_registry, test_isolation, test_no_tenant, test_nesting,
-               test_concurrency, test_run_all, test_paid_and_forget):
+               test_concurrency, test_run_all, test_paid_and_forget,
+               test_parsers, test_wizard):
         fn()
     shutil.rmtree(TMP, ignore_errors=True)
     print("\n" + ("ВСЁ ЗЕЛЁНОЕ" if not bad else f"ЗАМЕЧАНИЙ: {len(bad)}"))
