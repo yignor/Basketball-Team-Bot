@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="multi-test-"))
 os.environ["MULTI_DATA_DIR"] = str(TMP)
 
-from multi import db, onboarding, schema, tenants   # noqa: E402
+from multi import db, membership, onboarding, schema, tenants  # noqa: E402
 
 bad: list = []
 
@@ -247,11 +247,148 @@ def test_wizard() -> None:
               "второй раз тот же ник не отдаётся")
 
 
+class _Chat:
+    def __init__(self, cid, ctype="private", title=""):
+        self.id, self.type, self.title = cid, ctype, title
+
+
+class _User:
+    def __init__(self, uid, username="coach"):
+        self.id, self.username = uid, username
+
+
+class _Msg:
+    def __init__(self, text="", chat=None, user=None, thread=None):
+        self.text, self.chat, self.from_user = text, chat, user
+        self.message_thread_id = thread
+        self.said = []
+
+    async def reply_text(self, text="", **kw):
+        self.said.append(text)
+
+
+class _Bot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, chat_id=None, text="", **kw):
+        self.sent.append((str(chat_id), text))
+
+
+class _Upd:
+    def __init__(self, message=None, member=None, user=None, chat=None):
+        self.message = self.effective_message = message
+        self.my_chat_member = member
+        self.callback_query = None
+        self.effective_user = user or (message.from_user if message else None)
+        self.effective_chat = chat or (message.chat if message else None)
+
+
+class _Ctx:
+    def __init__(self, bot):
+        self.bot = bot
+
+
+class _Member:
+    def __init__(self, chat, user, status="administrator"):
+        self.chat, self.from_user = chat, user
+        self.new_chat_member = type("m", (), {"status": status})()
+
+
+def test_telegram_layer() -> None:
+    print("\n=== телеграмный слой: путь целиком ===")
+    import asyncio as aio
+    from multi import bot as mb
+
+    coach, bot = _User(7001), _Bot()
+    group = _Chat(-100888, "supergroup", title="БК Молния")
+
+    async def run():
+        # 1. Бота добавили в группу — чат он узнаёт сам.
+        await mb.on_added(_Upd(member=_Member(group, coach)), _Ctx(bot))
+        st = onboarding.state(coach.id)
+        check(st and st["chat_id"] == "-100888", "чат узнан из события, а не введён")
+        check(any("личку" in t for _, t in bot.sent), "в группе объяснено, что дальше")
+        check(any(c == "7001" for c, _ in bot.sent), "тренеру написали в личку")
+
+        # 2. Отвечаем на вопросы.
+        private = _Chat(7001, "private")
+        for answer in ("", "ср и пт 20:30", "пропустить", "Быков Илья @bykov 9"):
+            msg = _Msg(answer, private, coach)
+            if answer == "":
+                # Пустой ответ приходит кнопкой «Да, название подходит».
+                res = onboarding.accept(coach.id, "")
+                check(res["ok"], "название принято кнопкой")
+                continue
+            await mb.on_text(_Upd(message=msg), _Ctx(bot))
+        check(onboarding.state(coach.id) is None, "мастер закончил и прибрался")
+
+        team = tenants.by_chat("-100888")
+        check(team is not None and team["title"] == "БК Молния",
+              f"команда заведена: {team and team['title']}")
+        check(any("подключена" in t for c, t in bot.sent if c == "-100888"),
+              "в чат команды пришло подтверждение")
+        with db.use(team["slug"]):
+            check(schema.setting("training_time") == "20:30", "расписание записано")
+            check(len(schema.players()) == 1, "состав перенесён")
+
+        # 3. Повторное добавление в тот же чат ничего не ломает.
+        before = len(tenants.all_teams())
+        await mb.on_added(_Upd(member=_Member(group, coach)), _Ctx(bot))
+        check(len(tenants.all_teams()) == before, "второй раз команду не заводим")
+        check(any("уже работаю" in t for _, t in bot.sent), "и говорим об этом")
+
+        # 4. Топик узнаём из того, где написали команду.
+        msg = _Msg("/сюда", group, coach, thread=42)
+        await mb.on_here(_Upd(message=msg, chat=group), _Ctx(bot))
+        with db.use(team["slug"]):
+            check(schema.setting("topic_id") == "42",
+                  f"id топика взят из сообщения: {schema.setting('topic_id')}")
+
+        # 5. Человек из команды опознаётся в личке.
+        with db.use(team["slug"]):
+            schema.link_player(9100, username="bykov")
+        got = membership.teams_of(9100)
+        check(len(got) == 1 and not got[0]["is_coach"], "игрок нашёл свою команду")
+        got = membership.teams_of(coach.id)
+        check(got and got[0]["is_coach"], "тренер опознан тренером")
+        check(membership.teams_of(999999) == [], "посторонний ни в какой команде")
+
+    aio.run(run())
+
+
+def test_token_guard() -> None:
+    print("\n=== предохранитель на токен ===")
+    import os as _os
+    from multi import bot as mb
+    old = dict(_os.environ)
+    try:
+        _os.environ.pop("MULTI_BOT_TOKEN", None)
+        _os.environ["BOT_TOKEN"] = "живой-токен"
+        try:
+            mb._token()
+            check(False, "без своего токена не стартуем")
+        except SystemExit:
+            check(True, "без своего токена не стартуем")
+        _os.environ["MULTI_BOT_TOKEN"] = "живой-токен"
+        try:
+            mb._token()
+            check(False, "с боевым токеном не стартуем")
+        except SystemExit:
+            check(True, "с боевым токеном не стартуем")
+        _os.environ["MULTI_BOT_TOKEN"] = "свой-токен"
+        check(mb._token() == "свой-токен", "со своим токеном стартуем")
+    finally:
+        _os.environ.clear()
+        _os.environ.update(old)
+
+
 def main() -> int:
     print(f"песочница: {TMP}")
     for fn in (test_registry, test_isolation, test_no_tenant, test_nesting,
                test_concurrency, test_run_all, test_paid_and_forget,
-               test_parsers, test_wizard):
+               test_parsers, test_wizard, test_telegram_layer,
+               test_token_guard):
         fn()
     shutil.rmtree(TMP, ignore_errors=True)
     print("\n" + ("ВСЁ ЗЕЛЁНОЕ" if not bad else f"ЗАМЕЧАНИЙ: {len(bad)}"))

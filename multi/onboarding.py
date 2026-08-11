@@ -326,6 +326,29 @@ def summary(user_id: Any) -> str:
     return "\n".join(lines)
 
 
+def summary_of(team: Dict[str, Any], players: int) -> str:
+    """Итог после заведения команды — уже по её базе, а не по черновику.
+
+    Отдельно от summary(): черновик к этому моменту стёрт, и показывать надо
+    то, что действительно записалось. Иначе легко пообещать человеку то, чего
+    в базе нет."""
+    from . import db, schema
+    with db.use(team["slug"]):
+        got = schema.settings()
+    lines = [f"Команда: {team['title']}"]
+    days = [d for d in str(got.get("training_days", "")).split(",") if d.strip()]
+    if days and got.get("training_time"):
+        names = ", ".join(DAYS_RU[int(d)] for d in days)
+        lines.append(f"Тренировки: {names} в {got['training_time']}")
+    if got.get("dues_season"):
+        tail = (f", {got['dues_game']} ₽ за игру"
+                if got.get("dues_game") and got["dues_game"] != "0" else "")
+        lines.append(f"Взносы: {got['dues_season']} ₽ в месяц{tail}")
+    lines.append(f"В составе: {players}" if players
+                 else "Состав: добавится, когда игроки нажмут «Старт»")
+    return "\n".join(lines)
+
+
 def finish(user_id: Any) -> Dict[str, Any]:
     """Заводит команду по собранному: реестр, база, настройки, состав."""
     from . import db, schema
