@@ -4098,7 +4098,7 @@ def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
         f"✅ Погасить: {coach_payments.debt_title(d)}"[:BTN_TEXT],
         callback_data=f"coach:closedebt:{d['id']}")] for d in extra[:5]]
     rows.append([InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")])
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:money")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -4144,7 +4144,7 @@ def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
     if not items:
         return ("🗑 Удалить оплату\n\nПлатежей пока нет.",
                 InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "⬅️ В раздел", callback_data="coach:main")]]))
+                    "⬅️ В раздел", callback_data="coach:money2")]]))
     lines = ["🗑 Удалить оплату", "",
              "Отменяем ошибочные: тест, ложное срабатывание, возврат части "
              "суммы. Запись уходит из расчётов, в листе «Логи оплаты» строка "
@@ -4159,7 +4159,7 @@ def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(
             f"🗑 {it['title']} · {it['amount']} ₽"[:BTN_TEXT],
             callback_data=f"coach:delpay:{it['id']}")])
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:money2")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -4243,7 +4243,7 @@ def _games_screen() -> Tuple[str, InlineKeyboardMarkup]:
         return ("👥 Ближайших игр не вижу.\n\nОпрос на игру бот заводит, когда "
                 "она появляется в лиге — тогда же можно собрать состав.",
                 InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "⬅️ В раздел", callback_data="coach:main")]]))
+                    "⬅️ В раздел", callback_data="coach:play")]]))
     lines = ["👥 Состав на игру", "", "Выбери игру:"]
     rows = []
     for g in upcoming:
@@ -4252,7 +4252,7 @@ def _games_screen() -> Tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(
             f"{game_roster.game_label(g)}{mark}"[:BTN_TEXT],
             callback_data=f"rost:show:{g['source']}:{g['game_id']}")])
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:play")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -4264,7 +4264,7 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
     if not game:
         return ("Игру не нашёл — возможно, опрос по ней уже удалён.",
                 InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "⬅️ В раздел", callback_data="coach:main")]]))
+                    "⬅️ В раздел", callback_data="coach:games")]]))
     game_roster.ensure_state(game)
     picked = game_roster.roster(source, game_id)
     picked_rows = {p["row"] for p in picked}
@@ -4340,7 +4340,7 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
         # только в разделе оплат.
         rows.append([InlineKeyboardButton(
             "📨 Напомнить об оплате", callback_data="coach:remind:game")])
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:games")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(rows)
 
 
@@ -4351,15 +4351,16 @@ def _game_debt_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMar
                  if g["source"] == source and g["game_id"] == str(game_id)), None)
     if not game:
         return ("Игру не нашёл.", InlineKeyboardMarkup([[InlineKeyboardButton(
-            "⬅️ В раздел", callback_data="coach:main")]]))
+            "⬅️ В раздел", callback_data="coach:games")]]))
     rows = game_roster.debtors(source, game_id)
     text = game_roster.coach_debt_text(game, rows)
     buttons = [[InlineKeyboardButton(f"✔ {p['title']}"[:BTN_TEXT],
                                      callback_data=f"rost:paid:{source}:{game_id}:{p['row']}")]
                for p in rows[:20]]
-    buttons.append([InlineKeyboardButton("👥 Состав",
-                                         callback_data=f"rost:show:{source}:{game_id}")])
-    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    # Долги открывают из карточки игры — туда и возвращаемся. «Состав» отдельной
+    # кнопкой не нужен: это тот же экран, куда ведёт возврат.
+    buttons.append([InlineKeyboardButton(
+        "⬅️ К составу", callback_data=f"rost:show:{source}:{game_id}")])
     return text, InlineKeyboardMarkup(buttons)
 
 
