@@ -58,9 +58,7 @@ def find_teams(source: str, query: str, limit: int = 8) -> List[str]:
 
     Сравнение в Python, а не в SQL: lower() в SQLite не знает кириллицы, и
     «спартак» не находил бы «Спартак» (эта грабля в проекте уже была)."""
-    need = _norm(query)
-    if len(need) < 2:
-        return []
+    import player_search
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
@@ -68,9 +66,10 @@ def find_teams(source: str, query: str, limit: int = 8) -> List[str]:
                UNION SELECT guest_name FROM game_meta WHERE source = ? AND guest_name != ''""",
             (str(source), str(source))).fetchall()
     names = sorted({str(r["n"]).strip() for r in rows if str(r["n"]).strip()})
-    starts = [n for n in names if _norm(n).startswith(need)]
-    inside = [n for n in names if need in _norm(n) and n not in starts]
-    return (starts + inside)[:limit]
+    # Тот же поиск, что и по фамилиям: точное совпадение, начало, вхождение.
+    # Раньше здесь было своё правило, и вело оно себя иначе, чем поиск игрока —
+    # человек не должен помнить, где как ищется.
+    return player_search.rank(query, names, lambda n: [n], limit)
 
 
 def arenas(limit: int = 8) -> List[str]:

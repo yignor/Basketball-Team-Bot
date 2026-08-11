@@ -548,7 +548,6 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Mini App → достучался до сервера»: споткнулся на любом шаге — остался
     # чужим навсегда, хотя ник в листе стоял. Идемпотентно, лишний раз не пишет.
     try:
-        import fantasy_api
         if fantasy_api.ensure_player_link(str(user.id), user.username or ""):
             log.info(f"/start: {user.id} (@{user.username or '—'}) опознан как игрок команды")
     except Exception as e:
@@ -792,7 +791,7 @@ async def _player_subs_screen(uid: Any, page: int = 0, query: str = ""
         for ref in mine:
             lines.append(f"• {names.get(ref, ref)}")
             rows.append([InlineKeyboardButton(
-                f"➖ {names.get(ref, ref)}"[:60],
+                f"➖ {names.get(ref, ref)}"[:BTN_TEXT],
                 callback_data=f"menu:punsub:{ref}")])
         lines.append("")
     else:
@@ -809,7 +808,7 @@ async def _player_subs_screen(uid: Any, page: int = 0, query: str = ""
     pages = max(1, (len(rest) + PLAYERS_SUB_PAGE - 1) // PLAYERS_SUB_PAGE)
     page = max(0, min(page, pages - 1))
     for p in rest[page * PLAYERS_SUB_PAGE:(page + 1) * PLAYERS_SUB_PAGE]:
-        rows.append([InlineKeyboardButton(f"➕ {p.get('name') or p['ref']}"[:60],
+        rows.append([InlineKeyboardButton(f"➕ {p.get('name') or p['ref']}"[:BTN_TEXT],
                                           callback_data=f"menu:psub:{p['ref']}")])
     if pages > 1:
         nav = []
@@ -1422,7 +1421,6 @@ async def handle_fantasy_webapp_data(update: Update, context: ContextTypes.DEFAU
     if not msg or not msg.web_app_data or not user:
         return
     import fantasy
-    import fantasy_api
     import fantasy_modes
     try:
         payload = json.loads(msg.web_app_data.data)
@@ -1603,7 +1601,7 @@ def _stats_screen() -> Tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(
             f"⬇️ Перекачать без стадии сейчас ({no_stage})",
             callback_data="admin:stats:now")])
-    rows.append([InlineKeyboardButton("🔄 Перекачать наши игры (свежим парсером)",
+    rows.append([InlineKeyboardButton("🔄 Перекачать наши игры",
                                       callback_data="admin:stats:ours")])
     if stale or no_stage:
         lines.append("Пометить их — и ночной бэкфилл перекачает протоколы "
@@ -1777,7 +1775,6 @@ async def _fantasy_pool_markup() -> InlineKeyboardMarkup:
     """Тумблеры команд, чьи ростеры входят в пул. Пусто в настройках = все
     кандидаты включены (дефолт)."""
     import fantasy
-    import fantasy_api
     season = fantasy.get_active_season()
     explicit = fantasy.pool_teams(season) if season else []
     candidates = await fantasy_api.derive_pool_teams()
@@ -1799,7 +1796,6 @@ async def _handle_fantasy_pool(query, parts: List[str]) -> None:
     """Тумблер команды в пуле. Из пустого (дефолт=все) при первом выключении
     материализуем полный список кандидатов, затем убираем выбранную."""
     import fantasy
-    import fantasy_api
     if not fantasy.get_active_season():
         await query.edit_message_text("Активного сезона нет.", reply_markup=_fantasy_menu_markup())
         return
@@ -1972,8 +1968,6 @@ async def _probe_door(url: str, timeout: float = 8.0) -> Dict[str, Any]:
 
 
 async def _doors_screen() -> Tuple[str, InlineKeyboardMarkup]:
-    import fantasy_api
-    import sheets_cache
     lines = ["🔌 Каналы связи", "",
              "Двери к одному и тому же серверу. Проверка отсюда, с сервера:", ""]
     rows = []
@@ -1985,7 +1979,7 @@ async def _doors_screen() -> Tuple[str, InlineKeyboardMarkup]:
         lines.append(f"• {door['title']} — {state}, {verdict}")
         lines.append(f"   {door['url']}")
         rows.append([InlineKeyboardButton(
-            f"{'🔴 Выключить' if door['enabled'] else '🟢 Включить'} {door['title']}"[:60],
+            f"{'🔴 Выключить' if door['enabled'] else '🟢 Включить'} {door['title']}"[:BTN_TEXT],
             callback_data=f"admin:doors:toggle:{door['id']}")])
     port = await asyncio.to_thread(_api_port_alive)
     lines += ["", f"Сам API на сервере: {'слушает порт' if port else 'НЕ СЛУШАЕТ'}"]
@@ -2074,7 +2068,7 @@ def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
             continue
         games.append(g)
     rows = [[InlineKeyboardButton(
-        f"{coach_payments._human_date(g['date'].isoformat())} · {g['opponent']}"[:60],
+        f"{coach_payments._human_date(g['date'].isoformat())} · {g['opponent']}"[:BTN_TEXT],
         callback_data=f"coach:start:{g['source']}:{g['game_id']}:name")]
         for g in games[:8]]
     rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:play")])
@@ -2097,7 +2091,7 @@ def _start_screen(source: str, game_id: str, sort: str) -> Tuple[str, InlineKeyb
     for p in data["rows"][:12]:
         mark = f" · {p['role']}" if p["role"] else ""
         rows.append([InlineKeyboardButton(
-            f"🎽 {p['title']}{mark}"[:60],
+            f"🎽 {p['title']}{mark}"[:BTN_TEXT],
             callback_data=f"coach:role:{p['row']}:{source}:{game_id}:{sort}")])
     rows.append([InlineKeyboardButton(
         "📨 Прислать тренерам", callback_data=f"coach:startsend:{source}:{game_id}:{sort}")])
@@ -2145,7 +2139,7 @@ NG_CANCEL = "\n\nПередумал — /start."
 
 def _ng_leagues_screen() -> Tuple[str, InlineKeyboardMarkup]:
     import coach_newgame
-    rows = [[InlineKeyboardButton(lg["title"][:60], callback_data=f"coach:ng:lg:{i}")]
+    rows = [[InlineKeyboardButton(lg["title"][:BTN_TEXT], callback_data=f"coach:ng:lg:{i}")]
             for i, lg in enumerate(coach_newgame.leagues())]
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
     return ("➕ Создать игру\n\nВ какой лиге играем?", InlineKeyboardMarkup(rows))
@@ -2154,7 +2148,7 @@ def _ng_leagues_screen() -> Tuple[str, InlineKeyboardMarkup]:
 def _ng_arena_screen(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
     import coach_newgame
     known = coach_newgame.arenas()
-    rows = [[InlineKeyboardButton(a[:60], callback_data=f"coach:ng:ar:{i}")]
+    rows = [[InlineKeyboardButton(a[:BTN_TEXT], callback_data=f"coach:ng:ar:{i}")]
             for i, a in enumerate(known)]
     draft["arena_list"] = known
     rows.append([InlineKeyboardButton("✍️ Другое место", callback_data="coach:ng:arown")])
@@ -2256,7 +2250,7 @@ def _fields_screen(offset: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
         bd = p.get("birthday") or "—"
         nick = p.get("nickname") or "—"
         lines.append(f"• {p['title']}: {bd} · {nick}")
-        rows.append([InlineKeyboardButton(f"{p['title']}"[:60],
+        rows.append([InlineKeyboardButton(f"{p['title']}"[:BTN_TEXT],
                                           callback_data=f"admin:field:pick:{p['row']}")])
     nav = _pagination_row("admin:field:list", offset, PLAYERS_PER_PAGE, len(people))
     if nav:
@@ -2276,7 +2270,7 @@ def _field_card(row: int) -> Tuple[str, InlineKeyboardMarkup]:
              f"✏️ Ник: {p.get('nickname') or 'не указан'}", "",
              "Что поправить?"]
     return "\n".join(lines), InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎂 Дата рождения", callback_data=f"admin:field:set:{row}:bd"),
+        [InlineKeyboardButton("🎂 Дата рожд.", callback_data=f"admin:field:set:{row}:bd"),
          InlineKeyboardButton("✏️ Ник", callback_data=f"admin:field:set:{row}:nick")],
         [InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")]])
 
@@ -2307,7 +2301,6 @@ def _norm_birthday(text: str) -> Optional[str]:
 
 async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Новое значение дня рождения или ника, присланное админом."""
-    import sheets_cache
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_field:
         return
@@ -2368,7 +2361,6 @@ _VIDEO_WAY = {"vk": "по эфиру", "auto": "по расписанию", "han
 def _video_screen() -> Tuple[str, InlineKeyboardMarkup]:
     import coach_payments
     import game_timeline
-    import sheets_cache
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         games = game_timeline.our_games(conn, limit=8)
@@ -2391,7 +2383,7 @@ def _video_screen() -> Tuple[str, InlineKeyboardMarkup]:
         lines.append(f"• {day} · {title} — {state}")
         if g["shifts"]:
             row = [InlineKeyboardButton(
-                f"{day} · {title}"[:56],
+                f"{day} · {title}"[:BTN_TEXT],
                 callback_data=f"admin:video:set:{g['source']}:{g['game_id']}")]
             if game_timeline.offset_kind(g["source"], g["game_id"]) == "hand":
                 row.append(InlineKeyboardButton(
@@ -2453,9 +2445,9 @@ async def handle_newgame_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         found = await asyncio.to_thread(coach_newgame.find_teams,
                                         draft["source"], text)
         draft["found"] = found
-        rows = [[InlineKeyboardButton(n[:60], callback_data=f"coach:ng:opp:{i}")]
+        rows = [[InlineKeyboardButton(n[:BTN_TEXT], callback_data=f"coach:ng:opp:{i}")]
                 for i, n in enumerate(found)]
-        rows.append([InlineKeyboardButton(f"✍️ Оставить «{text}»"[:60],
+        rows.append([InlineKeyboardButton(f"✍️ Оставить «{text}»"[:BTN_TEXT],
                                           callback_data=f"coach:ng:opp:{len(found)}")])
         rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
         draft["found"] = found + [text]
@@ -2496,7 +2488,6 @@ async def handle_newgame_text(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Суммы, которые тренер вводит руками: новый долг или размер взноса."""
     import coach_payments
-    import sheets_cache
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_money:
         return
@@ -2505,6 +2496,30 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     pending = _awaiting_money[user.id]
     text = (msg.text or "").strip()
+
+    # Выбор человека для долга: тренер пишет фамилию, а не сумму. Раньше на
+    # этом экране текст не ловился вовсе — бот молчал, и это выглядело как
+    # «кнопка есть, а не работает».
+    if pending == "debtwho":
+        found = await asyncio.to_thread(_find_people, text)
+        if not found:
+            await msg.reply_text(
+                f"Не нашёл никого по «{text}». Попробуй иначе или выбери из "
+                "списка. Передумал — /start.")
+            raise ApplicationHandlerStop
+        if len(found) == 1:
+            p = found[0]
+            _awaiting_money[user.id] = f"debt:{p['row']}"
+            await msg.reply_text(
+                f"➕ Долг для {p['title']}.\n\n"
+                "Пришли сумму и за что: «500 мяч» или просто «500».\n\n"
+                "Передумал — /start.")
+            raise ApplicationHandlerStop
+        markup = await asyncio.to_thread(_pay_players_markup, 0, text, "coach:debtwho")
+        await msg.reply_text(f"Нашёл несколько по «{text}». Кому долг?",
+                             reply_markup=markup)
+        raise ApplicationHandlerStop
+
     m = re.match(r"^\s*(\d{1,7})\s*(.*)$", text)
     if not m:
         await msg.reply_text("Нужна сумма числом: «500» или «500 мяч». "
@@ -2811,7 +2826,7 @@ def _render_link_linked(offset: int) -> Tuple[str, InlineKeyboardMarkup]:
         who = _name_of(l) or f"строка {l['player_row']}"
         nick = f"@{l['username']}" if l["username"] else f"id {l['tg_user_id']}"
         lines.append(f"• {who} — {nick}")
-        rows.append([InlineKeyboardButton(f"✂️ {who} · {nick}"[:64],
+        rows.append([InlineKeyboardButton(f"✂️ {who} · {nick}"[:BTN_TEXT],
                                           callback_data=f"admin:link:un:{l['tg_user_id']}")])
     if not page:
         lines.append("Пока никто не привязан.")
@@ -2843,7 +2858,6 @@ def _render_unlink_confirm(uid: str) -> Tuple[str, InlineKeyboardMarkup]:
 
 async def _prog_teams() -> List[Dict[str, Any]]:
     """Наши команды с названиями — из локального справочника лиг."""
-    import fantasy_api
     try:
         teams = await asyncio.to_thread(fantasy_api._resolve_pool_teams_local)
     except Exception as e:
@@ -3426,13 +3440,13 @@ def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
                 state += ", бессрочно"
             lines.append(f"   @{a['username']} — {state}")
         lines.append("")
-        rows.append([InlineKeyboardButton(f"👥 «{title}» — из списка игроков",
+        rows.append([InlineKeyboardButton(f"👥 {title} — по списку",
                                           callback_data=f"admin:acc:who:{kind}:0")])
-        rows.append([InlineKeyboardButton(f"➕ «{title}» — по @нику",
+        rows.append([InlineKeyboardButton(f"➕ {title} — по @нику",
                                           callback_data=f"admin:acc:add:{kind}")])
         for a in people:
             rows.append([InlineKeyboardButton(
-                f"✂️ Забрать «{title}» у @{a['username']}"[:64],
+                f"✂️ Забрать у @{a['username']}"[:BTN_TEXT],
                 callback_data=f"admin:acc:del:{kind}:{a['username']}")])
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -3541,7 +3555,7 @@ def _access_screen(kind: str, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]
     for p in chunk:
         lines.append(f"{'✅' if p['open'] else '🔒'} {p['title']} — {_access_mark(p)}")
         rows.append([InlineKeyboardButton(
-            f"{'✅' if p['open'] else '🔒'} {p['title']}"[:60],
+            f"{'✅' if p['open'] else '🔒'} {p['title']}"[:BTN_TEXT],
             callback_data=f"admin:acc:w:{kind}:{p['row']}")])
     nav = []
     if start:
@@ -3780,6 +3794,11 @@ PAY_ASK = ("💳 Вставь СМС от банка целиком — я вы�
 
 PLAYERS_PER_PAGE = 8
 
+# Сколько знаков влезает в подпись кнопки в один столбец. Длиннее Telegram
+# обрежет сам, многоточием и не там, где надо: «Балтика (Летний Кубок Диви…».
+# Режем сами — так хотя бы видно, что подпись урезана осмысленно.
+BTN_TEXT = 38
+
 
 def _coach_markup() -> InlineKeyboardMarkup:
     """Корень раздела: два больших входа и разбор игр.
@@ -3795,19 +3814,35 @@ def _coach_markup() -> InlineKeyboardMarkup:
 
 
 def _money_markup() -> InlineKeyboardMarkup:
-    """Всё про деньги в одном месте."""
+    """Всё про деньги. Ежедневное — на виду, редкое — этажом ниже.
+
+    Раньше здесь было шесть двухколоночных рядов, и половина подписей на
+    телефоне обрезалась: «Напомнить: тр…», «Кто сколько вн…», «Последние
+    пла…». В двух колонках помещается около четырнадцати знаков — длиннее
+    ставить нельзя, поэтому длинное едет в одну колонку, а редкое ушло в
+    подменю (см. тест ширины подписей в tests/test_buttons.py)."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Внести оплату", callback_data="coach:pay")],
         [InlineKeyboardButton("💸 Долги", callback_data="coach:debts"),
-         InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")],
-        [InlineKeyboardButton("📨 Напомнить: тренировки", callback_data="coach:remind:season"),
-         InlineKeyboardButton("📨 Напомнить: игры", callback_data="coach:remind:game")],
-        [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
-        [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe"),
-         InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
-        [InlineKeyboardButton("✏️ Изменить суммы", callback_data="coach:sums"),
-         InlineKeyboardButton("🗑 Удалить оплату", callback_data="coach:delpay")],
+         InlineKeyboardButton("➕ Долг", callback_data="coach:adddebt")],
+        [InlineKeyboardButton("📨 Напомнить про тренировки",
+                              callback_data="coach:remind:season")],
+        [InlineKeyboardButton("📨 Напомнить про игры",
+                              callback_data="coach:remind:game")],
+        [InlineKeyboardButton("📊 Сводки и правки", callback_data="coach:money2")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
+    ])
+
+
+def _money2_markup() -> InlineKeyboardMarkup:
+    """Второй этаж оплат: то, к чему тренер возвращается редко."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📒 Кто сколько внёс", callback_data="coach:owe")],
+        [InlineKeyboardButton("🧾 Последние платежи", callback_data="coach:last")],
+        [InlineKeyboardButton("🏋️ Взносы за тренировки", callback_data="coach:train")],
+        [InlineKeyboardButton("✏️ Изменить суммы", callback_data="coach:sums")],
+        [InlineKeyboardButton("🗑 Удалить оплату", callback_data="coach:delpay")],
+        [InlineKeyboardButton("⬅️ К оплате", callback_data="coach:money")],
     ])
 
 
@@ -3841,7 +3876,6 @@ SCHED_LIMITS = {"game_pay_hour": (0, 23), "game_pay_evening_hour": (0, 23),
 
 def _sched_value(key: str) -> int:
     import game_roster
-    import sheets_cache
     import training_dues
     if key in training_dues.SCHEDULE:
         return training_dues.day(key)
@@ -3864,7 +3898,7 @@ def _sched_screen() -> Tuple[str, InlineKeyboardMarkup]:
                  else f"{value}:00" if unit == "час"
                  else f"за {value} дн.")
         lines.append(f"   • {title}: {shown}")
-        rows.append([InlineKeyboardButton(f"{title}: {shown}"[:60],
+        rows.append([InlineKeyboardButton(f"{title}: {shown}"[:BTN_TEXT],
                                           callback_data=f"coach:setsched:{key}")])
     lines += ["", "<i>Взносы за тренировки начинаются с сентября 2026 — "
               "до этого месяца бот про них молчит.</i>"]
@@ -3930,7 +3964,7 @@ def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
              + sum(d["amount"] for d in extra))
     lines += ["", f"Итого: {total} ₽" if total else "Долгов нет."]
 
-    rows = [[InlineKeyboardButton(f"✅ Погасить: {(coach_payments.player_by_row(d['player_row']) or {}).get('title', '?')}"[:60],
+    rows = [[InlineKeyboardButton(f"✅ Погасить: {(coach_payments.player_by_row(d['player_row']) or {}).get('title', '?')}"[:BTN_TEXT],
                                   callback_data=f"coach:closedebt:{d['id']}")]
             for d in extra[:5]]
     rows.append([InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")])
@@ -3950,7 +3984,7 @@ def _sums_screen(row: Optional[int] = None) -> Tuple[str, InlineKeyboardMarkup]:
         for p in people[:PLAYERS_PER_PAGE]:
             lines.append(f"• {p['title']}: тренировки {p['pay_season'] or '—'} ₽ · "
                          f"игра {p['pay_game'] or '—'} ₽")
-            rows.append([InlineKeyboardButton(p["title"][:60],
+            rows.append([InlineKeyboardButton(p["title"][:BTN_TEXT],
                                               callback_data=f"coach:sums:{p['row']}")])
         if len(people) > PLAYERS_PER_PAGE:
             lines.append(f"…и ещё {len(people) - PLAYERS_PER_PAGE} — "
@@ -3993,7 +4027,7 @@ def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
         lines.append(f"• {coach_payments._human_date(it['paid_at'])} — {it['title']}: "
                      f"{it['amount']} ₽ ({what}{extra})")
         rows.append([InlineKeyboardButton(
-            f"🗑 {it['title']} · {it['amount']} ₽"[:60],
+            f"🗑 {it['title']} · {it['amount']} ₽"[:BTN_TEXT],
             callback_data=f"coach:delpay:{it['id']}")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -4020,7 +4054,7 @@ def _my_games_video(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
         title = f"{g['home_name'] or '—'} — {g['guest_name'] or '—'}"
         lines.append(f"• {day} · {title}")
         rows.append([InlineKeyboardButton(
-            f"{day} · {title}"[:60],
+            f"{day} · {title}"[:BTN_TEXT],
             callback_data=f"rep:vidg:{g['source']}:{g['game_id']}:{g['player_id']}")])
     rows += back
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -4030,7 +4064,6 @@ def _my_video_game(source: str, game_id: str, player_id: str) -> Tuple[str, Inli
     """Тайм-коды своих выходов в одной игре (HTML)."""
     import coach_payments
     import game_timeline
-    import sheets_cache
     import vk_video
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
@@ -4087,7 +4120,7 @@ def _games_screen() -> Tuple[str, InlineKeyboardMarkup]:
         picked = len(game_roster.roster(g["source"], g["game_id"]))
         mark = f" · в составе {picked}" if picked else ""
         rows.append([InlineKeyboardButton(
-            f"{game_roster.game_label(g)}{mark}"[:60],
+            f"{game_roster.game_label(g)}{mark}"[:BTN_TEXT],
             callback_data=f"rost:show:{g['source']}:{g['game_id']}")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -4151,11 +4184,11 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
     for v in waiting[:10]:
         if v["linked"]:
             rows.append([InlineKeyboardButton(
-                f"➕ {v['title']}"[:60],
+                f"➕ {v['title']}"[:BTN_TEXT],
                 callback_data=f"rost:add:{source}:{game_id}:{v['row']}")])
     for p in picked[:16]:
         rows.append([InlineKeyboardButton(
-            f"➖ {p['title']}"[:60],
+            f"➖ {p['title']}"[:BTN_TEXT],
             callback_data=f"rost:del:{source}:{game_id}:{p['row']}")])
     if picked and stale:
         rows.append([InlineKeyboardButton(
@@ -4191,7 +4224,7 @@ def _game_debt_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMar
             "⬅️ В раздел", callback_data="coach:main")]]))
     rows = game_roster.debtors(source, game_id)
     text = game_roster.coach_debt_text(game, rows)
-    buttons = [[InlineKeyboardButton(f"✔ {p['title']}"[:60],
+    buttons = [[InlineKeyboardButton(f"✔ {p['title']}"[:BTN_TEXT],
                                      callback_data=f"rost:paid:{source}:{game_id}:{p['row']}")]
                for p in rows[:20]]
     buttons.append([InlineKeyboardButton("👥 Состав",
@@ -4238,7 +4271,7 @@ def _train_screen(period: str = "") -> Tuple[str, InlineKeyboardMarkup]:
     else:
         lines.append("Кнопка = «деньги были, чек не присылали».")
 
-    buttons = [[InlineKeyboardButton(f"✔ {r['title']}"[:60],
+    buttons = [[InlineKeyboardButton(f"✔ {r['title']}"[:BTN_TEXT],
                                      callback_data=f"coach:trmark:{r['row']}:{period}")]
                for r in debt[:20]]
     prev = training_dues.period_of(date(int(period[:4]), int(period[5:7]), 1)
@@ -4275,29 +4308,62 @@ def _pay_players_markup(page: int = 0, query: str = "",
     покажет, но попасть в нужную пальцем уже нельзя.
 
     pick — куда ведёт нажатие: тот же список нужен и для оплаты, и для долга,
-    и для правки сумм, менялся только адрес."""
+    и для правки сумм, менялся только адрес.
+
+    Стрелки листания раньше вели в жёстко зашитый `coach:page`, то есть в поток
+    ОПЛАТЫ, откуда бы список ни открыли. В «Добавить долг» это выбрасывало в
+    корень раздела: обработчик искал черновик платежа, не находил и показывал
+    главный экран. Теперь адрес листания строится из того же `pick`, и список
+    остаётся в своём потоке."""
     import coach_payments
     # Все из листа: за игру может заплатить и тот, кто сейчас не тренируется.
     people = coach_payments.players()
     if query:
-        found = coach_payments.match_player(query) or coach_payments.search_players(query)
+        found = people_search(query, people)
         if found:
             people = found + [p for p in people if p not in found]
     pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
     page = max(0, min(page, pages - 1))
     chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
-    rows = [[InlineKeyboardButton(p["title"][:60], callback_data=f"{pick}:{p['row']}")]
+    rows = [[InlineKeyboardButton(p["title"][:BTN_TEXT], callback_data=f"{pick}:{p['row']}")]
             for p in chunk]
     if pages > 1:
+        # «coach:pick» -> «coach:page», «coach:debtwho» -> «coach:debtpage»:
+        # у каждого потока своё листание, чужое его больше не перехватывает.
+        flip = PICK_PAGES.get(pick, "coach:page")
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("◀️", callback_data=f"coach:page:{page - 1}"))
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"{flip}:{page - 1}"))
         nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="coach:noop"))
         if page < pages - 1:
-            nav.append(InlineKeyboardButton("▶️", callback_data=f"coach:page:{page + 1}"))
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"{flip}:{page + 1}"))
         rows.append(nav)
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="coach:main")])
     return InlineKeyboardMarkup(rows)
+
+
+# Куда листать в каждом потоке выбора игрока.
+PICK_PAGES = {
+    "coach:pick": "coach:page",
+    "coach:debtwho": "coach:debtpage",
+    "coach:sums": "coach:sumspage",
+}
+
+
+def _find_people(query: str) -> List[Dict[str, Any]]:
+    """Игроки по набранному тексту — карточками из листа «Игроки»."""
+    import coach_payments
+    return people_search(query, coach_payments.players())
+
+
+def people_search(query: str, people: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Поиск по уже собранному списку игроков — тем же правилом, что везде.
+
+    Общий на весь бот (player_search.rank): им же ищутся соперники при
+    создании игры и игроки в составе. Раньше в каждом экране правило было
+    своё, и человеку приходилось помнить, где как искать."""
+    import player_search
+    return player_search.rank(query, people, player_search.person_fields, limit=0)
 
 
 def _pay_confirm(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
@@ -4435,7 +4501,11 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
     what = parts[1] if len(parts) > 1 else ""
     source = parts[2] if len(parts) > 2 else ""
     game_id = parts[3] if len(parts) > 3 else ""
-    row = int(parts[4]) if len(parts) > 4 else 0
+    # Пятый кусок — не всегда строка листа: у кнопок формы там «dark»/«light».
+    # Безусловный int() ронял обработчик раньше, чем дело доходило до ветки, и
+    # кнопки формы в составе не работали НИ РАЗУ с момента появления.
+    tail = parts[4] if len(parts) > 4 else ""
+    row = int(tail) if tail.lstrip("-").isdigit() else 0
     _roster_focus[user.id] = (source, game_id)
 
     try:
@@ -4590,7 +4660,7 @@ def _next_roster_question(user_id: int, source: str, game_id: str
         _roster_pending.pop(user_id, None)
         return None
     item = queue[0]
-    rows = [[InlineKeyboardButton(p["title"][:60],
+    rows = [[InlineKeyboardButton(p["title"][:BTN_TEXT],
                                   callback_data=f"rost:add:{source}:{game_id}:{p['row']}")]
             for p in item["options"]]
     rows.append([InlineKeyboardButton("⏭ Пропустить",
@@ -4783,6 +4853,12 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 "💰 Оплата\n\nВзносы, долги и напоминания.",
                 reply_markup=_money_markup())
 
+        elif what == "money2":
+            await query.edit_message_text(
+                "📊 Сводки и правки\n\nКто сколько внёс, последние платежи, "
+                "размеры взносов и отмена ошибочных оплат.",
+                reply_markup=_money2_markup())
+
         elif what == "play":
             await query.edit_message_text(
                 "🏀 Игры\n\nСостав, создание игры.",
@@ -4814,10 +4890,18 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(text, reply_markup=markup,
                                           parse_mode="HTML")
 
-        elif what == "adddebt":
+        elif what in ("adddebt", "debtpage"):
             # Сначала кому, потом сколько: список тот же, что при оплате.
-            markup = await asyncio.to_thread(_pay_players_markup, 0, "", "coach:debtwho")
-            await query.edit_message_text("➕ Кому добавить долг?", reply_markup=markup)
+            # Листание своё (coach:debtpage), иначе стрелки уводили в поток
+            # оплаты и выбрасывали в корень раздела.
+            page = int(parts[2]) if what == "debtpage" and len(parts) > 2 else 0
+            _clear_pending(user.id)
+            _awaiting_money[user.id] = "debtwho"     # ждём фамилию текстом
+            markup = await asyncio.to_thread(_pay_players_markup, page, "",
+                                             "coach:debtwho")
+            await query.edit_message_text(
+                "➕ Кому добавить долг?\n\nВыбери из списка или напиши фамилию.",
+                reply_markup=markup)
 
         elif what == "debtwho" and len(parts) > 2:
             _clear_pending(user.id)
@@ -4834,8 +4918,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             text, markup = await asyncio.to_thread(_sums_screen, row)
             await query.edit_message_text(text, reply_markup=markup)
 
-        elif what == "sumswho":
-            markup = await asyncio.to_thread(_pay_players_markup, 0, "", "coach:sums")
+        elif what in ("sumswho", "sumspage"):
+            page = int(parts[2]) if what == "sumspage" and len(parts) > 2 else 0
+            markup = await asyncio.to_thread(_pay_players_markup, page, "", "coach:sums")
             await query.edit_message_text("👤 Чьи суммы меняем?", reply_markup=markup)
 
         elif what == "setsum" and len(parts) > 3:
@@ -5146,8 +5231,12 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if parts[1] == "doors":
             what = parts[2] if len(parts) > 2 else "list"
             if what == "toggle" and len(parts) > 3:
-                import fantasy_api
-                import sheets_cache
+                # Здесь стояли `import fantasy_api` и `import sheets_cache`. Оба
+                # модуля импортированы на уровне файла, а локальный импорт делал
+                # имя ЛОКАЛЬНЫМ на всю функцию — и любое обращение к нему из
+                # других веток падало с UnboundLocalError. Ломались выдача
+                # доступа по нику, «Каналы связи», пересчёт цен и синхронизация,
+                # а заодно и сам обработчик ошибок внизу.
                 key = next((setting for did, _, _, setting in fantasy_api.DOORS
                             if did == parts[3]), "")
                 if key:
@@ -5723,27 +5812,45 @@ async def _game_schedule(app: Application) -> None:
                 log.info(f"Долги за игру {source}:{gid}: {len(rows)}, тренерам {sent}")
             elif kind == "player_before":
                 stat = await _remind_game_debtors(app, game, ahead=True)
-                await _tell_coaches(
-                    app, f"💰 Завтра игра {game_roster.game_label(game)} — "
-                         f"напомнил про оплату {len(stat['sent'])} игрокам."
-                         + (f"\nНе дошло до {len(stat['failed']) + len(stat['unknown'])}."
-                            if stat["failed"] or stat["unknown"] else ""))
+                # Отчёт тренеру — только если было о чём. Долгов нет, никому не
+                # писали — сообщать не о чем: «напомнил 0 игрокам» это шум,
+                # который приучает не читать сообщения бота.
+                if _reminder_worth_telling(stat):
+                    await _tell_coaches(
+                        app, f"💰 Завтра игра {game_roster.game_label(game)} — "
+                             f"напомнил про оплату {len(stat['sent'])} игрокам."
+                             + (f"\nНе дошло до {len(stat['failed']) + len(stat['unknown'])}."
+                                if stat["failed"] or stat["unknown"] else ""))
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"дошло {len(stat['sent'])}")
 
             elif kind == "player_next":
                 stat = await _remind_game_debtors(app, game)
-                report = await asyncio.to_thread(
-                    training_dues.delivery_report,
-                    game["date"].strftime("%Y-%m"), stat["sent"], stat["failed"],
-                    stat["unknown"])
-                await _tell_coaches(
-                    app, f"💰 Напомнил про оплату игры {game_roster.game_label(game)}.\n\n"
-                         + report.split("\n", 2)[-1])
+                if _reminder_worth_telling(stat):
+                    report = await asyncio.to_thread(
+                        training_dues.delivery_report,
+                        game["date"].strftime("%Y-%m"), stat["sent"], stat["failed"],
+                        stat["unknown"])
+                    await _tell_coaches(
+                        app, f"💰 Напомнил про оплату игры {game_roster.game_label(game)}.\n\n"
+                             + report.split("\n", 2)[-1])
+                else:
+                    log.info(f"Оплата игры {game_roster.game_label(game)}: "
+                             "должников нет, тренера не беспокою")
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"дошло {len(stat['sent'])}")
         except Exception as e:
             log.error(f"Событие по игре ({key}) не отработало: {e}")
+
+
+def _reminder_worth_telling(stat: Dict[str, List[str]]) -> bool:
+    """Стоит ли докладывать тренеру о рассылке напоминаний.
+
+    Нечего сказать — молчим. «Напомнил про оплату. Дошло: 0» при закрытых
+    долгах человек читает как поломку, а на деле это просто отчёт ни о чём.
+    А вот «дошло 0, зато у пятерых нет телеграма» — уже дело: тренеру надо
+    знать, до кого бот достучаться не может."""
+    return bool(stat["sent"] or stat["failed"] or stat["unknown"])
 
 
 async def _remind_game_debtors(app: Application, game: Dict[str, Any],
