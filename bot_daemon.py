@@ -2120,50 +2120,79 @@ def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
     return head, InlineKeyboardMarkup(rows)
 
 
-def _start_screen(source: str, game_id: str, sort: str) -> Tuple[str, InlineKeyboardMarkup]:
-    """Состав с тренировками и амплуа + переключатели вида."""
+def _start_screen(source: str, game_id: str, sort: str,
+                  roles: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
+    """Выбор стартовой пятёрки. Нажатие на фамилию ставит в старт и снимает.
+
+    Раньше этот экран умел ровно одно — править амплуа, а самой пятёрки не
+    было: тренер жал фамилию, у него спрашивали позицию, и на этом всё
+    заканчивалось. Название обещало другое.
+
+    Амплуа никуда не делось, но ушло за отдельную кнопку: в обычном режиме
+    тренер собирает пятёрку, а позиции правит редко и отдельно."""
     import coach_lineup
     data = coach_lineup.lineup(source, game_id, sort)
-    rows = [[InlineKeyboardButton(
-        ("✅ " if data["sort"] == key else "") + title,
-        callback_data=f"coach:start:{source}:{game_id}:{key}")]
-        for key, title in coach_lineup.SORTS.items()]
-    # Амплуа правится тут же: тренер и так смотрит на этот список, а отдельный
-    # экран «настройки игроков» означал бы держать в голове два места.
-    for p in data["rows"][:12]:
-        mark = f" · {p['role']}" if p["role"] else ""
+    picked = data.get("start") or []
+    rows: List[List[InlineKeyboardButton]] = []
+
+    if roles:
+        for p in data["rows"][:12]:
+            title = coach_lineup.role_title(p["role"])
+            rows.append([InlineKeyboardButton(
+                f"🎽 {p['title']} — {title or 'без амплуа'}"[:BTN_TEXT],
+                callback_data=f"coach:role:{p['row']}:{source}:{game_id}:{sort}")])
         rows.append([InlineKeyboardButton(
-            f"🎽 {p['title']}{mark}"[:BTN_TEXT],
-            callback_data=f"coach:role:{p['row']}:{source}:{game_id}:{sort}")])
+            "⬅️ К пятёрке", callback_data=f"coach:start:{source}:{game_id}:{sort}")])
+        return ("🎽 Амплуа\n\nНажми на игрока, чтобы поменять позицию.",
+                InlineKeyboardMarkup(rows))
+
+    for p in data["rows"][:14]:
+        mark = "✅" if p["row"] in picked else "⬜"
+        num = coach_lineup.role_number(p["role"])
+        tail = f" · №{num}" if num else ""
+        rows.append([InlineKeyboardButton(
+            f"{mark} {p['title']}{tail}"[:BTN_TEXT],
+            callback_data=f"coach:sf:{source}:{game_id}:{p['row']}:{sort}")])
+    # Порядок списка — одной строкой: подписи короткие, чтобы три кнопки в
+    # ряду не обрезались на телефоне.
     rows.append([InlineKeyboardButton(
-        "📨 Прислать тренерам", callback_data=f"coach:startsend:{source}:{game_id}:{sort}")])
+        ("✅ " if data["sort"] == key else "") + title,
+        callback_data=f"coach:start:{source}:{game_id}:{key}")
+        for key, title in coach_lineup.SORTS.items()])
+    rows.append([InlineKeyboardButton(
+        "🎽 Амплуа", callback_data=f"coach:roles:{source}:{game_id}:{sort}")])
+    if picked:
+        rows.append([InlineKeyboardButton(
+            "📨 Прислать тренерам",
+            callback_data=f"coach:startsend:{source}:{game_id}:{sort}")])
     rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:start")])
     return coach_lineup.text(data), InlineKeyboardMarkup(rows)
 
 
 def _role_screen(row: int, source: str, game_id: str, sort: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Позиция игрока. В кнопке — номер и название разом.
+
+    Номер кладём индексом, а не текстом: Telegram ограничивает callback_data
+    64 байтами, и «Атакующий защитник» кириллицей вместе с адресом игры туда
+    не влезает."""
     import coach_lineup
     import coach_payments
     person = coach_payments.player_by_row(int(row)) or {}
     now = str(person.get("role") or "")
+    now_num = coach_lineup.role_number(now)
     keys = []
-    line = []
-    # В кнопку кладём НОМЕР амплуа, а не название: Telegram ограничивает
-    # callback_data 64 байтами, а «Разыгрывающий» в кириллице занимает 26 —
-    # вместе с адресом игры кнопка не влезала и отвечала Button_data_invalid.
-    for idx, role in enumerate(coach_lineup.ROLES):
-        line.append(InlineKeyboardButton(
-            ("✅ " if role == now else "") + role,
-            callback_data=f"coach:setrole:{row}:{idx}:{source}:{game_id}:{sort}"))
-        if len(line) == 3:
-            keys.append(line); line = []
-    if line:
-        keys.append(line)
-    keys.append([InlineKeyboardButton("Снять амплуа",
-                                      callback_data=f"coach:setrole:{row}:-1:{source}:{game_id}:{sort}")])
-    keys.append([InlineKeyboardButton("⬅️ К составу",
-                                      callback_data=f"coach:start:{source}:{game_id}:{sort}")])
-    return (f"🎽 {person.get('title', '')}\n\nАмплуа сейчас: {now or 'не задано'}.\n\n"
+    for idx, (num, name) in enumerate(coach_lineup.ROLES):
+        label = (f"№{num} {name}" if num else name)
+        keys.append([InlineKeyboardButton(
+            ("✅ " if num and num == now_num else "") + label,
+            callback_data=f"coach:setrole:{row}:{idx}:{source}:{game_id}:{sort}")])
+    keys.append([InlineKeyboardButton(
+        "Снять амплуа",
+        callback_data=f"coach:setrole:{row}:-1:{source}:{game_id}:{sort}")])
+    keys.append([InlineKeyboardButton(
+        "⬅️ К амплуа", callback_data=f"coach:roles:{source}:{game_id}:{sort}")])
+    return (f"🎽 {person.get('title', '')}\n\n"
+            f"Сейчас: {coach_lineup.role_title(now) or 'не задано'}.\n\n"
             "На какой позиции обычно играет?", InlineKeyboardMarkup(keys))
 
 
@@ -4989,11 +5018,27 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 idx = int(parts[3])
             except ValueError:
                 idx = -1
-            role = coach_lineup.ROLES[idx] if 0 <= idx < len(coach_lineup.ROLES) else ""
+            role = (coach_lineup.ROLES[idx][1]
+                    if 0 <= idx < len(coach_lineup.ROLES) else "")
             ok = await asyncio.to_thread(coach_lineup.set_role, int(parts[2]), role)
             await query.answer("Записал" if ok else "Таблица не приняла запись")
             text, markup = await asyncio.to_thread(
-                _start_screen, parts[4], parts[5], parts[6])
+                _start_screen, parts[4], parts[5], parts[6], True)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "roles" and len(parts) > 4:
+            text, markup = await asyncio.to_thread(
+                _start_screen, parts[2], parts[3], parts[4], True)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "sf" and len(parts) > 5:
+            # Нажатие на фамилию: поставить в старт или снять.
+            import coach_lineup
+            _, note = await asyncio.to_thread(coach_lineup.toggle_start,
+                                              parts[2], parts[3], int(parts[4]))
+            await query.answer(note)
+            text, markup = await asyncio.to_thread(
+                _start_screen, parts[2], parts[3], parts[5])
             await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "money":

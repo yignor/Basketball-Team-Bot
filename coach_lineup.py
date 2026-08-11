@@ -23,14 +23,100 @@ import sheets_cache
 
 logger = logging.getLogger(__name__)
 
-# Амплуа: номера и две общие роли. Порядок — как на площадке, от первого
-# номера к пятому; «Разыгрывающий» и «Большой» для тех, кто мыслит словами.
-ROLES = ["1", "2", "3", "4", "5", "Разыгрывающий", "Большой"]
+# Амплуа: номер и название одной позиции — это одно и то же, и держать их
+# порознь нельзя. Мои кнопки раньше предлагали голые «1…5», а в листе у команды
+# уже стояли настоящие позиции («Атакующий защитник», «Центровой») — выбор
+# кнопкой ЗАТИРАЛ их цифрой, и на экране получалась мешанина из цифр и слов.
+#
+# Храним название (оно уже в листе, его читает человек), показываем с номером.
+ROLES = [("1", "Разыгрывающий"),
+         ("2", "Атакующий защитник"),
+         ("3", "Легкий форвард"),
+         ("4", "Тяжелый форвард"),
+         ("5", "Центровой"),
+         ("", "Универсал")]
+
+ROLE_NAMES = [name for _, name in ROLES]
+
+
+def _norm_role(role: str) -> str:
+    return str(role or "").strip().lower().replace("ё", "е")
+
+
+def role_number(role: str) -> str:
+    """Номер позиции по её названию. Пусто — если название нестандартное."""
+    key = _norm_role(role)
+    for num, name in ROLES:
+        if _norm_role(name) == key:
+            return num
+    return key if key.isdigit() else ""
 
 # За какой срок до игры считаем тренировки.
 WINDOW_DAYS = 30
 
-SORTS = {"name": "по алфавиту", "trainings": "по тренировкам", "role": "по амплуа"}
+# Подписи короткие: три кнопки в ряду, длиннее девяти знаков телефон обрежет.
+SORTS = {"name": "А–Я", "trainings": "Трен.", "role": "Амплуа"}
+
+# Сколько человек начинают игру.
+START_SIZE = 5
+
+
+def role_title(role: str) -> str:
+    """«Атакующий защитник» -> «№2 · атакующий защитник».
+
+    Номер и название вместе: тренер думает номерами, а в листе записаны слова,
+    и показывать что-то одно значит заставлять его переводить в уме."""
+    role = str(role or "").strip()
+    if not role:
+        return ""
+    num = role_number(role)
+    if role.isdigit():
+        name = next((n for k, n in ROLES if k == role), "")
+        return f"№{role}" + (f" · {name.lower()}" if name else "")
+    return (f"№{num} · " if num else "") + role.lower()
+
+
+def start_five(source: str, game_id: str) -> List[int]:
+    """Строки листа тех, кто выходит в старте. Порядок — как выбирал тренер."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT start_rows FROM game_roster_state WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    raw = str((row or {"start_rows": ""})["start_rows"] or "")
+    try:
+        import json
+        return [int(x) for x in json.loads(raw)] if raw else []
+    except (ValueError, TypeError):
+        return []
+
+
+def toggle_start(source: str, game_id: str, player_row: int) -> Tuple[bool, str]:
+    """Ставит игрока в старт или снимает. (в старте ли, что сказать тренеру).
+
+    Больше пяти не берём: пятёрка — это пятёрка, и молча растянуть её значит
+    прислать в чат список, который не соответствует названию."""
+    import json
+    current = start_five(source, game_id)
+    row = int(player_row)
+    if row in current:
+        current.remove(row)
+        note = "снял из старта"
+    elif len(current) >= START_SIZE:
+        return False, f"В старте уже {START_SIZE} — сними кого-то"
+    else:
+        current.append(row)
+        note = "в старте"
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO game_roster_state (source, game_id, start_rows)
+               VALUES (?, ?, ?)
+               ON CONFLICT(source, game_id) DO UPDATE SET
+                   start_rows = excluded.start_rows""",
+            (source, str(game_id), json.dumps(current)))
+        conn.commit()
+    return row in current, note
 
 
 def _sessions_in(vote_text: str) -> int:
@@ -80,6 +166,7 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
     for p in people:
         rows.append({**p, "trainings": counts.get(int(p["row"]), 0),
                      "role": str(p.get("role") or "")})
+    picked = start_five(source, str(game_id))
     if sort == "trainings":
         # Больше тренировок — выше; при равенстве по алфавиту, иначе порядок
         # прыгает от запроса к запросу и список нельзя сравнить с прошлым.
@@ -90,28 +177,53 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
                                  game_roster._by_surname(r)))
     else:
         rows.sort(key=game_roster._by_surname)
-    return {"game": game, "rows": rows, "sort": sort, "day": day}
+    return {"game": game, "rows": rows, "sort": sort, "day": day,
+            # Порядок пятёрки — как выбирал тренер, а не как отсортирован список.
+            "start": [r for r in picked if any(x["row"] == r for x in rows)]}
 
 
-def text(data: Dict[str, Any], title: str = "🏁 Стартовый состав") -> str:
-    """Сообщение тренеру. Тренировки — за месяц до игры, а не до сегодня."""
+def text(data: Dict[str, Any], title: str = "🏁 Стартовая пятёрка") -> str:
+    """Сообщение тренеру: сначала пятёрка, потом остальной состав.
+
+    Раньше всё шло одним списком «• Фамилия — 7 трен. · 2», и голая цифра
+    амплуа рядом с числом тренировок читалась как вторая цифра неизвестно
+    чего. Теперь пятёрка отделена и пронумерована, амплуа названо словами, а
+    тренировки — только у тех, кого ещё выбирают: при готовой пятёрке они уже
+    не решают."""
     import game_roster
     game, rows = data.get("game"), data.get("rows") or []
+    picked = data.get("start") or []
     head = title
     if game:
         head += f"\n{game_roster.game_label(game)}"
     if not rows:
         return head + "\n\nСостав пока не собран."
-    lines = [head, f"Тренировки — за {WINDOW_DAYS} дней до игры.", ""]
-    last_role = None
-    for r in rows:
-        if data.get("sort") == "role":
-            role = r["role"] or "без амплуа"
-            if role != last_role:
-                lines.append(f"— {role} —")
-                last_role = role
-        mark = f" · {r['role']}" if r["role"] and data.get("sort") != "role" else ""
-        lines.append(f"• {r['title']} — {r['trainings']} трен.{mark}")
+
+    by_row = {r["row"]: r for r in rows}
+    lines = [head, ""]
+    if picked:
+        lines.append(f"Выбрано {len(picked)} из {START_SIZE}:")
+        for i, row in enumerate(picked, start=1):
+            p = by_row.get(row)
+            if not p:
+                continue
+            role = role_title(p["role"])
+            lines.append(f"{i}. {p['title']}" + (f" — {role}" if role else ""))
+        lines.append("")
+    else:
+        lines.append(f"Пятёрка не выбрана. Нажми на фамилию — поставлю в старт.")
+        lines.append("")
+
+    rest = [r for r in rows if r["row"] not in picked]
+    if rest:
+        lines.append("Остальные в составе:")
+        for p in rest:
+            role = role_title(p["role"])
+            bits = [f"{p['trainings']} трен."]
+            if role:
+                bits.insert(0, role)
+            lines.append(f"   {p['title']} — {', '.join(bits)}")
+        lines += ["", f"Тренировки — за {WINDOW_DAYS} дней до игры."]
     return "\n".join(lines)
 
 
@@ -119,7 +231,7 @@ def set_role(player_row: int, role: str, spreadsheet: Any = None) -> bool:
     """Ставит амплуа игроку: в лист «Игроки» и в зеркало.
 
     Пустое значение снимает амплуа — тренер мог поставить по ошибке."""
-    value = role if role in ROLES else ""
+    value = role if role in ROLE_NAMES else ""
     if spreadsheet is None:
         try:
             import report_common
