@@ -4991,8 +4991,10 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if len(parts) > 4:
                 text, markup = await asyncio.to_thread(
                     _start_screen, parts[2], parts[3], parts[4])
-            else:
-                text, markup = await asyncio.to_thread(_start_games_screen)
+                await query.edit_message_text(text, reply_markup=markup,
+                                              parse_mode="HTML")
+                return
+            text, markup = await asyncio.to_thread(_start_games_screen)
             await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "startsend" and len(parts) > 4:
@@ -5002,7 +5004,8 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             sent = 0
             for uid in await asyncio.to_thread(_coach_recipients):
                 try:
-                    await query.get_bot().send_message(chat_id=int(uid), text=body)
+                    await query.get_bot().send_message(chat_id=int(uid), text=body,
+                                                       parse_mode="HTML")
                     sent += 1
                 except Exception as e:
                     log.warning(f"Стартовый состав тренеру {uid}: {e}")
@@ -5040,7 +5043,8 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer(note)
             text, markup = await asyncio.to_thread(
                 _start_screen, parts[2], parts[3], parts[5])
-            await query.edit_message_text(text, reply_markup=markup)
+            await query.edit_message_text(text, reply_markup=markup,
+                                          parse_mode="HTML")
 
         elif what == "money":
             await query.edit_message_text(
@@ -6111,13 +6115,15 @@ async def _remind_game_debtors(app: Application, game: Dict[str, Any],
 
 
 async def _tell_coaches(app: Application, text: str,
-                        markup: Optional[InlineKeyboardMarkup] = None) -> int:
+                        markup: Optional[InlineKeyboardMarkup] = None,
+                        html: bool = False) -> int:
     """Сообщение тренерскому штабу — ТОЛЬКО в личку, никогда в общий чат."""
     sent = 0
     for uid in await asyncio.to_thread(_coach_recipients):
         try:
             await app.bot.send_message(chat_id=int(uid), text=text,
-                                       reply_markup=markup)
+                                       reply_markup=markup,
+                                       parse_mode="HTML" if html else None)
             sent += 1
         except Exception as e:
             log.warning(f"Тренеру {uid} не доставлено: {e}")
@@ -6261,7 +6267,7 @@ async def _send_starting_lineups(app: Application) -> None:
         if not data.get("rows"):
             continue
         sent = await _tell_coaches(app, coach_lineup.text(
-            data, "🏁 Стартовый состав — через час игра"))
+            data, "🏁 Стартовый состав — через час игра"), html=True)
         await asyncio.to_thread(training_dues.mark_event, key, f"тренерам: {sent}")
         log.info(f"Стартовый состав по игре {g['game_id']} ушёл тренерам ({sent})")
 

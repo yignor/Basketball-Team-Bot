@@ -235,24 +235,22 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
 def player_card(p: Dict[str, Any], number: str = "") -> List[str]:
     """Игрок тремя строками: кто, на какой позиции, чем полезен.
 
-    Раньше всё жалось в одну строку — «• Фамилия — 7 трен. · 2», — и тренер
-    читал это как ребус. Три коротких строки читаются с телефона одним
-    взглядом, а лишние показатели (передачи, перехваты, фолы) сюда не тащим:
-    решение о старте принимают по очкам, подборам и потерям."""
-    head = f"{number}{p['title']}" if number else p["title"]
-    lines = [head]
+    Имя жирным и пустая строка между игроками — иначе десять человек по три
+    строки сливаются в стену, и глаз не находит, где кончается один и
+    начинается другой. Отступ пробелами тут не спасает: шрифт в Телеграме
+    пропорциональный, и два пробела почти не видны."""
+    import html
+    import coach_payments
+    head = f"{number}<b>{html.escape(p['title'])}</b>"
     role = role_title(p.get("role", ""))
-    lines.append(f"    {role}" if role else "    амплуа не задано")
-    bits = [f"{p['trainings']} трен."]
+    second = [role or "амплуа не задано", f"{p['trainings']} трен."]
+    lines = [head, "     " + " · ".join(second)]
     avg = p.get("avg") or {}
     if avg:
-        bits += [f"{avg['pts']:g} очк", f"{avg['reb']:g} подб",
-                 f"{avg['tur']:g} пот"]
-    import coach_payments
-    lines.append("    " + " · ".join(bits)
-                 + (f"   (за {coach_payments.plural(avg['games'], 'игру', 'игры', 'игр')})"
-                    if avg else ""))
-    return lines
+        lines.append(f"     {avg['pts']:g} очк · {avg['reb']:g} подб · "
+                     f"{avg['tur']:g} пот   "
+                     f"({coach_payments.plural(avg['games'], 'игра', 'игры', 'игр')})")
+    return lines + [""]
 
 
 def text(data: Dict[str, Any], title: str = "🏁 Стартовый состав") -> str:
@@ -271,25 +269,26 @@ def text(data: Dict[str, Any], title: str = "🏁 Стартовый соста�
 
     by_row = {r["row"]: r for r in rows}
     lines = [head, ""]
-    lines.append(f"━━ СТАРТ ({len(picked)} из {START_SIZE}) ━━")
+    lines.append(f"━━━  СТАРТ · {len(picked)} из {START_SIZE}  ━━━")
+    lines.append("")
     if picked:
         for i, row in enumerate(picked, start=1):
             p = by_row.get(row)
             if p:
-                lines += player_card(p, f"{i}. ")
+                lines += player_card(p, f"{i}.  ")
     else:
-        lines.append("Пусто. Нажми на фамилию — поставлю в старт.")
-    lines.append("")
+        lines += ["Пусто. Нажми на фамилию — поставлю в старт.", ""]
 
     rest = [r for r in rows if r["row"] not in picked]
-    lines.append(f"━━ СКАМЕЙКА ({len(rest)}) ━━")
+    lines.append(f"━━━  СКАМЕЙКА · {len(rest)}  ━━━")
+    lines.append("")
     if rest:
         for p in rest:
             lines += player_card(p)
     else:
-        lines.append("Пусто.")
-    lines += ["", f"Тренировки — за {WINDOW_DAYS} дней до игры, "
-              "средние — по всем сыгранным."]
+        lines += ["Пусто.", ""]
+    lines.append(f"<i>Тренировки — за {WINDOW_DAYS} дней до игры, "
+                 "средние — по всем сыгранным.</i>")
     return "\n".join(lines)
 
 
