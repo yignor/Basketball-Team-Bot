@@ -316,9 +316,50 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 tg_poll_id, user_id, username, first_name, last_name,
                 vote_text, vote_type, poll_info["game_id"], poll_info["training_date"],
             )
+            # Опоздавший «Готов» по уже отправленному составу — сказать тренеру.
+            # Иначе человек считает, что заявился, а его в списке нет: состав
+            # в чате был собран до его голоса.
+            if vote_type == "PRESENT":
+                await _late_ready(context, poll_info["game_id"],
+                                  user_id, first_name, last_name, username)
     except Exception as e:
         log.error(f"Ошибка при сохранении голоса: {e}")
         sheets_cache.report_error("handle_poll_answer", str(e), _get_spreadsheet())
+
+
+async def _late_ready(context, game_id: str, user_id: str, first_name: str,
+                      last_name: str, username: str) -> None:
+    """«Готов» пришёл после того, как состав уже ушёл в чат.
+
+    Экран состава — снимок: тренер его открыл, а голос прилетел позже. 11.08.2026
+    так вышло с Морозовым — он нажал «Готов» в ту же минуту, когда уходил
+    состав, и в список не попал. Молчать тут нельзя: человек уверен, что
+    заявился."""
+    import game_roster
+    try:
+        source = game_roster.source_of(game_id)
+        if not await asyncio.to_thread(game_roster.is_posted, source, str(game_id)):
+            return
+        picked = {p["row"] for p in
+                  await asyncio.to_thread(game_roster.roster, source, str(game_id))}
+        link = await asyncio.to_thread(sheets_cache.get_player_link, str(user_id))
+        row = int((link or {}).get("player_row") or 0)
+        if row and row in picked:
+            return                      # он и так в составе — всё в порядке
+        who = " ".join(x for x in (last_name, first_name) if x) or f"@{username}"
+        game = next((g for g in await asyncio.to_thread(game_roster.games)
+                     if g["source"] == source and g["game_id"] == str(game_id)), None)
+        label = game_roster.game_label(game) if game else str(game_id)
+        await _tell_coaches(
+            context.application,
+            f"🔔 {who} отметился «Готов» на игру {label} уже ПОСЛЕ того, как "
+            f"состав ушёл в чат.\n\nЕсли берём — добавь в состав и обнови "
+            f"сообщение, иначе он ждёт игру, а его там нет.",
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                "👥 Открыть состав",
+                callback_data=f"rost:open:{source}:{game_id}")]]))
+    except Exception as e:
+        log.warning(f"Опоздавший «Готов» ({game_id}): {e}")
 
 
 # ─────────────────────────── Админ-меню ───────────────────────────────────
@@ -4220,9 +4261,7 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
     if stale:
         lines.append("⚠️ В чате висит прежний состав — обнови сообщение.")
     elif posted:
-        author = game_roster.posted_by(source, game_id)
-        lines.append("✅ Состав в чате актуален."
-                     + (f" Отправил {author}." if author else ""))
+        lines.append("✅ Состав в чате актуален.")
 
     # Форма — рядом с составом: тренер решает её тогда же, когда собирает
     # людей, и отдельный экран ради двух вариантов был бы лишним шагом.
@@ -4589,6 +4628,33 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(text, reply_markup=markup)
             return
         elif what == "post":
+            # Перед отправкой сверяемся с опросом ещё раз. Экран — снимок: его
+            # отрисовали, а через минуту человек нажал «Готов», и тренер шлёт
+            # состав без него, ничего не подозревая. Ровно так 11.08.2026
+            # Морозов проголосовал в ту же минуту, когда уходил состав.
+            missing = await asyncio.to_thread(_ready_but_out, source, game_id)
+            if missing:
+                await query.edit_message_text(
+                    f"⚠️ Отметились «Готов», но в составе их нет ({len(missing)}):\n"
+                    + "\n".join(f"• {m['title']}" for m in missing)
+                    + "\n\nДобавить их или отправить как есть?",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Добавить и отправить",
+                                              callback_data=f"rost:postall:{source}:{game_id}")],
+                        [InlineKeyboardButton("📣 Отправить как есть",
+                                              callback_data=f"rost:post2:{source}:{game_id}")],
+                        [InlineKeyboardButton("⬅️ К составу",
+                                              callback_data=f"rost:open:{source}:{game_id}")]]))
+                return
+            await _post_roster(query, source, game_id, user)
+            return
+        elif what == "post2":
+            await _post_roster(query, source, game_id, user)
+            return
+        elif what == "postall":
+            for m in await asyncio.to_thread(_ready_but_out, source, game_id):
+                await asyncio.to_thread(game_roster.add, source, game_id,
+                                        m["row"], str(user.id))
             await _post_roster(query, source, game_id, user)
             return
         elif what == "edit":
@@ -4635,6 +4701,17 @@ def _drop_pending(user_id: int) -> None:
             _roster_pending.pop(user_id, None)
 
 
+def _ready_but_out(source: str, game_id: str) -> List[Dict[str, Any]]:
+    """Кто отметился «Готов», но в составе его нет.
+
+    Только опознанные: кого нет в листе «Игроки», добавить в состав всё равно
+    некуда — их тренер видит отдельной строкой на экране состава."""
+    import game_roster
+    picked = {p["row"] for p in game_roster.roster(source, game_id)}
+    return [v for v in game_roster.voters(str(game_id))
+            if v["linked"] and v["row"] not in picked]
+
+
 async def _post_roster(query, source: str, game_id: str, user) -> None:
     """Отправка состава в общий чат — единственное тренерское сообщение,
     которое туда уходит, и только по кнопке."""
@@ -4662,7 +4739,7 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
             log.warning(f"Состав не ушёл в чат {chat_id}: {e}")
     who = f"@{user.username}" if getattr(user, "username", "") else str(user.id)
     if posts:
-        await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts, who)
+        await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts)
     # В журнал — с именем: это единственное сообщение бота, которое видит вся
     # команда, и на вопрос «бот сам или человек?» должны отвечать данные.
     log.info(f"Состав {source}:{game_id} отправлен в чат ({len(people)} чел.) "
