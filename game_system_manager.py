@@ -1754,8 +1754,16 @@ class GameSystemManager:
         return reached
 
     def _is_correct_time_for_polls(self) -> bool:
-        """Опросы создаём начиная с настроенного времени (GAME_POLLS)."""
-        return self._notify_time_reached(AUTOMATION_KEY_GAME_POLLS)
+        """Опрос создаём СРАЗУ, как нашли игру, — часа не ждём.
+
+        Раньше опрос придерживали до времени из «Конфига» (9:00), как анонс.
+        Для анонса это верно: он про сегодняшнюю игру, и ночью его слать
+        некуда. А опрос — про игру, до которой ещё дни: чем раньше он висит,
+        тем больше людей успеет ответить, и тем раньше тренер видит состав.
+        Придерживать его — терять время на ровном месте.
+
+        Анонсы по-прежнему ждут своего часа (_is_correct_time_for_announcements)."""
+        return True
 
     def _is_correct_time_for_announcements(self) -> bool:
         """Анонсы шлём начиная с настроенного времени (GAME_ANNOUNCEMENTS)."""

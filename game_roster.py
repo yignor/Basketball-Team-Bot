@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 # За сколько дней до игры просим тренера собрать состав.
 COLLECT_BEFORE_DAYS = 3
 
+# Цикл оплаты игры (решение пользователя 11.08.2026). Тренера предупреждаем
+# раньше игрока — чтобы он успел поправить состав и суммы ДО того, как бот
+# начнёт требовать деньги с людей. Дальше пара «сначала тренеру, через день
+# игроку» повторяется с растущим шагом: чем дольше долг висит, тем реже
+# дёргаем, иначе напоминание превращается в фон и его перестают читать.
+#
+# Отрицательное — до игры, положительное — после. Ноль был бы днём игры, но
+# в день игры про деньги не пишем: людям не до того.
+GAME_PAY_COACH_DAYS = (-2, 2, 5)      # тренеру: список, кому уйдёт, и долги
+GAME_PAY_PLAYER_DAYS = (-1, 3, 8)     # игроку: сумма к оплате
+
 # С какой игры действует цикл оплаты игр. Всё, что раньше, — до появления
 # порядка: команда о нём не знала, состав в чат не объявлялся, и требовать
 # деньги задним числом нельзя. 03.08.2026 из-за этого семи игрокам ушло
@@ -479,15 +490,25 @@ def _game_start(game: Dict[str, Any]) -> Optional[datetime]:
 def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any], str]]:
     """[(ключ, игра, вид)] — что должно сработать в этот момент по Москве.
 
-    Виды: collect (собрать состав за 3 дня), coach_day (в день игры утром),
-    coach_next и player_next (на следующий день). Ключ уникален на игру и
-    вид — по нему bot_daemon помнит, что уже отправлял."""
+    Виды:
+      collect        — за 3 дня: тренеру собрать состав;
+      coach_pay      — за 2 дня, +2 и +5 дней: тренеру, кому уйдёт и кто должен;
+      player_before  — ровно за сутки до начала: должникам, сумма к оплате;
+      player_pay     — +3 и +8 дней: должникам повторно.
+
+    Тренер узнаёт раньше игрока на каждом шаге — он должен успеть поправить
+    состав и суммы до того, как бот начнёт требовать деньги с людей.
+
+    Ключ уникален на игру и вид (с номером шага), по нему bot_daemon помнит,
+    что уже отправлял."""
     from datetime_utils import get_moscow_time
     now = now or get_moscow_time()
     today = now.date()
     out: List[Tuple[str, Dict[str, Any], str]] = []
+    hour = sheets_cache.get_int_setting("game_pay_hour", 9)
+    after = max(GAME_PAY_COACH_DAYS + GAME_PAY_PLAYER_DAYS)
 
-    for game in games(from_day=today - timedelta(days=2),
+    for game in games(from_day=today - timedelta(days=after),
                       until_day=today + timedelta(days=COLLECT_BEFORE_DAYS)):
         ref = f"{game['source']}:{game['game_id']}"
         left = (game["date"] - today).days
@@ -507,20 +528,22 @@ def due_events(now: Optional[datetime] = None) -> List[Tuple[str, Dict[str, Any]
             continue
         if not is_posted(game["source"], game["game_id"]):
             continue
-        morning = sheets_cache.get_int_setting("game_pay_hour", 9)
-        evening = sheets_cache.get_int_setting("game_pay_evening_hour", 19)
+
+        # Сколько дней прошло с игры: отрицательное — она ещё впереди.
+        past = -left
+        for step in GAME_PAY_COACH_DAYS:
+            if past == step and now.hour >= hour:
+                out.append((f"game:{ref}:coach_pay:{step}", game, "coach_pay"))
+
         # Накануне — напоминание СОСТАВУ: деньги обычно везут с собой, и
         # узнавать о долге уже в зале поздно. Отсчёт РОВНО от начала игры, а не
         # в условный час: игра в 18:30 — напоминание в 18:30 накануне.
         start = _game_start(game)
         if start and timedelta(hours=23, minutes=45) <= (start - now) <= timedelta(hours=24, minutes=30):
             out.append((f"game:{ref}:player_before", game, "player_before"))
-        if left == 0 and now.hour >= morning:
-            out.append((f"game:{ref}:coach_day", game, "coach_day"))
-        elif left == -1 and now.hour >= morning:
-            out.append((f"game:{ref}:coach_next", game, "coach_next"))
-            if now.hour >= evening:
-                out.append((f"game:{ref}:player_next", game, "player_next"))
+        for step in GAME_PAY_PLAYER_DAYS:
+            if step > 0 and past == step and now.hour >= hour:
+                out.append((f"game:{ref}:player_pay:{step}", game, "player_pay"))
     return out
 
 

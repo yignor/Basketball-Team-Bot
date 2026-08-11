@@ -5846,31 +5846,41 @@ async def _pay_schedule(app: Application) -> None:
         if await asyncio.to_thread(training_dues.event_done, key):
             continue
         try:
-            if kind in ("coach_end", "coach_warn"):
-                when = "end" if kind == "coach_end" else "warn"
-                text = await asyncio.to_thread(training_dues.coach_report, period, when)
+            if kind == "coach_plan":
+                text = await asyncio.to_thread(training_dues.plan_text, period)
+                sent = await _tell_coaches(app, text)
+                await asyncio.to_thread(training_dues.mark_event, key,
+                                        f"тренерам: {sent}")
+
+            elif kind == "player_ask":
+                stat = await _ask_next_month(app, period)
+                await _tell_coaches(app, await asyncio.to_thread(
+                    training_dues.delivery_report, period, stat["sent"],
+                    stat["failed"], stat["unknown"]))
+                await asyncio.to_thread(training_dues.mark_event, key,
+                                        f"спросили {len(stat['sent'])}")
+
+            elif kind in ("coach_end", "coach_debt"):
+                text = await asyncio.to_thread(training_dues.coach_report, period, "end")
                 markup = InlineKeyboardMarkup([[InlineKeyboardButton(
                     "🏋️ Отметить оплату", callback_data=f"coach:train:{period}")]])
                 sent = await _tell_coaches(app, text, markup)
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"тренерам: {sent}")
-                log.info(f"Взносы {period}: {kind} ушло тренерам ({sent})")
+
             else:
-                # «Заранее» шлём ВСЕМ активным, а не должникам: за следующий
-                # месяц ещё никто не должен, и списка должников там просто нет.
-                stat = await _remind_players(app, period,
-                                             ahead=(kind == "player_ahead"))
-                report = await asyncio.to_thread(
-                    training_dues.delivery_report, period, stat["sent"],
-                    stat["failed"], stat["unknown"])
-                await _tell_coaches(app, report)
+                # player_last и player_debt — должникам за текущий месяц.
+                stat = await _remind_players(app, period)
+                if stat["sent"] or stat["failed"] or stat["unknown"]:
+                    report = await asyncio.to_thread(
+                        training_dues.delivery_report, period, stat["sent"],
+                        stat["failed"], stat["unknown"])
+                    await _tell_coaches(app, report)
                 await asyncio.to_thread(
                     training_dues.mark_event, key,
                     f"дошло {len(stat['sent'])}, не дошло "
                     f"{len(stat['failed']) + len(stat['unknown'])}")
-                log.info(f"Взносы {period}: напоминание игрокам — дошло "
-                         f"{len(stat['sent'])}, не дошло "
-                         f"{len(stat['failed']) + len(stat['unknown'])}")
+                log.info(f"Взносы {period} ({kind}): дошло {len(stat['sent'])}")
         except Exception as e:
             log.error(f"Напоминание об оплате ({key}) не ушло: {e}")
 
@@ -5895,45 +5905,45 @@ async def _game_schedule(app: Application) -> None:
                          f"собери состав.\n\n{text}", markup)
                 await asyncio.to_thread(training_dues.mark_event, key, f"тренерам: {sent}")
                 log.info(f"Состав на {source}:{gid} запрошен у тренеров ({sent})")
-            elif kind in ("coach_day", "coach_next"):
+
+            elif kind == "coach_pay":
+                # Тренеру — ДО того, как бот напишет людям: он должен успеть
+                # поправить состав и суммы. За два дня это ещё предупреждение
+                # («вот кому уйдёт»), после игры — уже список должников.
                 rows = await asyncio.to_thread(game_roster.debtors, source, gid)
                 if not rows:
                     await asyncio.to_thread(training_dues.mark_event, key, "должников нет")
                     continue
+                step = int(key.rsplit(":", 1)[-1])
+                head = (f"📋 Через {abs(step)} дня игра {game_roster.game_label(game)}.\n"
+                        f"Вот кому уйдёт напоминание об оплате — проверь состав "
+                        f"и суммы." if step < 0 else
+                        f"💸 Долги за игру {game_roster.game_label(game)} "
+                        f"({step}-й день).")
                 text, markup = await asyncio.to_thread(_game_debt_screen, source, gid)
-                sent = await _tell_coaches(app, text, markup)
+                sent = await _tell_coaches(app, f"{head}\n\n{text}", markup)
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"должников {len(rows)}, тренерам {sent}")
-                log.info(f"Долги за игру {source}:{gid}: {len(rows)}, тренерам {sent}")
-            elif kind == "player_before":
-                stat = await _remind_game_debtors(app, game, ahead=True)
-                # Отчёт тренеру — только если было о чём. Долгов нет, никому не
-                # писали — сообщать не о чем: «напомнил 0 игрокам» это шум,
-                # который приучает не читать сообщения бота.
+                log.info(f"Оплата игры {source}:{gid}, шаг {step}: должников "
+                         f"{len(rows)}, тренерам {sent}")
+
+            elif kind in ("player_before", "player_pay"):
+                ahead = kind == "player_before"
+                stat = await _remind_game_debtors(app, game, ahead=ahead)
                 if _reminder_worth_telling(stat):
+                    when = ("Завтра игра" if ahead else
+                            f"Игра {game_roster.game_label(game)} прошла")
                     await _tell_coaches(
-                        app, f"💰 Завтра игра {game_roster.game_label(game)} — "
-                             f"напомнил про оплату {len(stat['sent'])} игрокам."
+                        app, f"💰 {when} — напомнил про оплату "
+                             f"{len(stat['sent'])} игрокам."
                              + (f"\nНе дошло до {len(stat['failed']) + len(stat['unknown'])}."
                                 if stat["failed"] or stat["unknown"] else ""))
-                await asyncio.to_thread(training_dues.mark_event, key,
-                                        f"дошло {len(stat['sent'])}")
-
-            elif kind == "player_next":
-                stat = await _remind_game_debtors(app, game)
-                if _reminder_worth_telling(stat):
-                    report = await asyncio.to_thread(
-                        training_dues.delivery_report,
-                        game["date"].strftime("%Y-%m"), stat["sent"], stat["failed"],
-                        stat["unknown"])
-                    await _tell_coaches(
-                        app, f"💰 Напомнил про оплату игры {game_roster.game_label(game)}.\n\n"
-                             + report.split("\n", 2)[-1])
                 else:
                     log.info(f"Оплата игры {game_roster.game_label(game)}: "
                              "должников нет, тренера не беспокою")
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"дошло {len(stat['sent'])}")
+
         except Exception as e:
             log.error(f"Событие по игре ({key}) не отработало: {e}")
 
@@ -6007,6 +6017,97 @@ async def _remind_players(app: Application, period: str,
             log.info(f"Напоминание {row['title']} не доставлено: {e}")
             stat["failed"].append(row["title"])
     return stat
+
+
+async def _ask_next_month(app: Application, period: str) -> Dict[str, List[str]]:
+    """25-го: «будешь заниматься в следующем месяце?» — двумя кнопками.
+
+    Вопрос, а не требование: за зал платят вперёд, и тренеру надо знать, на
+    сколько человек его брать. Ответ «нет» снимает отметку активности — бот
+    перестаёт считать взнос и требовать долг, пока тренер не вернёт её сам."""
+    import training_dues
+    stat: Dict[str, List[str]] = {"sent": [], "failed": [], "unknown": []}
+    people = await asyncio.to_thread(training_dues.status, period)
+    # Долг за ТЕКУЩИЙ месяц дописываем в тот же вопрос, вторым сообщением не шлём.
+    cur = training_dues.period_of(date.today())
+    debts = {r["row"]: int(r["debt"] or 0)
+             for r in await asyncio.to_thread(training_dues.debtors, cur)}
+    for row in people:
+        uid = await asyncio.to_thread(training_dues.chat_id_of, row["row"])
+        if not uid:
+            stat["unknown"].append(row["title"])
+            continue
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Буду заниматься",
+                                  callback_data=f"nm:yes:{period}:{row['row']}")],
+            [InlineKeyboardButton("🙅 Не буду",
+                                  callback_data=f"nm:no:{period}:{row['row']}")]])
+        try:
+            await app.bot.send_message(
+                chat_id=int(uid),
+                text=training_dues.ask_text(period, row, debts.get(row["row"], 0)),
+                reply_markup=markup)
+            stat["sent"].append(row["title"])
+        except Exception as e:
+            log.info(f"Вопрос про {period} не дошёл до {row['title']}: {e}")
+            stat["failed"].append(row["title"])
+    return stat
+
+
+async def handle_next_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ответ игрока на «будешь заниматься в следующем месяце».
+
+    «Не буду» — снимаем отметку активности: бот перестаёт ждать с человека
+    взнос и требовать долг за тренировки. Вернуть активность может только
+    тренер, руками в листе «Игроки»: это его решение, а не бота."""
+    import coach_payments
+    import training_dues
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not user:
+        return
+    parts = (query.data or "").split(":")
+    if len(parts) < 4:
+        await query.answer()
+        return
+    answer, period, row = parts[1], parts[2], int(parts[3])
+    person = await asyncio.to_thread(coach_payments.player_by_row, row)
+    title = (person or {}).get("title", "")
+    await query.answer()
+    if answer == "yes":
+        await query.edit_message_text(
+            f"✅ Записал: занимаешься в {training_dues.month_title(period)}.\n\n"
+            f"Взнос — {(person or {}).get('pay_season', 0)} ₽, занеси тренеру "
+            "до начала месяца.")
+        await _tell_coaches(context.application,
+                            f"✅ {title} подтвердил тренировки в "
+                            f"{training_dues.month_title(period)}.")
+        return
+    ok = await asyncio.to_thread(_drop_active, row)
+    await query.edit_message_text(
+        f"Жаль. Снял тебя с {training_dues.month_title(period)} — про взносы "
+        "больше писать не буду.\n\nПередумаешь — скажи тренеру, он вернёт.")
+    await _tell_coaches(
+        context.application,
+        f"🙅 {title} отказался тренироваться в "
+        f"{training_dues.month_title(period)}."
+        + ("\n\nОтметку активности снял — взносы с него больше не жду."
+           if ok else "\n\n⚠️ Отметку активности снять не вышло, сними руками "
+                      "в листе «Игроки»."))
+
+
+def _drop_active(row: int) -> bool:
+    """Снимает отметку активности в листе «Игроки»."""
+    import coach_payments
+    try:
+        import report_common
+        book = report_common.init_sheets()
+    except Exception as exc:
+        log.warning(f"Снятие активности: таблица недоступна: {exc}")
+        return False
+    person = coach_payments.player_by_row(int(row)) or {}
+    return sheets_cache.write_player_field(book, int(row), "active_mark", "",
+                                           person.get("title", ""))
 
 
 async def _send_starting_lineups(app: Application) -> None:
@@ -6597,6 +6698,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_gamelink_callback, pattern=r"^gl:"))
+    app.add_handler(CallbackQueryHandler(handle_next_month, pattern=r"^nm:"))
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))

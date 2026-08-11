@@ -40,7 +40,8 @@ COACH_WARN_BEFORE_MID = 3   # тренеру перед повтором
 COACH_REPORT_BEFORE_END = 2  # тренеру перед концом месяца
 
 SCHEDULE = {
-    "dues_ahead_day": ("За следующий месяц, число", AHEAD_DAY, 1, 28),
+    "dues_plan_day": ("Тренеру: кому уйдёт вопрос, число", 20, 1, 28),
+    "dues_ahead_day": ("Игрокам: вопрос про следующий месяц, число", AHEAD_DAY, 1, 28),
     "dues_first_day": ("За начавшийся месяц, число", FIRST_DAY, 1, 28),
     "dues_mid_day": ("Повтор должникам, число", MID_DAY, 1, 28),
     "dues_coach_warn": ("Тренеру перед повтором, за сколько дней",
@@ -200,6 +201,55 @@ def player_reminder(row: Dict[str, Any], ahead: bool = False) -> str:
             f"Если уже переводил — просто скажи тренеру, отмечу.")
 
 
+def plan_text(period: str) -> str:
+    """Тренеру 20-го: кому уйдёт вопрос про следующий месяц.
+
+    Смысл предупреждения — дать день на правку. Ушёл человек из команды или
+    вернулся, поменялась сумма — поправить надо ДО того, как бот спросит
+    двадцать человек, будут ли они заниматься."""
+    rows = status(period)
+    title = month_title(period)
+    if not rows:
+        return (f"🗓 {title}: ждать взносы не с кого — в листе «Игроки» ни у "
+                "кого не стоит отметка активности.")
+    total = sum(int(r["need"] or 0) for r in rows)
+    days = day("dues_ahead_day") - day("dues_plan_day")
+    lines = [f"🗓 {title}: через "
+             f"{coach_payments.plural(days, 'день', 'дня', 'дней')} спрошу у "
+             f"{len(rows)} человек, будут ли они заниматься.", "",
+             "Вот у кого:"]
+    for r in rows:
+        lines.append(f"• {r['title']} — {r['need']} ₽")
+    lines += ["", f"Всего ожидаем: {total} ₽.", "",
+              "Если кто-то уже не в команде — сними отметку активности в листе "
+              "«Игроки», и вопрос ему не уйдёт."]
+    return "\n".join(lines)
+
+
+def ask_text(period: str, row: Dict[str, Any], debt: int = 0) -> str:
+    """Игроку 25-го: будешь заниматься в следующем месяце?
+
+    Долг за текущий месяц дописываем сюда же, а не шлём вторым сообщением:
+    25-е — ещё и день долгового напоминания, и два письма подряд человек
+    читает как спам."""
+    title = month_title(period)
+    lines = [f"🏋️ {title}", "",
+             f"Будешь заниматься? Взнос за месяц — {row['need']} ₽."]
+    if debt:
+        lines += ["", f"И ещё: за {month_title(period_of(date.today()))} "
+                      f"за тобой {debt} ₽."]
+    lines += ["", "Ответь кнопкой — тренеру нужно понимать, на сколько человек "
+              "брать зал."]
+    return "\n".join(lines)
+
+
+def last_call_text(row: Dict[str, Any], period: str) -> str:
+    """Должнику в последний день месяца."""
+    return (f"🏋️ {month_title(period)} заканчивается, а взнос "
+            f"{row['debt']} ₽ ещё не пришёл.\n\n"
+            "Занеси, пожалуйста, тренеру — за зал платят вперёд.")
+
+
 def delivery_report(period: str, sent: List[str], failed: List[str],
                     unknown: List[str]) -> str:
     """Отбивка тренеру: кому дошло, кому нет и почему."""
@@ -221,38 +271,67 @@ def delivery_report(period: str, sent: List[str], failed: List[str],
 
 # ─────────────────────── Что пора сделать сегодня ──────────────────────────
 
+# Цикл взносов (решение пользователя 11.08.2026). Тренер везде узнаёт раньше
+# игрока — он должен успеть поправить суммы и активность до того, как бот
+# начнёт требовать деньги.
+PLAN_DAY = 20        # тренеру: кому уйдёт вопрос про следующий месяц
+ASK_DAY = 25         # игрокам: «будешь заниматься?» двумя кнопками
+# Пока долг висит: тренеру, через день игроку, и так по кругу с шагом в пять
+# дней. Чаще — превращается в фон, который перестают читать.
+DEBT_COACH_DAYS = (4, 9, 14, 19, 24, 29)
+DEBT_PLAYER_DAYS = (5, 10, 15, 20, 25, 30)
+
+
 def due_events(today: Optional[date] = None) -> List[Tuple[str, str, str]]:
     """Что должно сработать сегодня: [(ключ события, период, вид)].
 
-    Вид: coach_end | player_first | coach_warn | player_mid. Ключ уникален на
-    (вид, месяц) — по нему bot_daemon помнит, что уже отправил."""
+    Виды:
+      coach_plan   — 20-го: тренеру список тех, кому уйдёт вопрос;
+      player_ask   — 25-го: игрокам вопрос про следующий месяц (две кнопки);
+      coach_end    — предпоследний день месяца: тренеру долги за месяц;
+      player_last  — последний день месяца: должникам сумма и просьба;
+      coach_debt   — 4, 9, 14… числа: тренеру, пока долги висят;
+      player_debt  — 5, 10, 15… числа: должникам, пока долг не погашен.
+
+    Ключ уникален на (вид, месяц) — по нему bot_daemon помнит, что отправил.
+    В один день одной и той же стороне уходит не больше одного сообщения:
+    25-е — это и вопрос про следующий месяц, и день долгового напоминания,
+    а два письма подряд человек читает как спам. Долг в таком случае
+    дописывается в сам вопрос."""
     today = today or date.today()
     out: List[Tuple[str, str, str]] = []
     cur = period_of(today)
-
-    # Перед концом месяца — отчёт тренерам по текущему месяцу.
-    if counts(cur) and (month_end(cur) - today).days == day("dues_coach_end"):
-        out.append((f"train:{cur}:coach_end", cur, "coach_end"))
-
-    # Начало месяца — напоминание игрокам за начавшийся месяц.
-    if today.day == day("dues_first_day") and counts(cur):
-        out.append((f"train:{cur}:player_first", cur, "player_first"))
-
-    # Перед повтором — предупреждение тренеру.
-    if today.day == day("dues_mid_day") - day("dues_coach_warn") and counts(cur):
-        out.append((f"train:{cur}:coach_warn", cur, "coach_warn"))
-
-    # Второе напоминание должникам.
-    if today.day == day("dues_mid_day") and counts(cur):
-        out.append((f"train:{cur}:player_mid", cur, "player_mid"))
-
-    # 25-е — всем активным напоминание про СЛЕДУЮЩИЙ месяц. Это не про долг:
-    # человек ещё ничего не должен, но за зал платят вперёд, и тренеру важно
-    # собрать деньги до начала месяца, а не догонять их в середине.
     nxt = next_period(cur)
+    end = month_end(cur)
+
+    # ── про следующий месяц ──────────────────────────────────────────────
+    if today.day == day("dues_plan_day") and counts(nxt):
+        out.append((f"train:{nxt}:coach_plan", nxt, "coach_plan"))
     if today.day == day("dues_ahead_day") and counts(nxt):
-        out.append((f"train:{nxt}:player_ahead", nxt, "player_ahead"))
-    return out
+        out.append((f"train:{nxt}:player_ask", nxt, "player_ask"))
+
+    # ── долги за текущий месяц ───────────────────────────────────────────
+    if not counts(cur):
+        return out
+    if today == end - timedelta(days=1):
+        out.append((f"train:{cur}:coach_end", cur, "coach_end"))
+    if today == end:
+        out.append((f"train:{cur}:player_last", cur, "player_last"))
+    if today.day in DEBT_COACH_DAYS:
+        out.append((f"train:{cur}:coach_debt:{today.day}", cur, "coach_debt"))
+    if today.day in DEBT_PLAYER_DAYS:
+        out.append((f"train:{cur}:player_debt:{today.day}", cur, "player_debt"))
+
+    # Не больше одного сообщения в день каждой стороне.
+    seen: set = set()
+    single: List[Tuple[str, str, str]] = []
+    for key, period, kind in out:
+        side = "coach" if kind.startswith("coach") else "player"
+        if side in seen:
+            continue
+        seen.add(side)
+        single.append((key, period, kind))
+    return single
 
 
 def chat_id_of(player_row: int) -> str:
