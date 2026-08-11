@@ -2049,6 +2049,7 @@ def _clear_pending(uid: int) -> None:
     _newgame.pop(uid, None)
     _roster_focus.pop(uid, None)
     _awaiting_access.pop(uid, None)
+    _debt_draft.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -2508,7 +2509,7 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             # тем, кого в листе нет: гость на одну игру, родитель. Заводить
             # его в «Игроки» ради этого нельзя — он попадёт и в опросы, и в
             # состав, и в статистику.
-            _free_debt[user.id] = text
+            _debt_draft[user.id] = {"row": 0, "title": text, "who": text}
             _awaiting_money[user.id] = "debtwho"      # ждём другую фамилию
             await msg.reply_text(
                 f"В листе «Игроки» никого похожего на «{text}» нет.",
@@ -2521,15 +2522,27 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             raise ApplicationHandlerStop
         if len(found) == 1:
             p = found[0]
-            _awaiting_money[user.id] = f"debt:{p['row']}"
-            await msg.reply_text(
-                f"➕ Долг для {p['title']}.\n\n"
-                "Пришли сумму и за что: «500 мяч» или просто «500».\n\n"
-                "Передумал — /start.")
+            _debt_draft[user.id] = {"row": p["row"], "title": p["title"], "who": ""}
+            _awaiting_money.pop(user.id, None)
+            why, markup = _debt_why(user.id)
+            await msg.reply_text(why, reply_markup=markup)
             raise ApplicationHandlerStop
         markup = await asyncio.to_thread(_pay_players_markup, 0, text, "coach:debtwho")
         await msg.reply_text(f"Нашёл несколько по «{text}». Кому долг?",
                              reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    # Своё пояснение: за что долг. Сумму спросим следующим шагом.
+    if pending == "debtnote":
+        draft = _debt_draft.get(user.id)
+        if not draft:
+            await msg.reply_text("Начни заново.")
+            raise ApplicationHandlerStop
+        draft["note"] = text[:60]
+        _awaiting_money[user.id] = "debtsum"
+        await msg.reply_text(
+            f"➕ Долг для {draft['title']} — {draft['note']}.\n\n"
+            "Пришли сумму: «500».\n\nПередумал — /start.")
         raise ApplicationHandlerStop
 
     m = re.match(r"^\s*(\d{1,7})\s*(.*)$", text)
@@ -2556,28 +2569,22 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                              parse_mode="HTML")
         raise ApplicationHandlerStop
 
-    if pending == "debtfree":
-        name = _free_debt.pop(user.id, "")
-        if not name:
-            await msg.reply_text("Имя потерялось — начни заново.")
+    if pending == "debtsum":
+        draft = _debt_draft.pop(user.id, None)
+        if not draft:
+            await msg.reply_text("Начни заново.")
             raise ApplicationHandlerStop
-        await asyncio.to_thread(coach_payments.add_debt, 0, amount, note,
-                                str(user.id), name)
-        head = (f"Добавил долг: {name} (не из состава) — {amount} ₽"
-                + (f" ({note})" if note else "")
-                + "\n\nНапоминание такому человеку бот не пошлёт — телеграма "
-                  "его он не знает.")
-        screen, markup = await asyncio.to_thread(_debts_screen)
-        await msg.reply_text(f"{head}\n\n{screen}", reply_markup=markup,
-                             parse_mode="HTML")
-        raise ApplicationHandlerStop
-
-    if pending.startswith("debt:"):
-        row = int(pending.split(":", 1)[1])
-        await asyncio.to_thread(coach_payments.add_debt, row, amount, note, str(user.id))
-        who = await asyncio.to_thread(coach_payments.player_by_row, row)
-        head = (f"Добавил долг: {(who or {}).get('title', '')} — {amount} ₽"
-                + (f" ({note})" if note else ""))
+        # Пояснение уже выбрано шагом раньше; если тренер дописал что-то к
+        # сумме («500 за март»), это уточнение, а не замена.
+        why = " · ".join(x for x in (draft.get("note", ""), note) if x)
+        await asyncio.to_thread(coach_payments.add_debt, int(draft["row"]),
+                                amount, why, str(user.id), draft.get("who", ""))
+        head = f"Добавил долг: {draft['title']} — {amount} ₽"
+        if why:
+            head += f" ({why})"
+        if not draft["row"]:
+            head += ("\n\nЭтого человека нет в листе «Игроки» — напоминание "
+                     "ему бот не пошлёт, телеграма его он не знает.")
         screen, markup = await asyncio.to_thread(_debts_screen)
         await msg.reply_text(f"{head}\n\n{screen}", reply_markup=markup,
                              parse_mode="HTML")
@@ -3937,9 +3944,27 @@ def _sched_screen() -> Tuple[str, InlineKeyboardMarkup]:
 # Что тренер сейчас вводит: id → «долг:строка» или «сумма:строка:вид».
 _awaiting_money: Dict[int, str] = {}
 
-# Имя для долга человеку не из листа. Отдельно от callback_data: фамилия
-# кириллицей легко перебирает лимит в 64 байта, а класть её в кнопку незачем.
-_free_debt: Dict[int, str] = {}
+# Черновик добавляемого долга: {row, who, note}. Отдельно от callback_data —
+# и имя, и пояснение кириллицей легко перебирают лимит Телеграма в 64 байта.
+_debt_draft: Dict[int, Dict[str, Any]] = {}
+
+# За что долг. Два частых повода кнопкой, остальное словами: половина долгов
+# раньше оставалась без пояснения (его писали вместе с суммой и забывали), и
+# через месяц было не вспомнить, за что человек должен.
+DEBT_KINDS = {"train": "тренировка", "game": "игра"}
+
+
+def _debt_why(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Экран «за что долг». Показывается сразу после выбора человека."""
+    draft = _debt_draft.get(uid) or {}
+    who = draft.get("title", "")
+    tail = " (не из состава)" if not draft.get("row") else ""
+    return (f"➕ Долг для {who}{tail}.\n\nЗа что?",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏋️ Тренировка", callback_data="coach:debtwhy:train"),
+                 InlineKeyboardButton("🏀 Игра", callback_data="coach:debtwhy:game")],
+                [InlineKeyboardButton("✍️ Своё", callback_data="coach:debtwhy:own")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="coach:adddebt")]]))
 
 
 def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -4282,7 +4307,7 @@ def _train_screen(period: str = "") -> Tuple[str, InlineKeyboardMarkup]:
                 f"{training_dues.month_title_gen(training_dues.FIRST_PERIOD)} — "
                 "более ранние месяцы тренер считает закрытыми.")
         return text, InlineKeyboardMarkup([[InlineKeyboardButton(
-            "⬅️ Назад", callback_data="coach:main")]])
+            "⬅️ Назад", callback_data="coach:money2")]])
 
     debt = [r for r in rows if r["need"] and not r["ok"]]
     ok = [r for r in rows if r["ok"]]
@@ -4765,6 +4790,10 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     parts = (query.data or "").split(":")
     what = parts[1] if len(parts) > 1 else "main"
     back = [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]
+    # «Назад» обязано вернуть на шаг назад, а не на главную: экраны второго
+    # этажа оплат открывают из «📊 Сводки и правки», туда же и возвращаемся.
+    # Иначе человек теряет место, где был, и идёт заново через два меню.
+    back_money2 = [InlineKeyboardButton("⬅️ Назад", callback_data="coach:money2")]
 
     try:
         if what == "main":
@@ -4939,28 +4968,43 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=markup)
 
         elif what == "debtfree":
-            name = _free_debt.get(user.id, "")
+            name = (_debt_draft.get(user.id) or {}).get("who", "")
             if not name:
                 text, markup = await asyncio.to_thread(_debts_screen)
-                await query.edit_message_text(
-                    "Имя потерялось — начни заново.\n\n" + text,
-                    reply_markup=markup, parse_mode="HTML")
+                await query.edit_message_text("Имя потерялось — начни заново.\n\n" + text,
+                                              reply_markup=markup, parse_mode="HTML")
                 return
-            _awaiting_money[user.id] = "debtfree"
+            _debt_draft[user.id] = {"row": 0, "title": name, "who": name}
+            text, markup = _debt_why(user.id)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "debtwhy" and len(parts) > 2:
+            kind = parts[2]
+            draft = _debt_draft.get(user.id)
+            if not draft:
+                text, markup = await asyncio.to_thread(_debts_screen)
+                await query.edit_message_text("Начни заново.\n\n" + text,
+                                              reply_markup=markup, parse_mode="HTML")
+                return
+            if kind == "own":
+                _awaiting_money[user.id] = "debtnote"
+                await query.edit_message_text(
+                    f"➕ Долг для {draft['title']}.\n\n✍️ За что? Коротко: «мяч», "
+                    "«форма», «взнос за турнир».\n\nПередумал — /start.")
+                return
+            draft["note"] = DEBT_KINDS.get(kind, "")
+            _awaiting_money[user.id] = "debtsum"
             await query.edit_message_text(
-                f"➕ Долг для «{name}» (в листе «Игроки» такого нет).\n\n"
-                "Пришли сумму и за что: «500 мяч» или просто «500».\n\n"
-                "Передумал — /start.")
+                f"➕ Долг для {draft['title']} — {draft['note']}.\n\n"
+                "Пришли сумму: «500».\n\nПередумал — /start.")
 
         elif what == "debtwho" and len(parts) > 2:
             _clear_pending(user.id)
-            _awaiting_money[user.id] = f"debt:{parts[2]}"
-            import coach_payments
             who = await asyncio.to_thread(coach_payments.player_by_row, int(parts[2]))
-            await query.edit_message_text(
-                f"➕ Долг для {(who or {}).get('title', '')}.\n\n"
-                "Пришли сумму и за что: «500 мяч» или просто «500».\n\n"
-                "Передумал — /start.")
+            _debt_draft[user.id] = {"row": int(parts[2]),
+                                    "title": (who or {}).get("title", ""), "who": ""}
+            text, markup = _debt_why(user.id)
+            await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "sums":
             row = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
@@ -5010,11 +5054,13 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif what == "owe":
             text = await asyncio.to_thread(_pay_owe_text)
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([back]))
+            await query.edit_message_text(text,
+                                          reply_markup=InlineKeyboardMarkup([back_money2]))
 
         elif what == "last":
             text = await asyncio.to_thread(_pay_last_text)
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([back]))
+            await query.edit_message_text(text,
+                                          reply_markup=InlineKeyboardMarkup([back_money2]))
 
         elif what in ("who", "page"):
             draft = _pay_draft.get(user.id)
