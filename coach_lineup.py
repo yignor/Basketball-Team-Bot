@@ -251,11 +251,15 @@ def averages(rows: List[Dict[str, Any]],
                         pts += int(got["p"] or 0)
                         reb += int(got["r"] or 0)
                         tur += int(got["t"] or 0)
-            if games:
-                out[row] = {"games": games,
-                            "pts": round(pts / games, 1),
-                            "reb": round(reb / games, 1),
-                            "tur": round(tur / games, 1)}
+            out[row] = {"games": games,
+                        "pts": round(pts / games, 1) if games else 0,
+                        "reb": round(reb / games, 1) if games else 0,
+                        "tur": round(tur / games, 1) if games else 0}
+    # Кого нет в price_refs — того лига не знает вовсе: в заявке его нет.
+    # Отличать это от «заявлен, но не играл» важно: первое чинит тренер
+    # (дозаявить), второе не чинится ничем и пройдёт само.
+    for row in want - set(pairs):
+        out[row] = {"games": 0, "unlisted": True}
     return out
 
 
@@ -304,9 +308,16 @@ def player_card(p: Dict[str, Any], number: str = "") -> List[str]:
     head = f"{number}<b>{html.escape(p['title'])}</b>"
     role = role_title(p.get("role", ""))
     second = [role or "амплуа не задано", f"{p['trainings']} трен."]
-    lines = [head, "     " + " · ".join(second)]
     avg = p.get("avg") or {}
-    if avg:
+    # Почему нет цифр — говорим прямо. «Нет в заявке» чинит тренер (дозаявить),
+    # «не играл» не чинится ничем и пройдёт само; молчание же выглядит как
+    # поломка бота.
+    if avg.get("unlisted"):
+        second.append("нет в заявке лиги")
+    elif not avg.get("games"):
+        second.append("в этом турнире не играл")
+    lines = [head, "     " + " · ".join(second)]
+    if avg.get("games"):
         lines.append(f"     {avg['pts']:g} очк · {avg['reb']:g} подб · "
                      f"{avg['tur']:g} пот   "
                      f"({coach_payments.plural(avg['games'], 'игра', 'игры', 'игр')})")
