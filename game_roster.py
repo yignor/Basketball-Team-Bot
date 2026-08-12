@@ -310,6 +310,17 @@ def repair_dates() -> int:
             fixed += 1
         if fixed:
             conn.commit()
+        # Дата игры известна всегда: её либо вводит тренер, либо приносит
+        # расписание лиги. Если она всё-таки пустая и восстановить неоткуда —
+        # это не мелочь, а сломанный путь заведения игры, и он должен быть
+        # виден. Подсчёт долгов такую игру не потеряет (возьмёт день
+        # публикации состава), но чинить надо причину.
+        left = [f"{r['source']}:{r['game_id']}" for r in conn.execute(
+            "SELECT source, game_id FROM game_roster_state "
+            "WHERE COALESCE(game_date, '') = ''")]
+    if left:
+        logger.warning("Игры без даты, восстановить неоткуда: %s",
+                       ", ".join(left[:5]))
     return fixed
 
 

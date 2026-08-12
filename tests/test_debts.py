@@ -165,6 +165,36 @@ def test_repair_from_service_records() -> None:
     check(game_roster.repair_dates() == 0, "второй раз чинить нечего")
 
 
+def test_roster_change_moves_debt() -> None:
+    """Состав поменялся — долги обязаны поехать за ним.
+
+    Требование тренера: состав меняется до последнего, и человек, которого
+    убрали, не должен остаться должен за игру, где его не было. Считаем долги
+    по живому составу, а не по снимку на момент публикации, — поэтому проверка
+    именно на изменение уже объявленного состава."""
+    print("\n=== состав изменился — долги пересчитались ===")
+    day = (date.today() + timedelta(days=2)).isoformat()
+    for i, name in enumerate(["Шестой", "Седьмой", "Восьмой"], start=301):
+        seed_player(i, name)
+    post_roster("infobasket", "g-change", [301, 302], day)
+    check(owed_by(301) == 1 and owed_by(302) == 1 and owed_by(303) == 0,
+          f"исходно двое: {owed_by(301)}, {owed_by(302)}, {owed_by(303)}")
+
+    game_roster.add("infobasket", "g-change", 303, by="test")
+    check(owed_by(303) == 1, f"дописали третьего — он должен: {owed_by(303)}")
+
+    game_roster.remove("infobasket", "g-change", 301)
+    check(owed_by(301) == 0, f"убрали первого — долг снят: {owed_by(301)}")
+    check(owed_by(302) == 1 and owed_by(303) == 1, "остальных не задело")
+
+    # Снимок публикации на подсчёт влиять не должен — он про другое.
+    with sheets_cache.get_connection() as conn:
+        snap = conn.execute("SELECT posted_rows FROM game_roster_state WHERE "
+                            "game_id = 'g-change'").fetchone()["posted_rows"]
+    check("301" not in str(snap) or owed_by(301) == 0,
+          "долг считается по живому составу, а не по снимку")
+
+
 def test_paid_closes_debt() -> None:
     """Оплата закрывает игру — иначе долг висел бы вечно."""
     print("\n=== оплата гасит долг ===")
@@ -184,6 +214,7 @@ def main() -> int:
     test_no_date_still_counts()
     test_ensure_state_fills_date()
     test_repair_from_service_records()
+    test_roster_change_moves_debt()
     test_paid_closes_debt()
 
     print("\n" + "=" * 60)
