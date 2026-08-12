@@ -208,6 +208,61 @@ def test_paid_closes_debt() -> None:
     check(owed_by(102) == 1, "у соседа долг на месте")
 
 
+def test_mark_paid_is_idempotent() -> None:
+    """За одну игру нельзя заплатить дважды, сколько ни жми.
+
+    Жалоба 12.08.2026: составы объявлены, а долгов нет. Оказалось — пятеро
+    числились оплатившими игру 09.08 по два раза, и лишние оплаты съели их
+    долги за будущие игры. Отпечаток собирался из суммы и текущей МИНУТЫ, то
+    есть защищал только от двойного нажатия подряд; нажатие через минуту
+    заводило второй платёж."""
+    print("\n=== повторная отметка оплаты ===")
+    day = (date.today() + timedelta(days=6)).isoformat()
+    seed_player(401, "Девятый")
+    seed_player(402, "Десятый")
+    post_roster("infobasket", "g-twice", [401, 402], day)
+    post_roster("infobasket", "g-other", [401], day)
+
+    game_roster.mark_paid(401, "infobasket", "g-twice", by="test")
+    check(owed_by(401) == 1, f"после первой отметки осталась одна игра: {owed_by(401)}")
+
+    again = game_roster.mark_paid(401, "infobasket", "g-twice", by="test")
+    check(again.get("duplicate") is True, "повтор распознан как повтор")
+    check(owed_by(401) == 1, f"долг не съеден повтором: {owed_by(401)}")
+
+    # Другая игра тому же человеку — это уже не повтор.
+    game_roster.mark_paid(401, "infobasket", "g-other", by="test")
+    check(owed_by(401) == 0, f"вторая игра оплачена отдельно: {owed_by(401)}")
+    check(owed_by(402) == 1, "соседа не задело")
+
+
+def test_duplicate_marks_found() -> None:
+    """Старые дубли находятся — иначе их не вычистить."""
+    print("\n=== поиск старых дублей ===")
+    check(game_roster.duplicate_marks() == [], "на чистых данных дублей нет")
+
+    import coach_payments
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, player_row, game_ref FROM payments WHERE kind = ? "
+            "AND COALESCE(game_ref,'') != '' LIMIT 1",
+            (coach_payments.KIND_GAME,)).fetchone()
+        conn.execute(
+            "INSERT INTO payments (player_row, amount, kind, games, paid_at, "
+            "bank, note, added_by, created_at, fingerprint, pushed, period, "
+            "game_ref, by_coach) VALUES (?, 900, ?, 1, ?, '', 'дубль', 'test', "
+            "?, ?, 0, '', ?, 1)",
+            (row["player_row"], coach_payments.KIND_GAME,
+             date.today().isoformat(), datetime.now().isoformat(timespec="seconds"),
+             "fp-dup-test", row["game_ref"]))
+        conn.commit()
+
+    dups = game_roster.duplicate_marks()
+    check(len(dups) == 1 and dups[0]["game_ref"] == row["game_ref"],
+          f"дубль найден: {[(d['player_row'], d['game_ref']) for d in dups]}")
+    check(dups[0]["id"] != row["id"], "самая ранняя запись остаётся, лишняя видна")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     test_posted_roster_counts()
@@ -216,6 +271,8 @@ def main() -> int:
     test_repair_from_service_records()
     test_roster_change_moves_debt()
     test_paid_closes_debt()
+    test_mark_paid_is_idempotent()
+    test_duplicate_marks_found()
 
     print("\n" + "=" * 60)
     if bad:

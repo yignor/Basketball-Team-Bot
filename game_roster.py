@@ -504,13 +504,43 @@ def game_debts() -> List[Dict[str, Any]]:
 
 
 def mark_paid(player_row: int, source: str, game_id: str, by: str = "") -> Dict[str, Any]:
-    """Тренер отметил оплату игры без СМС."""
+    """Тренер отметил оплату игры без СМС.
+
+    Отпечаток — по человеку и игре, без времени. За одну игру человек платит
+    один раз, и отметить это дважды нельзя ни при каких обстоятельствах.
+
+    Раньше отпечаток собирался из суммы и текущей МИНУТЫ, поэтому защищал
+    только от двойного нажатия подряд. Нажатие через минуту заводило второй
+    платёж за ту же игру — так пятеро оказались «оплатившими» игру 09.08
+    дважды, а их долги за 15.08 и 16.08 бесследно исчезли (12.08.2026)."""
     player = coach_payments.player_by_row(player_row)
     price = coach_payments.game_price(player)
+    ref = f"{source}:{game_id}"
     return coach_payments.record(
         player_row, price, coach_payments.KIND_GAME, 1,
         paid_at=date.today().isoformat(), bank="", note="отметил тренер",
-        added_by=str(by), fp="", game_ref=f"{source}:{game_id}", by_coach=True)
+        added_by=str(by),
+        fp=coach_payments.fingerprint(f"gamemark|{player_row}|{ref}"),
+        game_ref=ref, by_coach=True)
+
+
+def duplicate_marks() -> List[Dict[str, Any]]:
+    """Повторные отметки «оплатил» за одну и ту же игру.
+
+    Возвращает лишние записи (самая ранняя по каждой паре человек+игра
+    остаётся). Нужно для разбора: за игру платят один раз, и всё сверх этого —
+    след старой дыры в защите от повторов."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT id, player_row, amount, paid_at, game_ref, note
+               FROM payments
+               WHERE kind = ? AND COALESCE(game_ref, '') != ''
+                 AND id NOT IN (SELECT MIN(id) FROM payments
+                                WHERE kind = ? AND COALESCE(game_ref, '') != ''
+                                GROUP BY player_row, game_ref)
+               ORDER BY player_row, id""",
+            (coach_payments.KIND_GAME, coach_payments.KIND_GAME))]
 
 
 def coach_debt_text(game: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
