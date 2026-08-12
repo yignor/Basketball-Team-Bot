@@ -2091,6 +2091,7 @@ def _clear_pending(uid: int) -> None:
     _roster_focus.pop(uid, None)
     _awaiting_access.pop(uid, None)
     _debt_draft.pop(uid, None)
+    _awaiting_priv.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -3915,6 +3916,10 @@ def _coach_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Игры", callback_data="coach:play")],
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
+        # Частные занятия к команде отношения не имеют, но живут там же, где
+        # тренер: заводить ради них отдельную кнопку под чатом — засорять
+        # клавиатуру всем ради одного человека.
+        [InlineKeyboardButton("🎾 Частные занятия", callback_data="pl:main")],
     ])
 
 
@@ -5290,6 +5295,541 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         log.error(f"Раздел тренера ({what}): {e}")
         await query.edit_message_text(f"⚠️ Не получилось: {e}",
                                       reply_markup=InlineKeyboardMarkup([back]))
+
+
+# ─────────────────────── Частные занятия тренера ───────────────────────────
+#
+# Отдельное дело тренера: свои люди, свои занятия, свои деньги. К команде
+# отношения не имеет и не должно иметь — здесь не появляются игроки из листа,
+# отсюда ничего не уходит в общий чат, и напоминаний эти люди не получают
+# (телеграма их бот не знает). Всё, что происходит внутри, принадлежит тому,
+# кто это завёл: у каждого тренера свой список, соседу он не виден.
+#
+# Хранение и правила — в private_lessons.py, здесь только экраны.
+
+# Что тренер сейчас вводит в разделе частных занятий: id → «add», «new»,
+# «pay:<id>», «price», «sprice:<id>», «pprice:<id>».
+_awaiting_priv: Dict[int, str] = {}
+
+PRIV_INTRO = ("🎾 Частные занятия\n\n"
+              "Отдельно от команды: свой список людей, свои цены, свои деньги. "
+              "В общий чат отсюда ничего не уходит.")
+
+PRIV_ASK_WHO = ("👤 Кого добавить?\n\n"
+                "Напиши коротко: «Иванов И.» или «Петя».\n\n"
+                "Полные имена я намеренно укорачиваю до фамилии с инициалом — "
+                "эти люди нигде больше в боте не заведены, и хранить их "
+                "паспортные данные незачем.\n\n"
+                "Передумал — /start.")
+
+PRIV_ASK_WHEN = ("📅 Когда занятие?\n\n"
+                 "Одной строкой, как удобно: «12.08 19:00 Зал на Ленина», "
+                 "«завтра 19:00», «сегодня».\n\n"
+                 "Передумал — /start.")
+
+PRIV_PER_PAGE = 8
+
+# Сколько знаков имени влезает в подпись кнопки рядом с ценой и галочкой.
+PRIV_NAME = 18
+
+
+def _rub(amount: int) -> str:
+    """1500 → «1 500 ₽» — тем же правилом, что и внутри раздела."""
+    import private_lessons
+    return private_lessons.rub(amount)
+
+
+def _priv_main(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    folk = pl.people(uid)
+    debt = sum(p["balance"] for p in folk if p["balance"] > 0)
+    now = pl.month(uid)
+    price = pl.general_price(uid)
+
+    lines = [PRIV_INTRO, ""]
+    lines.append(f"Занятие стоит {_rub(price)}." if price
+                 else "⚠️ Цена занятия не задана — начислять пока нечего.")
+    lines.append(f"Людей: {len(folk)}"
+                 + (f" · должны {_rub(debt)}" if debt else ""))
+    if now["sessions"] or now["paid"]:
+        lines += ["", f"{pl.month_title(now['ym']).capitalize()}: "
+                      f"занятий {now['sessions']}, получено {_rub(now['paid'])}"]
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Занятия", callback_data="pl:days")],
+        [InlineKeyboardButton("👥 Люди", callback_data="pl:who")],
+        [InlineKeyboardButton("💰 Деньги", callback_data="pl:cash")],
+        [InlineKeyboardButton("💵 Цена занятия", callback_data="pl:price")],
+        [InlineKeyboardButton("⬅️ В раздел тренера", callback_data="coach:main")],
+    ])
+
+
+def _priv_days(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    got = pl.sessions(uid, limit=200)
+    total = len(got)
+    chunk = got[page * PRIV_PER_PAGE:(page + 1) * PRIV_PER_PAGE]
+
+    rows = []
+    for s in chunk:
+        mark = "✅" if s["status"] == pl.DONE else "🕒"
+        when = pl.human_date(s["day"]) + (f" {s['at_time']}" if s["at_time"] else "")
+        rows.append([InlineKeyboardButton(
+            f"{mark} {when} · {s['going']} чел."[:BTN_TEXT],
+            callback_data=f"pl:s:{s['id']}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"pl:days:{page - 1}"))
+    if (page + 1) * PRIV_PER_PAGE < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"pl:days:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("➕ Новое занятие", callback_data="pl:new")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pl:main")])
+
+    head = "📅 Занятия\n\nБлижайшие сверху, дальше прошедшие."
+    if not got:
+        head = "📅 Занятий пока нет.\n\nЗаведи первое — дальше отметишь, кто пришёл."
+    return head, InlineKeyboardMarkup(rows)
+
+
+def _priv_session(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    s = pl.session(uid, sid)
+    if not s:
+        return "Занятие не найдено — возможно, оно отменено.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")]])
+
+    done = s["status"] == pl.DONE
+    when = pl.human_date(s["day"]) + (f", {s['at_time']}" if s["at_time"] else "")
+    lines = [("✅ " if done else "🕒 ") + when + (f" · {s['place']}" if s["place"] else "")]
+    price = s["price"] or pl.general_price(uid)
+    lines.append(f"Цена занятия: {_rub(price)}" if price
+                 else "⚠️ Цена не задана — начислять будет нечего.")
+    lines.append("")
+
+    if not s["members"]:
+        lines.append("Пока никто не записан.")
+    else:
+        lines.append(("Были" if done else "Идут") +
+                     f" ({len(s['members'])}) — {_rub(s['total'])}:")
+        for m in s["members"]:
+            tail = ""
+            if done:
+                tail = " ✅ оплатил" if m["paid"] else " ❗ должен"
+            own = " (своя цена)" if int(m.get("price_own") or 0) else ""
+            lines.append(f"• {m['label']} — {_rub(m['price'])}{own}{tail}")
+
+    rows = []
+    if done:
+        # После занятия главное действие — отметить, кто рассчитался.
+        # Нажатие по человеку и есть отметка: отдельный экран ради галочки
+        # заставлял бы ходить туда-обратно за каждым.
+        for m in s["members"]:
+            rows.append([InlineKeyboardButton(
+                f"{'✅' if m['paid'] else '▫️'} {m['label'][:PRIV_NAME]} · "
+                f"{m['price']} ₽", callback_data=f"pl:paid:{sid}:{m['id']}")])
+    rows.append([InlineKeyboardButton("✏️ Кто идёт", callback_data=f"pl:pick:{sid}")])
+    if not done and s["members"]:
+        rows.append([InlineKeyboardButton("✅ Занятие прошло",
+                                          callback_data=f"pl:done:{sid}")])
+    rows.append([InlineKeyboardButton("💵 Цена этого занятия",
+                                      callback_data=f"pl:sprice:{sid}")])
+    rows.append([InlineKeyboardButton("🗑 Отменить занятие",
+                                      callback_data=f"pl:off:{sid}")])
+    rows.append([InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")])
+    if done:
+        lines += ["", "Нажми на человека — отметится оплата."]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_pick(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто идёт на занятие. Нажатие переключает — состав меняется до последнего."""
+    import private_lessons as pl
+    s = pl.session(uid, sid)
+    if not s:
+        return "Занятие не найдено.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")]])
+    folk = pl.people(uid)
+    rows = [[InlineKeyboardButton(
+        f"{'✅' if int(p['id']) in s['going'] else '▫️'} {p['label'][:BTN_TEXT - 3]}",
+        callback_data=f"pl:t:{sid}:{p['id']}")] for p in folk]
+    rows.append([InlineKeyboardButton("➕ Новый человек",
+                                      callback_data=f"pl:add:{sid}")])
+    rows.append([InlineKeyboardButton("⬅️ Готово", callback_data=f"pl:s:{sid}")])
+    when = pl.human_date(s["day"]) + (f", {s['at_time']}" if s["at_time"] else "")
+    head = f"✏️ Кто идёт {when}\n\nНажми, чтобы записать или снять."
+    if not folk:
+        head = ("👥 В списке пока никого.\n\n"
+                "Заведи людей — потом будешь отмечать их на занятия.")
+    return head, InlineKeyboardMarkup(rows)
+
+
+def _priv_who(uid: int, archived: bool = False) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    folk = pl.people(uid, archived=archived)
+    rows = []
+    for p in folk:
+        mark = "❗" if p["balance"] > 0 else ("💚" if p["balance"] < 0 else "▫️")
+        tail = f" · {p['balance']} ₽" if p["balance"] > 0 else ""
+        rows.append([InlineKeyboardButton(
+            f"{mark} {p['label'][:PRIV_NAME]}{tail}"[:BTN_TEXT],
+            callback_data=f"pl:p:{p['id']}")])
+    if not archived:
+        rows.append([InlineKeyboardButton("➕ Добавить", callback_data="pl:add")])
+        rows.append([InlineKeyboardButton("🗄 Архив", callback_data="pl:arc")])
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pl:main")])
+        head = ("👥 Кто ходит\n\n❗ — за человеком долг, 💚 — аванс."
+                if folk else
+                "👥 Пока никого.\n\nДобавь первого — дальше он появится в "
+                "списке на каждое занятие.")
+    else:
+        rows.append([InlineKeyboardButton("⬅️ К людям", callback_data="pl:who")])
+        head = ("🗄 Архив\n\nЭти в списке на занятие не показываются, но их "
+                "долги и история никуда не делись."
+                if folk else "🗄 Архив пуст.")
+    return head, InlineKeyboardMarkup(rows)
+
+
+def _priv_person(uid: int, pid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    p = pl.person(uid, pid)
+    if not p:
+        return "Такого человека в списке нет.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К людям", callback_data="pl:who")]])
+    own = int(p["price"] or 0)
+    lines = [f"👤 {p['label']}", "",
+             pl.money_word(p["balance"]).capitalize(),
+             f"Цена: {_rub(own)} (своя)" if own
+             else f"Цена: {_rub(pl.general_price(uid))} (общая)"]
+    hist = pl.history(uid, pid, limit=3)
+    if hist:
+        lines += ["", "Последнее:"]
+        for h in hist:
+            sign = "+" if h["kind"] == pl.PAY else "−"
+            lines.append(f"• {pl.human_date(h['at'])} {sign}{_rub(h['amount'])}"
+                         + (f" · {h['note']}" if h["note"] else ""))
+    rows = [[InlineKeyboardButton("💰 Внести оплату", callback_data=f"pl:pay:{pid}")],
+            [InlineKeyboardButton("💵 Своя цена", callback_data=f"pl:pprice:{pid}")],
+            [InlineKeyboardButton("📜 История", callback_data=f"pl:hist:{pid}")]]
+    if p["active"]:
+        rows.append([InlineKeyboardButton("🗄 В архив", callback_data=f"pl:arch:{pid}")])
+    else:
+        rows.append([InlineKeyboardButton("↩️ Вернуть в список",
+                                          callback_data=f"pl:back:{pid}")])
+    rows.append([InlineKeyboardButton("⬅️ К людям", callback_data="pl:who")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_history(uid: int, pid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    p = pl.person(uid, pid)
+    if not p:
+        return "Такого человека в списке нет.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К людям", callback_data="pl:who")]])
+    hist = pl.history(uid, pid, limit=30)
+    lines = [f"📜 {p['label']} — {pl.money_word(p['balance'])}", ""]
+    if not hist:
+        lines.append("Движения денег пока не было.")
+    for h in hist:
+        sign = "+" if h["kind"] == pl.PAY else "−"
+        lines.append(f"{pl.human_date(h['at'])}  {sign}{_rub(h['amount'])}"
+                     + (f"  · {h['note']}" if h["note"] else ""))
+    # Удалять даём только последние: чаще всего ошибаются в только что
+    # введённом, а длинный список кнопок «удалить» — приглашение промахнуться.
+    rows = [[InlineKeyboardButton(
+        f"🗑 {pl.human_date(h['at'])} · {h['amount']} ₽"[:BTN_TEXT],
+        callback_data=f"pl:rm:{pid}:{h['id']}")] for h in hist[:3]]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:p:{pid}")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_cash(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    now = pl.month(uid)
+    lines = [f"💰 Деньги · {pl.month_title(now['ym'])}", "",
+             f"Занятий провёл: {now['sessions']}",
+             f"Начислено: {_rub(now['charged'])}",
+             f"Получено: {_rub(now['paid'])}"]
+    if now["debt"]:
+        lines += ["", f"Всего долгов на сегодня: {_rub(now['debt'])}"]
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton("💸 Кто должен", callback_data="pl:debts")],
+        [InlineKeyboardButton("🧾 Последние оплаты", callback_data="pl:last")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pl:main")],
+    ])
+
+
+def _priv_debts(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    owe = pl.debtors(uid)
+    lines = ["💸 Кто должен", ""]
+    if not owe:
+        lines.append("Никто. Все рассчитались.")
+    for p in owe:
+        lines.append(f"• {p['label']} — {_rub(p['balance'])}")
+    if owe:
+        lines += ["", f"Итого: {_rub(sum(p['balance'] for p in owe))}",
+                  "", "Нажми на человека, чтобы внести оплату."]
+    rows = [[InlineKeyboardButton(
+        f"{p['label'][:PRIV_NAME]} · {p['balance']} ₽"[:BTN_TEXT],
+        callback_data=f"pl:p:{p['id']}")] for p in owe[:10]]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pl:cash")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_last(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import private_lessons as pl
+    got = pl.payments(uid, limit=15)
+    lines = ["🧾 Последние оплаты", ""]
+    if not got:
+        lines.append("Оплат пока не было.")
+    for m in got:
+        lines.append(f"{pl.human_date(m['at'])}  {m['label'] or '?'} — "
+                     f"{_rub(m['amount'])}"
+                     + (f"  · {m['note']}" if m["note"] else ""))
+    return "\n".join(lines), InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Назад", callback_data="pl:cash")]])
+
+
+async def handle_private_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки частных занятий. Владелец всего — тот, кто нажимает."""
+    import private_lessons as pl
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not _can_see_reports(user):
+        if query:
+            await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else "main"
+    arg = parts[2] if len(parts) > 2 else ""
+    uid = user.id
+    back_main = [InlineKeyboardButton("⬅️ Назад", callback_data="pl:main")]
+
+    try:
+        if what == "main":
+            _clear_pending(uid)
+            text, markup = await asyncio.to_thread(_priv_main, uid)
+
+        elif what == "days":
+            page = int(arg) if arg.isdigit() else 0
+            text, markup = await asyncio.to_thread(_priv_days, uid, page)
+
+        elif what == "s":
+            text, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+
+        elif what == "pick":
+            text, markup = await asyncio.to_thread(_priv_pick, uid, int(arg))
+
+        elif what == "t" and len(parts) > 3:
+            await asyncio.to_thread(pl.toggle_visit, uid, int(arg), int(parts[3]))
+            text, markup = await asyncio.to_thread(_priv_pick, uid, int(arg))
+
+        elif what == "done":
+            res = await asyncio.to_thread(pl.close_session, uid, int(arg))
+            if res.get("free"):
+                # Цену не задали — начислять нечего, и молчать об этом нельзя:
+                # тренер решит, что долг записан, а его нет.
+                await query.answer("Цена не задана — начислений нет", show_alert=True)
+            text, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+
+        elif what == "paid" and len(parts) > 3:
+            await asyncio.to_thread(pl.toggle_paid, uid, int(arg), int(parts[3]))
+            text, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+
+        elif what == "off":
+            # Отмена занятия снимает начисления, поэтому спрашиваем.
+            text = ("🗑 Отменить занятие?\n\nНачисления за него снимутся. "
+                    "Внесённые деньги останутся — станут авансом и закроют "
+                    "следующее занятие.")
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Да, отменить",
+                                      callback_data=f"pl:offok:{arg}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:s:{arg}")]])
+
+        elif what == "offok":
+            await asyncio.to_thread(pl.cancel_session, uid, int(arg))
+            text, markup = await asyncio.to_thread(_priv_days, uid, 0)
+            text = "🗑 Отменил.\n\n" + text
+
+        elif what == "new":
+            _clear_pending(uid)
+            _awaiting_priv[uid] = "new"
+            text, markup = PRIV_ASK_WHEN, InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="pl:days")]])
+
+        elif what == "who":
+            text, markup = await asyncio.to_thread(_priv_who, uid, False)
+
+        elif what == "arc":
+            text, markup = await asyncio.to_thread(_priv_who, uid, True)
+
+        elif what == "add":
+            _clear_pending(uid)
+            # Из экрана «кто идёт» человек заводится под конкретное занятие —
+            # туда и вернёмся, сразу записав его.
+            _awaiting_priv[uid] = f"add:{arg}" if arg.isdigit() else "add"
+            where = f"pl:pick:{arg}" if arg.isdigit() else "pl:who"
+            text, markup = PRIV_ASK_WHO, InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=where)]])
+
+        elif what == "cash":
+            text, markup = await asyncio.to_thread(_priv_cash, uid)
+
+        elif what == "debts":
+            text, markup = await asyncio.to_thread(_priv_debts, uid)
+
+        elif what == "last":
+            text, markup = await asyncio.to_thread(_priv_last, uid)
+
+        elif what == "p":
+            text, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
+
+        elif what == "hist":
+            text, markup = await asyncio.to_thread(_priv_history, uid, int(arg))
+
+        elif what == "rm" and len(parts) > 3:
+            await asyncio.to_thread(pl.drop_money, uid, int(parts[3]))
+            text, markup = await asyncio.to_thread(_priv_history, uid, int(arg))
+
+        elif what in ("arch", "back"):
+            await asyncio.to_thread(pl.archive, uid, int(arg), what == "back")
+            text, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
+
+        elif what in ("pay", "pprice", "sprice", "price"):
+            _clear_pending(uid)
+            _awaiting_priv[uid] = f"{what}:{arg}" if arg else what
+            text, markup = await asyncio.to_thread(_priv_ask_sum, uid, what, arg)
+
+        else:
+            text, markup = await asyncio.to_thread(_priv_main, uid)
+
+        await query.edit_message_text(text, reply_markup=markup)
+
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            await query.answer("Уже открыто")
+            return
+        log.error(f"Частные занятия ({what}): {e}")
+        await query.edit_message_text(f"⚠️ Не получилось: {e}",
+                                      reply_markup=InlineKeyboardMarkup([back_main]))
+
+
+def _priv_ask_sum(uid: int, what: str, arg: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Экран «пришли сумму». Один на четыре случая — вопросы разные, ввод один."""
+    import private_lessons as pl
+    tail = "\n\nПередумал — /start."
+    if what == "pay":
+        p = pl.person(uid, int(arg))
+        who = p["label"] if p else "?"
+        state = pl.money_word(p["balance"]) if p else ""
+        return (f"💰 Оплата от {who} ({state}).\n\nПришли сумму: «1500». "
+                f"Можно с пояснением: «3000 за две тренировки».{tail}",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"pl:p:{arg}")]]))
+    if what == "pprice":
+        p = pl.person(uid, int(arg))
+        now = int((p or {}).get("price") or 0)
+        return (f"💵 Своя цена для {(p or {}).get('label', '?')}.\n\n"
+                f"Сейчас: {_rub(now) if now else 'как у всех'}.\n"
+                f"Пришли число, «0» — вернуть общую цену.{tail}",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"pl:p:{arg}")]]))
+    if what == "sprice":
+        s = pl.session(uid, int(arg))
+        now = int((s or {}).get("price") or 0)
+        return (f"💵 Цена этого занятия.\n\n"
+                f"Сейчас: {_rub(now) if now else 'общая'}.\n"
+                f"Пришли число, «0» — вернуть общую цену.\n\n"
+                f"Уже начисленное не изменится: занятие прошло по своей цене."
+                f"{tail}",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"pl:s:{arg}")]]))
+    return (f"💵 Сколько стоит одно занятие?\n\n"
+            f"Сейчас: {_rub(pl.general_price(uid)) if pl.general_price(uid) else 'не задана'}."
+            f"\nПришли число: «1500».{tail}",
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⬅️ Назад", callback_data="pl:main")]]))
+
+
+async def handle_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ввод в разделе частных занятий: имя, дата занятия, суммы."""
+    import private_lessons as pl
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_priv:
+        return
+    if not _can_see_reports(user):
+        _awaiting_priv.pop(user.id, None)
+        return
+    pending = _awaiting_priv.pop(user.id)
+    uid = user.id
+    text = (msg.text or "").strip()
+    kind, _, arg = pending.partition(":")
+
+    if kind == "add":
+        made = await asyncio.to_thread(pl.add_person, uid, text)
+        if made.get("error"):
+            _awaiting_priv[uid] = pending          # даём ввести другое имя
+            await msg.reply_text(made["error"] + "\n\nПришли другое имя.")
+            raise ApplicationHandlerStop
+        if arg.isdigit():
+            # Заводили под занятие — сразу записываем на него.
+            await asyncio.to_thread(pl.toggle_visit, uid, int(arg), made["id"])
+            screen, markup = await asyncio.to_thread(_priv_pick, uid, int(arg))
+            await msg.reply_text(f"Добавил: {made['label']}.\n\n{screen}",
+                                 reply_markup=markup)
+            raise ApplicationHandlerStop
+        screen, markup = await asyncio.to_thread(_priv_who, uid, False)
+        await msg.reply_text(f"Добавил: {made['label']}.\n\n{screen}",
+                             reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    if kind == "new":
+        when = await asyncio.to_thread(pl.parse_when, text)
+        if not when:
+            _awaiting_priv[uid] = pending
+            await msg.reply_text("Не понял дату. Напиши «12.08 19:00» или "
+                                 "«завтра 19:00».\n\nПередумал — /start.")
+            raise ApplicationHandlerStop
+        sid = await asyncio.to_thread(pl.add_session, uid, when["day"],
+                                      when["at_time"], when["place"])
+        # Сразу спрашиваем, кто идёт: занятие без людей ни для чего не нужно,
+        # а отдельная кнопка «а теперь выбери состав» — лишний шаг.
+        screen, markup = await asyncio.to_thread(_priv_pick, uid, sid)
+        await msg.reply_text(f"📅 Завёл: {pl.human_date(when['day'])}"
+                             + (f", {when['at_time']}" if when["at_time"] else "")
+                             + (f" · {when['place']}" if when["place"] else "")
+                             + f"\n\n{screen}", reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    m = re.match(r"^\s*(\d{1,7})\s*(.*)$", text)
+    if not m:
+        _awaiting_priv[uid] = pending
+        await msg.reply_text("Нужна сумма числом: «1500».\n\nПередумал — /start.")
+        raise ApplicationHandlerStop
+    amount, note = int(m.group(1)), m.group(2).strip()
+
+    if kind == "price":
+        await asyncio.to_thread(pl.set_general_price, uid, amount)
+        screen, markup = await asyncio.to_thread(_priv_main, uid)
+        await msg.reply_text(f"Записал: {_rub(amount)} за занятие.\n\n{screen}",
+                             reply_markup=markup)
+    elif kind == "sprice":
+        await asyncio.to_thread(pl.set_session_price, uid, int(arg), amount)
+        screen, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+        await msg.reply_text(screen, reply_markup=markup)
+    elif kind == "pprice":
+        await asyncio.to_thread(pl.set_person_price, uid, int(arg), amount)
+        screen, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
+        await msg.reply_text(screen, reply_markup=markup)
+    elif kind == "pay":
+        await asyncio.to_thread(pl.add_payment, uid, int(arg), amount, note)
+        screen, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
+        await msg.reply_text(f"Записал оплату {_rub(amount)}.\n\n{screen}",
+                             reply_markup=markup)
+    raise ApplicationHandlerStop
 
 
 def _pay_saved_text(rec: Dict[str, Any]) -> str:
@@ -6831,6 +7371,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_access_date), group=11)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_private_text), group=12)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_gamelink_callback, pattern=r"^gl:"))
@@ -6839,6 +7382,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
     app.add_handler(CallbackQueryHandler(handle_roster_callback, pattern=r"^rost:"))
+    app.add_handler(CallbackQueryHandler(handle_private_callback, pattern=r"^pl:"))
 
     log.info("Запуск polling...")
     app.run_polling(

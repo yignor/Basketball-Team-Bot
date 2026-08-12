@@ -68,9 +68,12 @@ tmp/
 !game_announcements.json
 !pyrightconfig.json
 
-# Test files (keep locally)
+# Разовые проверочные скрипты в корне — их держим локально.
 test_*.py
 test_*.json
+# ...но пачка тестов должна ездить с кодом: её гоняют перед деплоем на самом
+# сервере, а туда всё попадает только через git.
+!tests/*.py
 
 # Playwright
 .playwright/
