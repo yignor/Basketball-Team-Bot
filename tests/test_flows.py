@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, List, Optional
@@ -393,19 +392,16 @@ async def test_start_five(bd) -> List[str]:
     # когда бот переписал названия позиций номерами. Показывать «· 2» нельзя,
     # надо «№2 · атакующий защитник».
     #
-    # Искать «· 2» простым вхождением бесполезно: в той же строке стоят
-    # средние («· 2.3 подб»), и проверка срабатывала вхолостую на верном
-    # экране. Поэтому цифра ловится только как отдельное слово, а рядом
-    # спрашивается расшифровка — она и есть то, чего мы добиваемся.
-    numeric = [r for r in cl.lineup(source, gid, "name")["rows"]
-               if str(r.get("role") or "").isdigit()]
-    raw = [r["role"] for r in numeric
-           if re.search(rf"· {r['role']}(?![\d.,])", card)]
-    if raw:
-        bad.append(f"амплуа показано голой цифрой: {raw}")
-    plain = [r["role"] for r in numeric if cl.role_title(r["role"]) not in card]
-    if plain:
-        bad.append(f"амплуа не расшифровано словами: {plain}")
+    # Ищем в СТРОКЕ ИГРОКА, а не по всей карточке. Цифра сама по себе там
+    # встречается на каждом шагу — «· 7 трен.», «· 2.3 подб», — и проверка
+    # вхождением дважды срабатывала вхолостую на исправном экране. Спрашиваем
+    # прямо то, чего добиваемся: рядом с человеком позиция названа словами.
+    for r in cl.lineup(source, gid, "name")["rows"]:
+        if not str(r.get("role") or "").isdigit() or r["title"] not in card:
+            continue
+        line = card.split(r["title"], 1)[1][:80]
+        if cl.role_title(r["role"]) not in line:
+            bad.append(f"амплуа «{r['role']}» не расшифровано: {line[:45]!r}")
 
     for r in cl.start_five(source, gid):
         cl.toggle_start(source, gid, r)
