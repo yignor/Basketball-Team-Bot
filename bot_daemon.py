@@ -5574,15 +5574,61 @@ def _priv_person(uid: int, pid: int) -> Tuple[str, InlineKeyboardMarkup]:
             lines.append(f"• {pl.human_date(h['at'])} {sign}{_rub(h['amount'])}"
                          + (f" · {h['note']}" if h["note"] else ""))
     rows = [[InlineKeyboardButton("💰 Внести оплату", callback_data=f"pl:pay:{pid}")],
-            [InlineKeyboardButton("💵 Своя цена", callback_data=f"pl:pprice:{pid}")],
+            [InlineKeyboardButton("💵 Своя цена", callback_data=f"pl:pprice:{pid}"),
+             InlineKeyboardButton("✏️ Имя", callback_data=f"pl:rename:{pid}")],
             [InlineKeyboardButton("📜 История", callback_data=f"pl:hist:{pid}")]]
     if p["active"]:
-        rows.append([InlineKeyboardButton("🗄 В архив", callback_data=f"pl:arch:{pid}")])
+        rows.append([InlineKeyboardButton("🗄 В архив", callback_data=f"pl:arch:{pid}"),
+                     InlineKeyboardButton("🗑 Удалить", callback_data=f"pl:del:{pid}")])
     else:
         rows.append([InlineKeyboardButton("↩️ Вернуть в список",
                                           callback_data=f"pl:back:{pid}")])
+        rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"pl:del:{pid}")])
     rows.append([InlineKeyboardButton("⬅️ К людям", callback_data="pl:who")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_delete_ask(uid: int, pid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Подтверждение удаления — со счётом того, что пропадёт.
+
+    Человека, заведённого по ошибке, надо сносить одним нажатием без нотаций.
+    А вот вместе с тем, кто год ходил и платил, из итогов месяца молча уйдут
+    его деньги — про это обязаны сказать числами, и рядом предложить архив: в
+    девяти случаях из десяти тренер имел в виду именно его."""
+    import private_lessons as pl
+    p = pl.person(uid, pid)
+    if not p:
+        return "Такого человека в списке нет.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К людям", callback_data="pl:who")]])
+    was = pl.person_stats(uid, pid)
+    back = [InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:p:{pid}")]
+
+    if not was["records"] and not was["visits"]:
+        return (f"🗑 Удалить «{p['label']}»?\n\nЗа ним ничего не числится — "
+                "уйдёт без следа.",
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 Да, удалить",
+                                          callback_data=f"pl:del2:{pid}")], back]))
+
+    lines = [f"🗑 Удалить «{p['label']}»?", "", "Вместе с ним пропадут:"]
+    if was["visits"]:
+        lines.append(f"• записи на занятия — {was['visits']}")
+    if was["charged"]:
+        lines.append(f"• начислено — {_rub(was['charged'])}")
+    if was["paid"]:
+        lines.append(f"• получено от него — {_rub(was['paid'])}")
+    if was["paid"]:
+        lines += ["", "Это изменит итоги месяца: полученные деньги перестанут "
+                      "в них считаться."]
+    if was["balance"] > 0:
+        lines += ["", f"Долг {_rub(was['balance'])} тоже исчезнет — "
+                      "спросить будет не с кого."]
+    lines += ["", "Если нужно просто убрать из списка на занятия — это архив, "
+                  "там всё сохранится."]
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗄 Лучше в архив", callback_data=f"pl:arch:{pid}")],
+        [InlineKeyboardButton("🗑 Всё равно удалить", callback_data=f"pl:del2:{pid}")],
+        back])
 
 
 def _priv_history(uid: int, pid: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -5800,6 +5846,29 @@ async def handle_private_callback(update: Update, context: ContextTypes.DEFAULT_
             await asyncio.to_thread(pl.archive, uid, int(arg), what == "back")
             text, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
 
+        elif what == "rename":
+            _clear_pending(uid)
+            _awaiting_priv[uid] = f"rename:{arg}"
+            p = await asyncio.to_thread(pl.person, uid, int(arg))
+            text = (f"✏️ Новое имя вместо «{(p or {}).get('label', '?')}».\n\n"
+                    "Занятия, оплаты и долг останутся за ним — меняется только "
+                    "подпись.\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:p:{arg}")]])
+
+        elif what == "del":
+            text, markup = await asyncio.to_thread(_priv_delete_ask, uid, int(arg))
+
+        elif what == "del2":
+            gone = await asyncio.to_thread(pl.forget_person, uid, int(arg))
+            text, markup = await asyncio.to_thread(_priv_who, uid, False)
+            if gone.get("error"):
+                text = f"{gone['error']}\n\n{text}"
+            else:
+                text = ("🗑 Удалил без следа.\n\n" + text) if not gone["records"] \
+                    else (f"🗑 Удалил. Вместе с ним ушли {gone['records']} записей "
+                          f"о деньгах.\n\n{text}")
+
         elif what in ("pay", "pprice", "sprice", "price"):
             _clear_pending(uid)
             _awaiting_priv[uid] = f"{what}:{arg}" if arg else what
@@ -5885,6 +5954,17 @@ async def handle_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             raise ApplicationHandlerStop
         screen, markup = await asyncio.to_thread(_priv_who, uid, False)
         await msg.reply_text(f"Добавил: {made['label']}.\n\n{screen}",
+                             reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    if kind == "rename":
+        res = await asyncio.to_thread(pl.rename_person, uid, int(arg), text)
+        if res.get("error"):
+            _awaiting_priv[uid] = pending          # даём ввести другое имя
+            await msg.reply_text(res["error"] + "\n\nПришли другое имя.")
+            raise ApplicationHandlerStop
+        screen, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
+        await msg.reply_text(f"Теперь это {res['label']}.\n\n{screen}",
                              reply_markup=markup)
         raise ApplicationHandlerStop
 

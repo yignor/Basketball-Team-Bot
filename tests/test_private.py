@@ -376,6 +376,95 @@ async def test_repeat(bd) -> None:
     check(not back, "и после остановки даты не заводятся заново")
 
 
+async def test_rename(bd) -> None:
+    """Переименование меняет подпись и ничего больше.
+
+    Смысл в том, что деньги и занятия держатся на id: если после правки имени
+    у человека обнулился долг, тренер об этом узнает в самый неподходящий
+    момент — при разговоре о деньгах."""
+    print("\n=== правка имени ===")
+    import private_lessons as pl
+    who = next(p for p in pl.people(COACH.id) if p["label"].startswith("Петров"))
+    before = pl.balance(COACH.id, who["id"])
+    visits = pl.person_stats(COACH.id, who["id"])["visits"]
+
+    text, markup, _ = await press(bd, f"pl:rename:{who['id']}")
+    check("Петров П." in text, f"показано, что меняем: {text[:45]}")
+    text, _ = await say(bd, "Петров Пётр Сергеевич")
+    check("Петров П. С." in text, f"новое имя укорочено так же: {text[:40]}")
+    check(pl.balance(COACH.id, who["id"]) == before, "деньги остались те же")
+    check(pl.person_stats(COACH.id, who["id"])["visits"] == visits,
+          "и занятия тоже")
+
+    # Занятое имя — внятный отказ, а не молчание и не второй такой же.
+    other = next(p for p in pl.people(COACH.id) if p["label"].startswith("Иванов И. И"))
+    await press(bd, f"pl:rename:{other['id']}")
+    text, _ = await say(bd, "Петров Пётр Сергеевич")
+    check("занято" in text, f"тёзку не пускаем: {text[:60]}")
+    text, _ = await say(bd, "Иванов Иван")
+    check("Иванов И." in text, "после отказа имя всё же меняется")
+
+
+async def test_delete(bd) -> None:
+    """Удаление — настоящее, и о цене предупреждает заранее."""
+    print("\n=== удаление человека ===")
+    import private_lessons as pl
+
+    # Заведён по ошибке: за ним ничего нет — сносим без нотаций.
+    await press(bd, "pl:add")
+    await say(bd, "Ошибочный")
+    junk = next(p for p in pl.people(COACH.id) if p["label"] == "Ошибочный")
+    text, markup, _ = await press(bd, f"pl:del:{junk['id']}")
+    check("без следа" in text, f"пустого сносим без предупреждений: {text[:60]}")
+    check(not any("архив" in (b.text or "").lower() for b in buttons_of(markup)),
+          "и архив ему не навязываем")
+    await press(bd, f"pl:del2:{junk['id']}")
+    check(all(p["label"] != "Ошибочный" for p in pl.people(COACH.id)),
+          "удалён")
+
+    # А у кого история — сначала показываем, что пропадёт.
+    who = next(p for p in pl.people(COACH.id) if p["label"].startswith("Петров"))
+
+    # Ставим его в расписание: удаление обязано вычистить и оттуда, иначе
+    # повторяющиеся занятия продолжат записывать призрака по средам.
+    await press(bd, "pl:new")
+    await say(bd, "завтра 18:00")
+    sid = newest(pl, COACH.id)
+    await press(bd, f"pl:t:{sid}:{who['id']}")
+    await press(bd, f"pl:repon:{sid}:1")
+    plans = pl.series_list(COACH.id)
+    check(bool(plans) and any(int(who["id"]) in pl.series(COACH.id, s["id"])["people"]
+                              for s in plans),
+          "человек попал в расписание")
+
+    was = pl.person_stats(COACH.id, who["id"])
+    check(was["records"] > 0, f"у него есть история: {was}")
+    text, markup, _ = await press(bd, f"pl:del:{who['id']}")
+    check("пропадут" in text, "сказано, что пропадёт")
+    check(str(was["visits"]) in text, f"записи на занятия названы числом: {was['visits']}")
+    check("итоги месяца" in text, "предупредили про итоги месяца")
+    check(any("архив" in (b.text or "").lower() for b in buttons_of(markup)),
+          "рядом предложен архив")
+
+    # Удаляем — и проверяем, что ушло всё, включая расписание.
+    money_before = pl.month(COACH.id)["paid"]
+    await press(bd, f"pl:del2:{who['id']}")
+    check(all(int(p["id"]) != int(who["id"]) for p in pl.people(COACH.id)),
+          "человека нет в списке")
+    check(pl.history(COACH.id, who["id"]) == [], "денег за ним не осталось")
+    check(pl.month(COACH.id)["paid"] != money_before or was["paid"] == 0,
+          "итог месяца пересчитался")
+    left = pl.series_list(COACH.id)
+    check(bool(left), "расписание на месте")
+    check(all(int(who["id"]) not in pl.series(COACH.id, s["id"])["people"]
+              for s in left), "вычищен из расписания")
+    # И следующая раскладка не заводит его заново.
+    await press(bd, "pl:main")
+    ghosts = [m["id"] for x in pl.sessions(COACH.id, limit=200)
+              for m in pl.session(COACH.id, x["id"])["members"]]
+    check(int(who["id"]) not in ghosts, "и не всплыл в составах занятий")
+
+
 async def test_button_width(bd) -> None:
     """Подписи не должны обрезаться на телефоне.
 
@@ -430,7 +519,9 @@ async def main() -> int:
     await test_owner_isolation(bd)
     await test_back_steps(bd)
     await test_repeat(bd)
+    await test_rename(bd)
     await test_button_width(bd)
+    await test_delete(bd)
     await test_nothing_leaves(bd)
     test_no_team_imports()
 

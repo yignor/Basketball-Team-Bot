@@ -342,6 +342,85 @@ def set_person_price(owner_id: Any, person_id: Any, price: int) -> bool:
         return cur.rowcount > 0
 
 
+def rename_person(owner_id: Any, person_id: Any, text: str) -> Dict[str, Any]:
+    """Переименовать. Имя укорачивается тем же правилом, что при заведении.
+
+    Меняется только подпись: всё остальное держится на id, поэтому занятия,
+    начисления и оплаты остаются за тем же человеком."""
+    init()
+    label = short_label(text)
+    if not label:
+        return {"error": "Пустое имя."}
+    with sheets_cache.get_connection() as conn:
+        if not conn.execute("SELECT 1 FROM priv_people WHERE id = ? AND "
+                            "owner_id = ?",
+                            (int(person_id), _own(owner_id))).fetchone():
+            return {"error": "Такого человека в списке нет."}
+        try:
+            conn.execute(
+                "UPDATE priv_people SET label = ? WHERE id = ? AND owner_id = ?",
+                (label, int(person_id), _own(owner_id)))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return {"error": f"«{label}» уже занято. Добавь пометку, чтобы "
+                             f"различать: «{label} мл»."}
+    return {"label": label}
+
+
+def person_stats(owner_id: Any, person_id: Any) -> Dict[str, Any]:
+    """Что за человеком числится: занятия и деньги.
+
+    Нужно перед удалением. Сказать «удалю» и не сказать, что вместе с ним из
+    итогов месяца уйдут проведённые деньги, — это подстава."""
+    init()
+    owner = _own(owner_id)
+    with sheets_cache.get_connection() as conn:
+        visits = int(conn.execute(
+            "SELECT COUNT(*) FROM priv_visits v JOIN priv_sessions s "
+            "ON s.id = v.session_id WHERE v.person_id = ? AND s.owner_id = ?",
+            (int(person_id), owner)).fetchone()[0])
+        rows = conn.execute(
+            "SELECT kind, COUNT(*) AS n, SUM(amount) AS s FROM priv_money "
+            "WHERE owner_id = ? AND person_id = ? GROUP BY kind",
+            (owner, int(person_id))).fetchall()
+    got = {r["kind"]: (int(r["n"]), int(r["s"] or 0)) for r in rows}
+    charged, paid = got.get(CHARGE, (0, 0)), got.get(PAY, (0, 0))
+    return {"visits": visits, "records": charged[0] + paid[0],
+            "charged": charged[1], "paid": paid[1],
+            "balance": charged[1] - paid[1]}
+
+
+def forget_person(owner_id: Any, person_id: Any) -> Dict[str, Any]:
+    """Удалить человека совсем: его самого, его записи на занятия и деньги.
+
+    Именно удалить, а не спрятать: для «спрятать» есть архив, и если «удалить»
+    делает то же самое, кнопка врёт. Заодно вычищаем его из расписаний —
+    иначе повторяющиеся занятия продолжали бы записывать на них призрака."""
+    init()
+    owner = _own(owner_id)
+    was = person_stats(owner_id, person_id)
+    with sheets_cache.get_connection() as conn:
+        if not conn.execute("SELECT 1 FROM priv_people WHERE id = ? AND "
+                            "owner_id = ?", (int(person_id), owner)).fetchone():
+            return {"error": "Такого человека в списке нет."}
+        conn.execute(
+            "DELETE FROM priv_visits WHERE person_id = ? AND session_id IN "
+            "(SELECT id FROM priv_sessions WHERE owner_id = ?)",
+            (int(person_id), owner))
+        conn.execute("DELETE FROM priv_money WHERE owner_id = ? AND person_id = ?",
+                     (owner, int(person_id)))
+        for s in conn.execute("SELECT id, roster FROM priv_series WHERE "
+                              "owner_id = ?", (owner,)).fetchall():
+            roster = [int(x) for x in json.loads(s["roster"] or "[]")
+                      if int(x) != int(person_id)]
+            conn.execute("UPDATE priv_series SET roster = ? WHERE id = ?",
+                         (json.dumps(roster), int(s["id"])))
+        conn.execute("DELETE FROM priv_people WHERE id = ? AND owner_id = ?",
+                     (int(person_id), owner))
+        conn.commit()
+    return was
+
+
 def archive(owner_id: Any, person_id: Any, active: bool = False) -> bool:
     """В архив и обратно. Не удаляем: за человеком может остаться долг и
     история, а список выбора всё равно чистится."""
