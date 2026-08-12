@@ -550,13 +550,26 @@ def add_debt(player_row: int, amount: int, note: str = "", by: str = "",
     ради одного долга неправильно — он не игрок команды и не должен попадать
     ни в состав, ни в опросы, ни в статистику."""
     sheets_cache.init_db()
+    now = datetime.now()
     with sheets_cache.get_connection() as conn:
+        # Тот же долг тому же человеку в ту же минуту — двойное нажатие, а не
+        # два долга. Два по 450 за две тренировки бывают, но не в одну минуту;
+        # 11.08.2026 так и появилась пара одинаковых записей. Ограничение
+        # намеренно узкое: через час такой же долг заведётся как новый.
+        same = conn.execute(
+            """SELECT id FROM extra_debts
+               WHERE player_row = ? AND amount = ? AND note = ? AND who = ?
+                 AND closed_at = '' AND substr(created_at, 1, 16) = ?""",
+            (int(player_row), int(amount), str(note), str(who).strip(),
+             now.isoformat(timespec="seconds")[:16])).fetchone()
+        if same:
+            return int(same["id"])
         cur = conn.execute(
             """INSERT INTO extra_debts (player_row, amount, note, added_by,
                                         created_at, who)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (int(player_row), int(amount), str(note), str(by),
-             datetime.now().isoformat(timespec="seconds"), str(who).strip()))
+             now.isoformat(timespec="seconds"), str(who).strip()))
         conn.commit()
         return int(cur.lastrowid)
 
