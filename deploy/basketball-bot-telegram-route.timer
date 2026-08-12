@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically re-check basketball-bot Telegram-only VPN routing (self-heal)
+
+[Timer]
+OnBootSec=1min
+# Работает только если служба НЕ остаётся active после выполнения:
+# отсчёт идёт от момента, когда юнит стал активным, и у вечно активного
+# юнита этот момент никогда не меняется.
+OnUnitActiveSec=2min
+Unit=basketball-bot-telegram-route.service
+
+[Install]
+WantedBy=timers.target

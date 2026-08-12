@@ -44,9 +44,49 @@ ssh -p 3033 ignor@172.30.1.93 "bash /opt/basketball-bot/deploy/healthcheck.sh"
 | API не слушает 8081 | `sudo systemctl restart basketball-bot` |
 | Туннель не активен | `sudo systemctl start cloudflared-api` |
 | Нет правил маршрутизации | `sudo /usr/local/sbin/basketball-bot-telegram-route.sh` |
+| Правила пропадают снова | самолечение сломано, см. «Ловушку» ниже |
 | Нет крона | `sudo cp /opt/basketball-bot/deploy/basketball-cron /etc/cron.d/basketball-bot` |
 
 После любой починки — прогнать проверку ещё раз.
+
+## Ловушка самолечения (разобрано 12.08.2026)
+
+Правила 38–42 умеют восстанавливаться сами — для этого есть
+`basketball-bot-telegram-route.timer`, который раз в две минуты запускает
+скрипт заново. **Полгода он не запускал ничего.**
+
+Служба была описана так:
+
+```ini
+Type=oneshot
+RemainAfterExit=yes
+```
+
+`oneshot` с `RemainAfterExit=yes` остаётся `active` навсегда. Таймер с
+`OnUnitActiveSec` отсчитывает от момента, когда юнит стал активным, а у вечно
+активного юнита этот момент не меняется никогда: запуск уже активной службы —
+пустая операция. В итоге скрипт отработал один раз при загрузке 06.08 и больше
+не запускался, а `systemctl list-timers` показывал таймер живым, с пустым
+полем «следующий запуск».
+
+Заметить это по `systemctl status` нельзя: и таймер, и служба показывают
+`active`. Видно только по двум местам:
+
+```bash
+systemctl list-timers --all | grep telegram-route      # NEXT пустой
+journalctl -u basketball-bot-telegram-route.service    # одна запись за всё время
+```
+
+Лечится снятием `RemainAfterExit`. Рабочие версии обоих юнитов лежат рядом,
+`basketball-bot-telegram-route.service` и `.timer` — их и раскатывать.
+
+Рядом живёт `ensure-vpn-routes.sh` (правила 50 и 100/101, обычный крон каждые
+две минуты) — он работал всё это время без нареканий. Проблема была не в
+подходе, а в systemd-обёртке.
+
+**Правила 50 — не мусор.** Это прямые маршруты гольф-бота (uid 995) к
+российским сайтам гольф-клубов, которые не открываются через VPN. Их ставит
+`ensure-vpn-routes.sh`, и трогать их не надо.
 
 ## Чего ждать в первые минуты
 
