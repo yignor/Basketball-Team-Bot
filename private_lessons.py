@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -92,9 +93,33 @@ CREATE INDEX IF NOT EXISTS priv_money_person
 -- Двойное нажатие не должно удваивать долг.
 CREATE UNIQUE INDEX IF NOT EXISTS priv_money_once
     ON priv_money (session_id, person_id, kind) WHERE session_id > 0;
+
+CREATE TABLE IF NOT EXISTS priv_series (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id   TEXT NOT NULL,
+    weekday    INTEGER NOT NULL,           -- 0 = понедельник
+    at_time    TEXT NOT NULL DEFAULT '',
+    place      TEXT NOT NULL DEFAULT '',
+    price      INTEGER NOT NULL DEFAULT 0,
+    every      INTEGER NOT NULL DEFAULT 1, -- раз в N недель
+    start_day  TEXT NOT NULL,              -- якорь: от него считаем интервал
+    roster     TEXT NOT NULL DEFAULT '[]', -- кто ходит обычно, id людей
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
 """
 
 _ready = False
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str,
+                   decl: str) -> None:
+    """CREATE TABLE IF NOT EXISTS не добавляет колонку в уже существующую
+    таблицу. У кого раздел успел открыться до появления повторов, база уже
+    создана — нужна ручная миграция."""
+    have = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    if column not in have:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def init() -> None:
@@ -105,6 +130,8 @@ def init() -> None:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "priv_sessions", "series_id",
+                       "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     _ready = True
 
@@ -496,6 +523,186 @@ def cancel_session(owner_id: Any, session_id: Any) -> bool:
         conn.execute("UPDATE priv_money SET session_id = 0, note = ? "
                      "WHERE session_id = ? AND owner_id = ? AND kind = ?",
                      ("за отменённое занятие", int(session_id), owner, PAY))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+# ─────────────────────────── повторение ────────────────────────────────────
+#
+# Частные занятия почти всегда идут по расписанию: «каждую среду в 19:00, те же
+# люди». Заводить их по одному — самая частая работа тренера в этом разделе, и
+# самая бессмысленная.
+#
+# Занятия заводим НАСТОЯЩИМИ строками на несколько недель вперёд, а не считаем
+# расписание на лету. Причина простая: к конкретной дате привязано всё
+# остальное — кто идёт (а состав меняется), цена, начисления, оплаты. К
+# вычисляемой дате ничего не привяжешь, и первая же отмена одного занятия
+# сломала бы всю затею.
+#
+# Раскладываем лениво, при открытии раздела. Фоновой задачи здесь нет намеренно:
+# раздел ничего не шлёт и никуда не спешит, а лишний планировщик — лишнее место,
+# где что-то тихо ломается.
+
+# На сколько недель вперёд держим заведённые занятия. Четыре — чтобы месяц было
+# видно и можно было планировать, но список не тонул в датах.
+AHEAD_WEEKS = 4
+
+# «каждую среду» и «по средам» — падежи разные, и оба нужны.
+DAY_EVERY = ["каждый понедельник", "каждый вторник", "каждую среду",
+             "каждый четверг", "каждую пятницу", "каждую субботу",
+             "каждое воскресенье"]
+DAY_ON = ["по понедельникам", "по вторникам", "по средам", "по четвергам",
+          "по пятницам", "по субботам", "по воскресеньям"]
+
+
+def series_title(s: Dict[str, Any]) -> str:
+    """«каждую среду в 19:00» / «раз в две недели по средам в 19:00»."""
+    if not s:
+        return ""
+    day = int(s["weekday"]) % 7
+    every = int(s.get("every") or 1)
+    head = DAY_EVERY[day] if every == 1 else f"раз в две недели {DAY_ON[day]}"
+    if every > 2:
+        head = f"раз в {every} недели {DAY_ON[day]}"
+    return head + (f" в {s['at_time']}" if s.get("at_time") else "")
+
+
+def series(owner_id: Any, series_id: Any) -> Optional[Dict[str, Any]]:
+    init()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM priv_series WHERE id = ? AND owner_id = ?",
+            (int(series_id), _own(owner_id))).fetchone()
+    if not row:
+        return None
+    got = dict(row)
+    got["people"] = json.loads(got.get("roster") or "[]")
+    return got
+
+
+def series_list(owner_id: Any) -> List[Dict[str, Any]]:
+    """Действующие расписания тренера."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM priv_series WHERE owner_id = ? AND active = 1 "
+            "ORDER BY weekday, at_time", (_own(owner_id),))]
+
+
+def repeat_session(owner_id: Any, session_id: Any, every: int = 1) -> Dict[str, Any]:
+    """Сделать занятие образцом: тот же день недели, время, место, цена и люди.
+
+    Состав берём тот, что записан сейчас: если человек ходит по средам, он
+    ходит по средам. Поправить на конкретную дату всё равно можно — каждое
+    занятие остаётся отдельным."""
+    init()
+    owner = _own(owner_id)
+    got = session(owner_id, session_id)
+    if not got:
+        return {"error": "Занятие не найдено."}
+    if int(got.get("series_id") or 0):
+        return {"error": "Это занятие уже повторяется."}
+    day = datetime.strptime(got["day"], "%Y-%m-%d").date()
+    roster = sorted(int(x) for x in got["going"])
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO priv_series (owner_id, weekday, at_time, place, price, "
+            "every, start_day, roster, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner, day.weekday(), got["at_time"], got["place"],
+             int(got["price"] or 0), max(1, int(every)), got["day"],
+             json.dumps(roster), datetime.now().isoformat(timespec="seconds")))
+        sid = int(cur.lastrowid)
+        conn.execute("UPDATE priv_sessions SET series_id = ? WHERE id = ? AND "
+                     "owner_id = ?", (sid, int(session_id), owner))
+        conn.commit()
+    made = ensure_ahead(owner_id)
+    return {"series_id": sid, "made": made,
+            "title": series_title(series(owner_id, sid) or {})}
+
+
+def stop_series(owner_id: Any, series_id: Any) -> Dict[str, Any]:
+    """Больше не повторять.
+
+    Заведённые вперёд, но ещё не проведённые занятия убираем: их создал не
+    человек, а расписание, и оставлять их висеть в списке — мусор. Всё, что уже
+    прошло, остаётся нетронутым: там деньги и история."""
+    init()
+    owner = _own(owner_id)
+    today = date.today().isoformat()
+    with sheets_cache.get_connection() as conn:
+        if not conn.execute("SELECT 1 FROM priv_series WHERE id = ? AND "
+                            "owner_id = ?", (int(series_id), owner)).fetchone():
+            return {"error": "Повторение не найдено."}
+        doomed = [int(r["id"]) for r in conn.execute(
+            "SELECT id FROM priv_sessions WHERE owner_id = ? AND series_id = ? "
+            "AND status = ? AND day >= ?", (owner, int(series_id), PLAN, today))]
+        for one in doomed:
+            conn.execute("DELETE FROM priv_visits WHERE session_id = ?", (one,))
+            conn.execute("DELETE FROM priv_sessions WHERE id = ?", (one,))
+        conn.execute("UPDATE priv_series SET active = 0 WHERE id = ? AND "
+                     "owner_id = ?", (int(series_id), owner))
+        conn.commit()
+    return {"dropped": len(doomed)}
+
+
+def ensure_ahead(owner_id: Any, weeks: int = AHEAD_WEEKS) -> int:
+    """Раскладывает занятия по расписанию на несколько недель вперёд.
+
+    Возвращает, сколько завёл. Вызывать можно сколько угодно: дата, которая уже
+    есть, второй раз не создаётся — в том числе отменённая. Отменил тренер одно
+    занятие в серии — оно не должно воскреснуть при следующем открытии
+    раздела."""
+    init()
+    owner = _own(owner_id)
+    today = date.today()
+    horizon = today + timedelta(weeks=max(1, int(weeks)))
+    made = 0
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM priv_series WHERE owner_id = ? AND active = 1", (owner,))]
+        for s in rows:
+            every = max(1, int(s["every"] or 1))
+            try:
+                anchor = datetime.strptime(s["start_day"], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            # Первая дата не раньше сегодняшнего дня и не раньше самой серии.
+            day = max(anchor, today)
+            day += timedelta(days=(int(s["weekday"]) - day.weekday()) % 7)
+            while day <= horizon:
+                if (day - anchor).days % (7 * every) == 0:
+                    have = conn.execute(
+                        "SELECT 1 FROM priv_sessions WHERE owner_id = ? AND "
+                        "series_id = ? AND day = ?",
+                        (owner, int(s["id"]), day.isoformat())).fetchone()
+                    if not have:
+                        cur = conn.execute(
+                            "INSERT INTO priv_sessions (owner_id, day, at_time, "
+                            "place, price, series_id, created_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (owner, day.isoformat(), s["at_time"], s["place"],
+                             int(s["price"] or 0), int(s["id"]),
+                             datetime.now().isoformat(timespec="seconds")))
+                        new_id = int(cur.lastrowid)
+                        for pid in json.loads(s["roster"] or "[]"):
+                            conn.execute(
+                                "INSERT OR IGNORE INTO priv_visits (session_id, "
+                                "person_id) VALUES (?, ?)", (new_id, int(pid)))
+                        made += 1
+                day += timedelta(days=7)
+        if made:
+            conn.commit()
+    return made
+
+
+def series_roster(owner_id: Any, series_id: Any, people_ids: List[int]) -> bool:
+    """Обновить «кто ходит обычно». Меняет только будущие пустые даты."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE priv_series SET roster = ? WHERE id = ? AND owner_id = ?",
+            (json.dumps(sorted(int(x) for x in people_ids)), int(series_id),
+             _own(owner_id)))
         conn.commit()
         return cur.rowcount > 0
 

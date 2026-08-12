@@ -5341,6 +5341,9 @@ def _rub(amount: int) -> str:
 
 def _priv_main(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     import private_lessons as pl
+    # Раскладываем расписание при входе в раздел: фоновой задачи здесь нет
+    # намеренно, а к моменту, когда тренер смотрит на занятия, они уже нужны.
+    pl.ensure_ahead(uid)
     folk = pl.people(uid)
     debt = sum(p["balance"] for p in folk if p["balance"] > 0)
     now = pl.month(uid)
@@ -5351,6 +5354,9 @@ def _priv_main(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
                  else "⚠️ Цена занятия не задана — начислять пока нечего.")
     lines.append(f"Людей: {len(folk)}"
                  + (f" · должны {_rub(debt)}" if debt else ""))
+    plans = pl.series_list(uid)
+    if plans:
+        lines += ["", "Расписание: " + "; ".join(pl.series_title(s) for s in plans)]
     if now["sessions"] or now["paid"]:
         lines += ["", f"{pl.month_title(now['ym']).capitalize()}: "
                       f"занятий {now['sessions']}, получено {_rub(now['paid'])}"]
@@ -5365,6 +5371,7 @@ def _priv_main(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
 
 def _priv_days(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
     import private_lessons as pl
+    pl.ensure_ahead(uid)
     got = pl.sessions(uid, limit=200)
     total = len(got)
     chunk = got[page * PRIV_PER_PAGE:(page + 1) * PRIV_PER_PAGE]
@@ -5372,9 +5379,10 @@ def _priv_days(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
     rows = []
     for s in chunk:
         mark = "✅" if s["status"] == pl.DONE else "🕒"
+        loop = "🔁" if int(s.get("series_id") or 0) else ""
         when = pl.human_date(s["day"]) + (f" {s['at_time']}" if s["at_time"] else "")
         rows.append([InlineKeyboardButton(
-            f"{mark} {when} · {s['going']} чел."[:BTN_TEXT],
+            f"{mark}{loop} {when} · {s['going']} чел."[:BTN_TEXT],
             callback_data=f"pl:s:{s['id']}")])
 
     nav = []
@@ -5406,6 +5414,9 @@ def _priv_session(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
     price = s["price"] or pl.general_price(uid)
     lines.append(f"Цена занятия: {_rub(price)}" if price
                  else "⚠️ Цена не задана — начислять будет нечего.")
+    row = pl.series(uid, s["series_id"]) if int(s.get("series_id") or 0) else None
+    if row:
+        lines.append(f"🔁 Повторяется {pl.series_title(row)}")
     lines.append("")
 
     if not s["members"]:
@@ -5435,12 +5446,65 @@ def _priv_session(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
                                           callback_data=f"pl:done:{sid}")])
     rows.append([InlineKeyboardButton("💵 Цена этого занятия",
                                       callback_data=f"pl:sprice:{sid}")])
+    rows.append([InlineKeyboardButton(
+        "🔁 Повторение" if row else "🔁 Повторять каждую неделю",
+        callback_data=f"pl:rep:{sid}")])
     rows.append([InlineKeyboardButton("🗑 Отменить занятие",
                                       callback_data=f"pl:off:{sid}")])
     rows.append([InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")])
     if done:
         lines += ["", "Нажми на человека — отметится оплата."]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_repeat(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Повторять это занятие или уже повторяется.
+
+    Экран один на оба случая: тренер приходит сюда с одним вопросом — «что с
+    повторением этого занятия», а не «включить» или «выключить» по отдельности."""
+    import private_lessons as pl
+    s = pl.session(uid, sid)
+    if not s:
+        return "Занятие не найдено.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")]])
+    back = [InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:s:{sid}")]
+    row = pl.series(uid, s["series_id"]) if int(s.get("series_id") or 0) else None
+
+    if row:
+        ahead = [x for x in pl.sessions(uid, limit=200)
+                 if int(x.get("series_id") or 0) == int(row["id"])
+                 and x["day"] >= date.today().isoformat()]
+        lines = [f"🔁 Повторяется {pl.series_title(row)}", "",
+                 f"Впереди заведено: {len(ahead)}."]
+        if s["members"]:
+            lines.append("Люди подставляются те же — на каждой дате их можно "
+                         "менять, это не тронет остальные.")
+        lines += ["",
+                  "Отменить одну дату — «🗑 Отменить занятие» на самой дате: "
+                  "расписание от этого не ломается, и обратно она не появится.",
+                  "",
+                  "Перенести время — останови повторение и включи заново с "
+                  "занятия в новое время."]
+        return "\n".join(lines), InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏹ Остановить повторение",
+                                  callback_data=f"pl:repoff:{row['id']}:{sid}")],
+            back])
+
+    when = pl.human_date(s["day"]) + (f", {s['at_time']}" if s["at_time"] else "")
+    day = pl.DAY_EVERY[datetime.strptime(s["day"], "%Y-%m-%d").weekday()]
+    lines = [f"🔁 Повторять занятие {when}?", "",
+             f"Заведу его {day}" + (f" в {s['at_time']}" if s["at_time"] else "")
+             + f" на {pl.AHEAD_WEEKS} недели вперёд.",
+             "",
+             f"Место, цена и записанные ({len(s['members'])}) перенесутся. "
+             "Каждая дата остаётся отдельной: состав и цену на ней можно "
+             "поменять, не трогая остальные."]
+    return "\n".join(lines), InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Каждую неделю",
+                              callback_data=f"pl:repon:{sid}:1")],
+        [InlineKeyboardButton("🔁 Раз в две недели",
+                              callback_data=f"pl:repon:{sid}:2")],
+        back])
 
 
 def _priv_pick(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -5674,6 +5738,44 @@ async def handle_private_callback(update: Update, context: ContextTypes.DEFAULT_
             where = f"pl:pick:{arg}" if arg.isdigit() else "pl:who"
             text, markup = PRIV_ASK_WHO, InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅️ Назад", callback_data=where)]])
+
+        elif what == "rep":
+            text, markup = await asyncio.to_thread(_priv_repeat, uid, int(arg))
+
+        elif what == "repon" and len(parts) > 3:
+            res = await asyncio.to_thread(pl.repeat_session, uid, int(arg),
+                                          int(parts[3]))
+            if res.get("error"):
+                await query.answer(res["error"], show_alert=True)
+                text, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+            else:
+                text, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+                text = (f"🔁 Готово: {res['title']}. Завёл дат: {res['made']}."
+                        f"\n\n{text}")
+
+        elif what == "repoff" and len(parts) > 3:
+            # Останов сносит заведённые вперёд даты — спрашиваем, сколько.
+            ahead = await asyncio.to_thread(
+                lambda: len([x for x in pl.sessions(uid, limit=200)
+                             if int(x.get("series_id") or 0) == int(arg)
+                             and x["status"] == pl.PLAN
+                             and x["day"] >= date.today().isoformat()]))
+            text = ("⏹ Остановить повторение?\n\n"
+                    f"Уберу {ahead} заведённых вперёд дат — их создало "
+                    "расписание, а не ты.\nВсё, что уже прошло, останется: там "
+                    "деньги и история.")
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏹ Да, остановить",
+                                      callback_data=f"pl:repoff2:{arg}:{parts[3]}")],
+                [InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"pl:rep:{parts[3]}")]])
+
+        elif what == "repoff2" and len(parts) > 3:
+            res = await asyncio.to_thread(pl.stop_series, uid, int(arg))
+            text, markup = await asyncio.to_thread(_priv_days, uid, 0)
+            head = ("⏹ Больше не повторяю."
+                    + (f" Убрал дат: {res['dropped']}." if res.get("dropped") else ""))
+            text = f"{head}\n\n{text}"
 
         elif what == "cash":
             text, markup = await asyncio.to_thread(_priv_cash, uid)

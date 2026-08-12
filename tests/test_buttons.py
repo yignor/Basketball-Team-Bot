@@ -43,7 +43,7 @@ FORBIDDEN = re.compile(
     r"|admin:report|fantasy:ingest|fantasy:prices|fscope|admin:stats"
     # Частные занятия: это чужие деньги. Обход ходит по настоящей базе, и
     # начислить долг или снять оплату «просто чтобы проверить кнопку» нельзя.
-    r"|pl:(t|done|paid|offok|arch|back|rm):)")
+    r"|pl:(t|done|paid|offok|arch|back|rm|repon|repoff2):)")
 
 # Корневые экраны разделов: попасть сюда можно только осознанно, кнопкой
 # «в раздел». Если нажатие увело сюда откуда-то из глубины — это и есть

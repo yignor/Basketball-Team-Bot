@@ -293,6 +293,89 @@ async def test_back_steps(bd) -> None:
         check(bool(got), f"{start} → {expect}")
 
 
+async def test_repeat(bd) -> None:
+    """Занятие повторяется само, и повторение не мешает жить.
+
+    Проверяем не только «даты завелись», а три места, где такие функции обычно
+    ломаются: повторный проход не плодит дубли, отменённая дата не воскресает,
+    а правка одной даты не расползается на остальные."""
+    print("\n=== повторение раз в неделю ===")
+    import private_lessons as pl
+    from datetime import date, datetime, timedelta
+
+    folk = pl.people(COACH.id)
+    ivan = next(p for p in folk if p["label"].startswith("Иванов И. И"))
+
+    # Заводим занятие на ближайшую среду и записываем на него человека.
+    when = date.today() + timedelta(days=(2 - date.today().weekday()) % 7 or 7)
+    await press(bd, "pl:new")
+    await say(bd, f"{when:%d.%m} 19:00 Зал")
+    sid = newest(pl, COACH.id)
+    await press(bd, f"pl:t:{sid}:{ivan['id']}")
+
+    text, markup, _ = await press(bd, f"pl:rep:{sid}")
+    check("каждую среду" in text, f"предложение названо по-русски: {text[:60]}")
+    on = find(markup, "Каждую неделю")
+    check(bool(on), "есть кнопка «каждую неделю»")
+
+    text, markup, _ = await press(bd, on)
+    mine = sorted([s for s in pl.sessions(COACH.id, limit=200)
+                   if int(s.get("series_id") or 0)], key=lambda s: s["day"])
+    days = [datetime.strptime(s["day"], "%Y-%m-%d").date() for s in mine]
+    # Точное число дат зависит от того, какой сегодня день недели: горизонт
+    # считается от сегодня, а не от занятия-образца. Поэтому проверяем свойства
+    # расписания, а не заранее угаданное количество.
+    horizon = date.today() + timedelta(weeks=pl.AHEAD_WEEKS)
+    check(len(days) >= 3, f"дат завелось: {len(days)}")
+    check(days[0] == when, f"первая дата — само занятие: {days[0]} vs {when}")
+    check(max(days) <= horizon, f"дальше горизонта не лезем: {max(days)}")
+    check(all((b - a).days == 7 for a, b in zip(days, days[1:])),
+          f"ровно через неделю: {[(b - a).days for a, b in zip(days, days[1:])]}")
+    check(all(d.weekday() == 2 for d in days), "все даты — среды")
+    check(all(int(s["going"]) == 1 for s in mine),
+          f"люди подставились на каждую дату: {[s['going'] for s in mine]}")
+
+    # Повторный заход в раздел не должен плодить дубли.
+    await press(bd, "pl:days")
+    await press(bd, "pl:main")
+    again = [s for s in pl.sessions(COACH.id, limit=200) if int(s.get("series_id") or 0)]
+    check(len(again) == len(mine), f"дубли не наплодились: {len(mine)} → {len(again)}")
+
+    # Одну дату отменяем — расписание живёт, а дата не воскресает.
+    victim = sorted(mine, key=lambda s: s["day"])[2]
+    await press(bd, f"pl:offok:{victim['id']}")
+    await press(bd, "pl:days")
+    left = [s for s in pl.sessions(COACH.id, limit=200) if int(s.get("series_id") or 0)]
+    check(all(s["id"] != victim["id"] for s in left), "отменённая дата ушла")
+    check(all(s["day"] != victim["day"] for s in left),
+          "и не воскресла при следующем открытии раздела")
+    check(len(left) == len(mine) - 1, f"остальные на месте: {len(left)}")
+
+    # Правка одной даты не расползается на соседние.
+    other = sorted(left, key=lambda s: s["day"])[1]
+    await press(bd, f"pl:sprice:{other['id']}")
+    await say(bd, "3000")
+    prices = {s["id"]: pl.session(COACH.id, s["id"])["price"] for s in left}
+    check(prices.pop(other["id"]) == 3000, "цена изменилась там, где меняли")
+    check(all(p == 0 for p in prices.values()),
+          f"и не поехала у соседних дат: {sorted(set(prices.values()))}")
+
+    # Останов: будущие пустые даты убираются, прошедшие — нет.
+    row = pl.series(COACH.id, sorted(left, key=lambda s: s["day"])[0]["series_id"])
+    text, markup, _ = await press(bd, f"pl:repoff:{row['id']}:{sid}")
+    check("останов" in text.lower(), f"перед остановом спрашивают: {text[:50]}")
+    await press(bd, f"pl:repoff2:{row['id']}:{sid}")
+    rest = [s for s in pl.sessions(COACH.id, limit=200)
+            if int(s.get("series_id") or 0) == int(row["id"])]
+    check(rest == [] or all(s["day"] < date.today().isoformat() for s in rest),
+          f"впереди пусто: {[s['day'] for s in rest]}")
+    await press(bd, "pl:main")
+    back = [s for s in pl.sessions(COACH.id, limit=200)
+            if int(s.get("series_id") or 0) == int(row["id"])
+            and s["day"] >= date.today().isoformat()]
+    check(not back, "и после остановки даты не заводятся заново")
+
+
 async def test_button_width(bd) -> None:
     """Подписи не должны обрезаться на телефоне.
 
@@ -346,6 +429,7 @@ async def main() -> int:
     await test_free_input(bd)
     await test_owner_isolation(bd)
     await test_back_steps(bd)
+    await test_repeat(bd)
     await test_button_width(bd)
     await test_nothing_leaves(bd)
     test_no_team_imports()
