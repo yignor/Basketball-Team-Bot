@@ -1,0 +1,15 @@
+# Ставится в /etc/logrotate.d/ensure-vpn-routes
+#
+# Второй рубеж после того, как скрипт перестал болтать: даже тихий лог обязан
+# иметь потолок. Крон пишет в файл каждые две минуты и открывает его заново,
+# поэтому обычная ротация безопасна — copytruncate не нужен.
+/var/log/ensure-vpn-routes.log {
+    weekly
+    rotate 4
+    maxsize 5M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+}

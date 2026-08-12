@@ -88,6 +88,38 @@ journalctl -u basketball-bot-telegram-route.service    # одна запись �
 российским сайтам гольф-клубов, которые не открываются через VPN. Их ставит
 `ensure-vpn-routes.sh`, и трогать их не надо.
 
+## Логи не должны расти бесконечно (12.08.2026)
+
+Три меры, от источника к потолку.
+
+**Скрипт замолчал.** `ensure-vpn-routes.sh` писал «could not resolve
+pestovo.golf» каждые две минуты — 720 строк в сутки, 28 663 из 28 670 строк
+всего лога. Теперь жалоба на неразрешимое имя пишется раз в сутки на хост,
+отметка лежит в `/var/lib/ensure-vpn-routes/`. При удачном разрешении отметка
+стирается, поэтому следующая поломка не будет молчать сутки.
+
+Хост из списка убирать было нельзя: парсер гольф-бота ходит именно на
+`pestovo.golf`, и в те редкие разы, когда имя всё-таки разрешается (4 раза из
+28 667), прямой маршрут ему нужен.
+
+**Ротация файла.** `logrotate-ensure-vpn-routes` → `/etc/logrotate.d/`:
+еженедельно, 4 копии, принудительно при 5 МБ.
+
+**Потолок журнала systemd.** Он и есть главный едок: 323 МБ на момент разбора,
+а предел стоял по умолчанию — до 4 ГБ. `journald-limit.conf` →
+`/etc/systemd/journald.conf.d/10-limit.conf` ставит 500 МБ.
+
+Установка (всё требует пароля):
+
+```bash
+sudo install -m 0755 /opt/basketball-bot/deploy/ensure-vpn-routes.sh /usr/local/sbin/ensure-vpn-routes.sh
+sudo install -m 0644 /opt/basketball-bot/deploy/logrotate-ensure-vpn-routes /etc/logrotate.d/ensure-vpn-routes
+sudo install -D -m 0644 /opt/basketball-bot/deploy/journald-limit.conf /etc/systemd/journald.conf.d/10-limit.conf
+sudo systemctl restart systemd-journald
+```
+
+Проверить, что потолок применился: `journalctl --disk-usage`.
+
 ## Чего ждать в первые минуты
 
 Это нормально и лечится временем, а не руками:
