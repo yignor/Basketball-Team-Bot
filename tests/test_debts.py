@@ -271,6 +271,43 @@ def test_mark_paid_is_idempotent() -> None:
     check(owed_by(402) == 1, "соседа не задело")
 
 
+def test_confirmed_text() -> None:
+    """Сказал «буду заниматься» — получил сумму, а не только «записал».
+
+    Просьба тренера 12.08.2026: это единственный момент, когда человек думает
+    про следующий месяц. Не назвать сумму здесь — значит, что он вспомнит о ней
+    только от напоминания через две недели."""
+    print("\n=== ответ на «буду заниматься» ===")
+    import training_dues as td
+    seed_player(601, "Двенадцатый")
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_season = 5500 WHERE row_index = 601")
+        conn.commit()
+
+    nxt = td.next_period(td.period_of(date.today()))
+    if not td.counts(nxt):
+        nxt = td.FIRST_PERIOD
+    text = td.confirmed_text(nxt, 601)
+    check("5 500" in text, f"сумма названа: {text.splitlines()[2] if len(text.splitlines())>2 else text}")
+    check("в " + td.month_title_pre(nxt) in text, "месяц в правильном падеже")
+    check("до начала месяца" in text, "сказано, когда платить")
+
+    # Месяц вне режима не должен превращаться в долг: тренер объявил его
+    # оплаченным, а status() считает по всем месяцам подряд.
+    old = td.period_of(date.today())
+    if not td.counts(old):
+        check(td.month_title(old) not in text,
+              f"долг за {td.month_title(old)} не выдуман: {text!r}"[:120])
+
+    # Сумма не проставлена — врать про ноль нельзя.
+    seed_player(602, "Тринадцатый", price=900)
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_season = 0 WHERE row_index = 602")
+        conn.commit()
+    lone = td.confirmed_text(nxt, 602)
+    check("0 ₽" not in lone, f"нулевой суммы в тексте нет: {lone!r}"[:110])
+
+
 def main() -> int:
     print(f"База: {TMP}")
     test_posted_roster_counts()
@@ -281,6 +318,7 @@ def main() -> int:
     test_paid_closes_debt()
     test_payment_for_uncounted_game()
     test_mark_paid_is_idempotent()
+    test_confirmed_text()
 
     print("\n" + "=" * 60)
     if bad:

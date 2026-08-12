@@ -6937,10 +6937,8 @@ async def handle_next_month(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     title = (person or {}).get("title", "")
     await query.answer()
     if answer == "yes":
-        await query.edit_message_text(
-            f"✅ Записал: занимаешься в {training_dues.month_title(period)}.\n\n"
-            f"Взнос — {(person or {}).get('pay_season', 0)} ₽, занеси тренеру "
-            "до начала месяца.")
+        text = await asyncio.to_thread(training_dues.confirmed_text, period, row)
+        await query.edit_message_text(text)
         await _tell_coaches(context.application,
                             f"✅ {title} подтвердил тренировки в "
                             f"{training_dues.month_title(period)}.")
