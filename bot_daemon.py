@@ -7404,6 +7404,14 @@ async def on_startup(app: Application) -> None:
     # качалку зовём первой — иначе пул соберётся на номерах.
     async def _boot_warm() -> None:
         await _sync_leagues()
+        # Игры без даты не считаются в долгах вовсе — чиним при каждом старте.
+        try:
+            import game_roster
+            fixed = await asyncio.to_thread(game_roster.repair_dates)
+            if fixed:
+                log.info("Дозаполнил дату у игр: %d", fixed)
+        except Exception as e:
+            log.warning(f"Дозаполнение дат игр: {e}")
         try:
             found = await asyncio.to_thread(sheets_cache.link_from_votes)
             if found:

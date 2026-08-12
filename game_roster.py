@@ -253,15 +253,64 @@ def remove(source: str, game_id: str, player_row: int) -> bool:
 
 
 def ensure_state(game: Dict[str, Any]) -> None:
+    """Заводит строку состояния игры и следит, чтобы дата в ней была.
+
+    Здесь стоял `INSERT OR IGNORE`, и это был тихий баг. Строку состояния
+    создаёт кто первый успел: выбор формы, публикация состава, стартовая
+    пятёрка — и ни один из этих путей даты не знает. Если такой путь
+    срабатывал раньше, дата оставалась пустой навсегда, потому что `IGNORE`
+    её уже не заполнял. А пустая дата выкидывает игру из подсчёта долгов
+    целиком: сравнение с датой начала порядка её просто не пропускает.
+
+    Поэтому дозаполняем: строка есть — допишем то, чего в ней нет, не трогая
+    уже известное."""
     sheets_cache.init_db()
+    day = game["date"]
     with sheets_cache.get_connection() as conn:
         conn.execute(
-            """INSERT OR IGNORE INTO game_roster_state
+            """INSERT INTO game_roster_state
                (source, game_id, game_date, opponent, posted_at)
-               VALUES (?, ?, ?, ?, '')""",
+               VALUES (?, ?, ?, ?, '')
+               ON CONFLICT(source, game_id) DO UPDATE SET
+                   game_date = CASE
+                       WHEN COALESCE(game_roster_state.game_date, '') = ''
+                       THEN excluded.game_date ELSE game_roster_state.game_date END,
+                   opponent = CASE
+                       WHEN COALESCE(game_roster_state.opponent, '') = ''
+                       THEN excluded.opponent ELSE game_roster_state.opponent END""",
             (game["source"], str(game["game_id"]),
-             game["date"].isoformat(), game.get("opponent", "")))
+             day.isoformat() if hasattr(day, "isoformat") else str(day),
+             game.get("opponent", "")))
         conn.commit()
+
+
+def repair_dates() -> int:
+    """Дозаполняет пустые даты игр из служебных записей. Возвращает, скольким.
+
+    Чиним не разово, а при каждом старте демона: перекос выше мог случиться и
+    на путях, которые мы ещё не перебрали, а цена ему — пропавшие долги целого
+    состава. Запрос дешёвый: строк состояния десятки."""
+    sheets_cache.init_db()
+    fixed = 0
+    with sheets_cache.get_connection() as conn:
+        empty = [dict(r) for r in conn.execute(
+            "SELECT source, game_id FROM game_roster_state "
+            "WHERE COALESCE(game_date, '') = ''")]
+        for one in empty:
+            row = conn.execute(
+                "SELECT game_date FROM service_records WHERE game_id = ? "
+                "AND COALESCE(game_date, '') != '' LIMIT 1",
+                (str(one["game_id"]),)).fetchone()
+            if not row:
+                continue
+            conn.execute(
+                "UPDATE game_roster_state SET game_date = ? "
+                "WHERE source = ? AND game_id = ?",
+                (str(row["game_date"])[:10], one["source"], str(one["game_id"])))
+            fixed += 1
+        if fixed:
+            conn.commit()
+    return fixed
 
 
 def is_posted(source: str, game_id: str) -> bool:
@@ -376,11 +425,19 @@ def _paid_games(player_row: int) -> int:
 
 
 def _played_games(player_row: int) -> List[Tuple[str, str, str]]:
-    """Игры, где человек был в составе, от старых к новым."""
+    """Игры, где человек был в составе, от старых к новым.
+
+    Даты нет — берём день публикации состава. Состав объявляют за день-два до
+    игры, так что для порога «считаем с такого-то числа» это верно, а главное —
+    состав, который тренер объявил, не пропадает из долгов молча. Именно так
+    потерялись одиннадцать человек 11.08.2026."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
-            """SELECT r.source, r.game_id, COALESCE(s.game_date, '') AS game_date
+            """SELECT r.source, r.game_id,
+                      COALESCE(NULLIF(s.game_date, ''),
+                               substr(COALESCE(s.posted_at, ''), 1, 10),
+                               '') AS game_date
                FROM game_rosters r
                LEFT JOIN game_roster_state s
                       ON s.source = r.source AND s.game_id = r.game_id

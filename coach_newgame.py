@@ -184,6 +184,12 @@ def register(draft: Dict[str, Any], polls: List[Dict[str, Any]]) -> str:
         arena=draft.get("arena", ""),
         team_b_id=str(draft.get("opponent_id") or ""),
     )
+    # Заводим строку состояния сразу и с датой. Иначе её создаст первый же
+    # шаг работы с составом — форма, публикация, пятёрка, — а он даты не знает,
+    # и игра тихо выпадет из подсчёта долгов.
+    import game_roster
+    game_roster.ensure_state({"source": source, "game_id": gid, "date": day,
+                              "opponent": draft.get("opponent", "")})
     for pm in polls:
         if not pm.get("poll_id"):
             continue
