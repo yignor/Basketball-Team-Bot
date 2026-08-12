@@ -208,6 +208,41 @@ def test_paid_closes_debt() -> None:
     check(owed_by(102) == 1, "у соседа долг на месте")
 
 
+def test_payment_for_uncounted_game() -> None:
+    """Оплата за игру вне зачёта не гасит долг за игру в зачёте.
+
+    Жалоба 12.08.2026, вторая итерация. Игру 02.08 в чат не объявляли и она
+    раньше начала порядка — в долги она не идёт. Но деньги за неё тренер
+    собрал, и оплата вычиталась: игры фильтровались, платежи брались все
+    подряд. Половина состава осталась без долгов за 15.08 и 16.08."""
+    print("\n=== оплата за игру вне зачёта ===")
+    import coach_payments
+    seed_player(501, "Одиннадцатый")
+
+    # Старая игра: до начала порядка и не объявленная.
+    old = "2026-08-02"
+    game_roster.add("infobasket", "g-old", 501, by="test")
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT INTO game_roster_state (source, game_id, "
+                     "game_date, opponent, posted_at) VALUES "
+                     "('infobasket', 'g-old', ?, '', '')", (old,))
+        conn.commit()
+    coach_payments.record(501, 900, coach_payments.KIND_GAME, 1,
+                          paid_at=old, bank="", note="за старую игру",
+                          added_by="test", fp="fp-old-game",
+                          game_ref="infobasket:g-old", by_coach=True)
+    check(owed_by(501) == 0, "за старую игру долга нет — она вне зачёта")
+
+    # Новая игра, объявленная. За неё ещё не платили.
+    post_roster("infobasket", "g-new", [501],
+                (date.today() + timedelta(days=7)).isoformat())
+    check(owed_by(501) == 1,
+          f"оплата старой игры не погасила новую: должен {owed_by(501)}")
+
+    left = game_roster.unpaid_games(501)
+    check([g[1] for g in left] == ["g-new"], f"должен именно за новую: {left}")
+
+
 def test_mark_paid_is_idempotent() -> None:
     """За одну игру нельзя заплатить дважды, сколько ни жми.
 
@@ -236,33 +271,6 @@ def test_mark_paid_is_idempotent() -> None:
     check(owed_by(402) == 1, "соседа не задело")
 
 
-def test_duplicate_marks_found() -> None:
-    """Старые дубли находятся — иначе их не вычистить."""
-    print("\n=== поиск старых дублей ===")
-    check(game_roster.duplicate_marks() == [], "на чистых данных дублей нет")
-
-    import coach_payments
-    with sheets_cache.get_connection() as conn:
-        row = conn.execute(
-            "SELECT id, player_row, game_ref FROM payments WHERE kind = ? "
-            "AND COALESCE(game_ref,'') != '' LIMIT 1",
-            (coach_payments.KIND_GAME,)).fetchone()
-        conn.execute(
-            "INSERT INTO payments (player_row, amount, kind, games, paid_at, "
-            "bank, note, added_by, created_at, fingerprint, pushed, period, "
-            "game_ref, by_coach) VALUES (?, 900, ?, 1, ?, '', 'дубль', 'test', "
-            "?, ?, 0, '', ?, 1)",
-            (row["player_row"], coach_payments.KIND_GAME,
-             date.today().isoformat(), datetime.now().isoformat(timespec="seconds"),
-             "fp-dup-test", row["game_ref"]))
-        conn.commit()
-
-    dups = game_roster.duplicate_marks()
-    check(len(dups) == 1 and dups[0]["game_ref"] == row["game_ref"],
-          f"дубль найден: {[(d['player_row'], d['game_ref']) for d in dups]}")
-    check(dups[0]["id"] != row["id"], "самая ранняя запись остаётся, лишняя видна")
-
-
 def main() -> int:
     print(f"База: {TMP}")
     test_posted_roster_counts()
@@ -271,8 +279,8 @@ def main() -> int:
     test_repair_from_service_records()
     test_roster_change_moves_debt()
     test_paid_closes_debt()
+    test_payment_for_uncounted_game()
     test_mark_paid_is_idempotent()
-    test_duplicate_marks_found()
 
     print("\n" + "=" * 60)
     if bad:

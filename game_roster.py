@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import coach_payments
 import sheets_cache
@@ -424,15 +424,51 @@ def post_text(game: Dict[str, Any], people: List[Dict[str, Any]]) -> str:
 
 # ─────────────────────── Оплата игр по составу ─────────────────────────────
 
-def _paid_games(player_row: int) -> int:
-    """Сколько игр человек оплатил всего (переводы «за N игр» + отметки)."""
+def _payments_of(player_row: int) -> Tuple[Set[str], int]:
+    """Оплаты игрока: ссылки на закрытые игры и число оплат без ссылки.
+
+    Считаем РАЗНЫЕ игры, а не количество платежей. Это важнее, чем кажется:
+    оплата, привязанная к конкретной игре, закрывает ровно её и не может
+    погасить чужую. Вторая оплата той же игры не добавляет ничего.
+
+    Без ссылки платёж приходит из СМС («перевёл за две игры») — такие ложатся
+    на самые ранние незакрытые игры по порядку."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(SUM(games), 0) FROM payments "
-            "WHERE player_row = ? AND kind = ?",
-            (int(player_row), coach_payments.KIND_GAME)).fetchone()
-    return int(row[0] or 0)
+        rows = conn.execute(
+            "SELECT COALESCE(game_ref, '') AS ref, COALESCE(games, 1) AS games "
+            "FROM payments WHERE player_row = ? AND kind = ?",
+            (int(player_row), coach_payments.KIND_GAME)).fetchall()
+    refs: Set[str] = set()
+    free = 0
+    for r in rows:
+        ref = str(r["ref"]).strip()
+        if ref:
+            refs.add(ref)
+        else:
+            free += int(r["games"] or 1)
+    return refs, free
+
+
+def _countable_games(player_row: int) -> List[Tuple[str, str, str]]:
+    """Игры, за которые с человека ждём денег: объявленные и с даты порядка."""
+    return [g for g in _played_games(player_row)
+            if g[2] >= PAY_SINCE and is_posted(g[0], g[1])]
+
+
+def unpaid_games(player_row: int) -> List[Tuple[str, str, str]]:
+    """Какие именно игры человек не закрыл, от старых к новым.
+
+    Раньше долг считался как «сыграно минус оплачено», и это давало тихий
+    перекос: игры фильтровались (только объявленные и с 04.08), а платежи
+    брались ВСЕ подряд. Человек, заплативший за игру 02.08 — не объявленную и
+    до начала порядка, — получал лишнюю оплату в зачёт, и она съедала долг за
+    будущую игру. Так пропали долги за 15.08 и 16.08 у половины состава
+    (12.08.2026)."""
+    games = _countable_games(player_row)
+    refs, free = _payments_of(player_row)
+    rest = [g for g in games if f"{g[0]}:{g[1]}" not in refs]
+    return rest[free:] if free else rest
 
 
 def _played_games(player_row: int) -> List[Tuple[str, str, str]]:
@@ -459,14 +495,10 @@ def _played_games(player_row: int) -> List[Tuple[str, str, str]]:
 
 
 def owes_for(source: str, game_id: str, player_row: int) -> bool:
-    """Не закрыта ли ЭТА игра. Оплаты ложатся на игры по порядку: заплатил за
-    две — закрыты две самые ранние из тех, где он играл."""
-    played = _played_games(player_row)
-    covered = _paid_games(player_row)
-    for i, (src, gid, _) in enumerate(played):
-        if src == source and str(gid) == str(game_id):
-            return i >= covered
-    return False
+    """Не закрыта ли ЭТА игра. Оплата с ссылкой закрывает ровно свою игру,
+    оплата без ссылки — самые ранние незакрытые."""
+    return any(src == source and str(gid) == str(game_id)
+               for src, gid, _ in unpaid_games(player_row))
 
 
 def debtors(source: str, game_id: str) -> List[Dict[str, Any]]:
@@ -489,16 +521,15 @@ def game_debts() -> List[Dict[str, Any]]:
         rows = [int(r["player_row"]) for r in conn.execute(
             "SELECT DISTINCT player_row FROM game_rosters")]
     for row in rows:
-        played = [g for g in _played_games(row)
-                  if g[2] >= PAY_SINCE and is_posted(g[0], g[1])]
-        owed = len(played) - _paid_games(row)
-        if owed <= 0:
+        owed_games = unpaid_games(row)
+        if not owed_games:
             continue
+        owed = len(owed_games)
         player = coach_payments.player_by_row(row) or {}
         price = coach_payments.game_price(player)
         out.append({"row": row, "title": player.get("title") or f"строка {row}",
                     "games": owed, "amount": owed * price,
-                    "last": played[-1][2] if played else ""})
+                    "last": owed_games[-1][2]})
     out.sort(key=lambda x: -x["amount"])
     return out
 
@@ -524,23 +555,6 @@ def mark_paid(player_row: int, source: str, game_id: str, by: str = "") -> Dict[
         game_ref=ref, by_coach=True)
 
 
-def duplicate_marks() -> List[Dict[str, Any]]:
-    """Повторные отметки «оплатил» за одну и ту же игру.
-
-    Возвращает лишние записи (самая ранняя по каждой паре человек+игра
-    остаётся). Нужно для разбора: за игру платят один раз, и всё сверх этого —
-    след старой дыры в защите от повторов."""
-    sheets_cache.init_db()
-    with sheets_cache.get_connection() as conn:
-        return [dict(r) for r in conn.execute(
-            """SELECT id, player_row, amount, paid_at, game_ref, note
-               FROM payments
-               WHERE kind = ? AND COALESCE(game_ref, '') != ''
-                 AND id NOT IN (SELECT MIN(id) FROM payments
-                                WHERE kind = ? AND COALESCE(game_ref, '') != ''
-                                GROUP BY player_row, game_ref)
-               ORDER BY player_row, id""",
-            (coach_payments.KIND_GAME, coach_payments.KIND_GAME))]
 
 
 def coach_debt_text(game: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
