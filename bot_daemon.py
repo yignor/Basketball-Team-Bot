@@ -6751,7 +6751,11 @@ async def _remind_game_debtors(app: Application, game: Dict[str, Any],
                 text=game_roster.player_debt_text(game, p, ahead=ahead))
             stat["sent"].append(p["title"])
         except Exception as e:
-            log.info(f"Напоминание об игре {p['title']} не доставлено: {e}")
+            # В журнал — строка листа, не фамилия. Журнал ложится на диск и
+            # уезжает в бэкапы, а имена по инварианту проекта на диске не
+            # живут: их берут из листа в момент показа. Для разбора «кому не
+            # дошло» строка и точнее — по ней всё и адресуется.
+            log.info(f"Напоминание об игре в строку {p['row']} не доставлено: {e}")
             stat["failed"].append(p["title"])
     return stat
 
@@ -6792,7 +6796,7 @@ async def _remind_players(app: Application, period: str,
                 chat_id=int(uid), text=training_dues.player_reminder(row, ahead))
             stat["sent"].append(row["title"])
         except Exception as e:
-            log.info(f"Напоминание {row['title']} не доставлено: {e}")
+            log.info(f"Напоминание в строку {row['row']} не доставлено: {e}")
             stat["failed"].append(row["title"])
     return stat
 
@@ -6827,7 +6831,7 @@ async def _ask_next_month(app: Application, period: str) -> Dict[str, List[str]]
                 reply_markup=markup)
             stat["sent"].append(row["title"])
         except Exception as e:
-            log.info(f"Вопрос про {period} не дошёл до {row['title']}: {e}")
+            log.info(f"Вопрос про {period} не дошёл до строки {row['row']}: {e}")
             stat["failed"].append(row["title"])
     return stat
 
@@ -7193,7 +7197,8 @@ async def _background_loop(app: Application) -> None:
                 found = await asyncio.to_thread(sheets_cache.link_from_votes)
                 if found:
                     log.info("Опознаны по голосам: "
-                             + ", ".join(f"{f['title']} (@{f['username']})" for f in found))
+                             + ", ".join(f"строка {f['player_row']} (@{f['username']})"
+                                         for f in found))
             except Exception as e:
                 log.warning(f"Опознание по голосам: {e}")
             await _send_starting_lineups(app)
@@ -7323,7 +7328,8 @@ async def on_startup(app: Application) -> None:
             found = await asyncio.to_thread(sheets_cache.link_from_votes)
             if found:
                 log.info("Опознаны по голосам в опросах: "
-                         + ", ".join(f"{f['title']} (@{f['username']})" for f in found))
+                         + ", ".join(f"строка {f['player_row']} (@{f['username']})"
+                                     for f in found))
         except Exception as e:
             log.warning(f"Опознание по голосам: {e}")
         # Свёрнутые суммы: собираем один раз, если их ещё нет. Дальше их

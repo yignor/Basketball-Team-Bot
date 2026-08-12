@@ -307,10 +307,15 @@ def detect_same_person(people: List[Dict[str, Any]], source: str,
                 same = ((na[0] == nb[0] and _lev1(" ".join(na[1:]), " ".join(nb[1:])))
                         or (na[1:] == nb[1:] and _lev1(na[0], nb[0])))
                 if same:
-                    pairs.append((f"{pref}:{team_id}:{a['player_id']}",
-                                  f"{pref}:{team_id}:{b['player_id']}"))
-                    log.info(f"качалка: {a['name']} и {b['name']} ({birth}) — "
-                             f"один человек, склеиваю")
+                    one = f"{pref}:{team_id}:{a['player_id']}"
+                    two = f"{pref}:{team_id}:{b['player_id']}"
+                    pairs.append((one, two))
+                    # В журнал — ссылки, не имена и не дата рождения. Журнал
+                    # ложится на диск и уезжает в бэкапы, а ФИО по инварианту
+                    # проекта живут только в памяти качалки. Для разбора
+                    # ссылки и удобнее: ровно по ним лежит запись в
+                    # player_merges, к которой этот лог и относится.
+                    log.info(f"качалка: {one} и {two} — один человек, склеиваю")
     return pairs
 
 
@@ -342,9 +347,11 @@ def detect_across_leagues(by_team: Dict[str, List[Dict[str, Any]]]) -> List[Tupl
                 continue
             pa = "slpro" if sa == "slpro" else "ib"
             pb = "slpro" if sb == "slpro" else "ib"
-            pairs.append((f"{pa}:{ta}:{a['player_id']}", f"{pb}:{tb}:{b['player_id']}"))
-            log.info(f"качалка: {a['name']} ({sa}) и {b['name']} ({sb}) — "
-                     f"один человек по дате рождения, склеиваю")
+            one = f"{pa}:{ta}:{a['player_id']}"
+            two = f"{pb}:{tb}:{b['player_id']}"
+            pairs.append((one, two))
+            log.info(f"качалка: {one} и {two} — один человек по дате рождения, "
+                     f"склеиваю")
     return pairs
 
 
