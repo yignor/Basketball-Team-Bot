@@ -308,6 +308,43 @@ def test_confirmed_text() -> None:
     check("0 ₽" not in lone, f"нулевой суммы в тексте нет: {lone!r}"[:110])
 
 
+def test_grouping() -> None:
+    """Долги разбиты по играм и по месяцам, а не одним списком.
+
+    Просьба тренера 12.08.2026: он собирает деньги на конкретной игре, и общий
+    список по людям для этого бесполезен — по нему не понять, кто нужен в
+    субботу, а кто в воскресенье. С месяцами то же: непогашенный сентябрь не
+    должен раствориться в октябре."""
+    print("\n=== разбивка по играм и месяцам ===")
+    import training_dues as td
+    day1 = (date.today() + timedelta(days=2)).isoformat()
+    day2 = (date.today() + timedelta(days=3)).isoformat()
+    for i, name in enumerate(["Гость", "Второй гость"], start=701):
+        seed_player(i, name)
+    post_roster("infobasket", "g-sat", [701, 702], day1)
+    post_roster("infobasket", "g-sun", [701], day2)
+
+    by_game = game_roster.debts_by_game()
+    mine = [x for x in by_game if x["game"]["game_id"] in ("g-sat", "g-sun")]
+    check(len(mine) == 2, f"две игры отдельными блоками: {len(mine)}")
+    first = next(x for x in mine if x["game"]["game_id"] == "g-sat")
+    check(len(first["rows"]) == 2 and first["total"] == 1800,
+          f"в субботней двое на 1800: {first['total']}")
+    second = next(x for x in mine if x["game"]["game_id"] == "g-sun")
+    check(len(second["rows"]) == 1, "в воскресной один")
+    days = [x["game"]["date"] for x in mine]
+    check(days == sorted(days), "ближайшая игра первой")
+
+    # Месяцы: непогашенный остаётся своим блоком рядом с новым.
+    months = td.debts_by_month()
+    check(isinstance(months, list), "разбивка по месяцам собирается")
+    for one in months:
+        check(td.counts(one["period"]),
+              f"месяц вне режима не показываем: {one['period']}")
+        check(one["total"] == sum(int(r["debt"]) for r in one["rows"]),
+              f"итог месяца сходится: {one['period']}")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     test_posted_roster_counts()
@@ -319,6 +356,7 @@ def main() -> int:
     test_payment_for_uncounted_game()
     test_mark_paid_is_idempotent()
     test_confirmed_text()
+    test_grouping()
 
     print("\n" + "=" * 60)
     if bad:

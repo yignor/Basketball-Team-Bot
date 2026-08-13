@@ -155,6 +155,25 @@ def debtors(period: str) -> List[Dict[str, Any]]:
     return [r for r in status(period) if r["need"] and not r["ok"]]
 
 
+def debts_by_month(today: Optional[date] = None) -> List[Dict[str, Any]]:
+    """Долги по месяцам: [{period, rows, total}], от старых к новым.
+
+    Непогашенный месяц не растворяется в следующем: наступил октябрь, а
+    сентябрь висит — тренер видит оба, каждый со своим списком. Иначе разговор
+    получается про «сколько всего», а платят люди за конкретный месяц."""
+    today = today or date.today()
+    out: List[Dict[str, Any]] = []
+    period, cur = FIRST_PERIOD, period_of(today)
+    while period <= cur:
+        if counts(period):
+            rows = debtors(period)
+            if rows:
+                out.append({"period": period, "rows": rows,
+                            "total": sum(int(r["debt"]) for r in rows)})
+        period = next_period(period)
+    return out
+
+
 def mark_paid(player_row: int, period: str, by: str = "",
               amount: Optional[int] = None) -> Dict[str, Any]:
     """Тренер отметил: деньги были, чек не присылали.

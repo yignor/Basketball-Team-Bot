@@ -534,6 +534,60 @@ def game_debts() -> List[Dict[str, Any]]:
     return out
 
 
+def debts_by_game() -> List[Dict[str, Any]]:
+    """Долги в разрезе игр: [{game, rows, total}], от ближайшей к дальней.
+
+    Тренер собирает деньги на игре, а не «вообще»: ему нужен список, с которым
+    можно прийти в зал и пройтись по людям. Общий список по людям на это не
+    годится — по нему не понять, кто нужен сегодня, а кто в воскресенье.
+
+    Долги каждого считаем один раз и раскладываем по играм, а не спрашиваем
+    базу на каждого в каждой игре."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = [int(r["player_row"]) for r in conn.execute(
+            "SELECT DISTINCT player_row FROM game_rosters")]
+    by_ref: Dict[str, List[int]] = {}
+    for row in rows:
+        for src, gid, _ in unpaid_games(row):
+            by_ref.setdefault(f"{src}:{gid}", []).append(row)
+    if not by_ref:
+        return []
+
+    # Идём от объявленных составов, а не от записей об опросах. Опрос и состав
+    # лежат в разных таблицах, и игра, заведённая без опроса, из списка бы
+    # выпала целиком — ровно так же, как выпадала игра без даты. Подпись
+    # (соперник, время) берём из опроса, если он есть, иначе из состояния игры.
+    known = {f"{g['source']}:{g['game_id']}": g
+             for g in games(from_day=date.fromisoformat(PAY_SINCE))}
+    out: List[Dict[str, Any]] = []
+    with sheets_cache.get_connection() as conn:
+        states = [dict(r) for r in conn.execute(
+            "SELECT source, game_id, game_date, opponent FROM game_roster_state "
+            "WHERE COALESCE(posted_at, '') != ''")]
+    for st in states:
+        ref = f"{st['source']}:{st['game_id']}"
+        who = by_ref.get(ref)
+        if not who:
+            continue
+        game = known.get(ref) or {
+            "source": st["source"], "game_id": str(st["game_id"]),
+            "date": _parse_date(st["game_date"]) or date.today(),
+            "time": "", "opponent": str(st["opponent"] or ""), "arena": "",
+        }
+        people = []
+        for player_row in who:
+            player = coach_payments.player_by_row(player_row) or {}
+            people.append({"row": player_row,
+                           "title": player.get("title") or f"строка {player_row}",
+                           "amount": coach_payments.game_price(player)})
+        people.sort(key=lambda p: p["title"])
+        out.append({"game": game, "rows": people,
+                    "total": sum(p["amount"] for p in people)})
+    out.sort(key=lambda x: x["game"]["date"])
+    return out
+
+
 def mark_paid(player_row: int, source: str, game_id: str, by: str = "") -> Dict[str, Any]:
     """Тренер отметил оплату игры без СМС.
 

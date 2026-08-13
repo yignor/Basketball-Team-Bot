@@ -4053,51 +4053,51 @@ def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
     import training_dues
     from datetime import date as _date
 
-    lines = ["💸 Долги", ""]
-    # Тренировки: все месяцы, которые уже считаются, от первого до текущего.
-    train: List[Tuple[str, List[Dict[str, Any]]]] = []
-    period = training_dues.FIRST_PERIOD
-    cur = training_dues.period_of(_date.today())
-    while period <= cur:
-        if training_dues.counts(period):
-            debtors = training_dues.debtors(period)
-            if debtors:
-                train.append((period, debtors))
-        period = training_dues.next_period(period)
+    lines = ["💸 Долги"]
 
-    lines.append("🏋️ <b>За тренировки</b>")
-    if train:
-        for per, people in train:
-            lines.append(f"   {training_dues.month_title(per)}:")
-            for r in people:
-                lines.append(f"   • {r['title']} — {r['debt']} ₽")
-    else:
-        lines.append("   Никто не должен.")
-
-    games = game_roster.game_debts()
+    # Игры — по играм, а не общим списком: тренер собирает деньги на игре и
+    # ему нужен список, с которым можно пройтись по залу. Ближайшая сверху.
+    by_game = game_roster.debts_by_game()
     lines += ["", "🏀 <b>За игры</b>"]
-    if games:
-        for g in games:
-            lines.append(f"   • {g['title']} — {g['games']} "
-                         f"{_plural(g['games'], 'игра', 'игры', 'игр')}, {g['amount']} ₽")
-    else:
+    if not by_game:
         lines.append("   Никто не должен.")
+    for one in by_game:
+        g = one["game"]
+        when = g["date"].strftime("%d.%m")
+        lines += ["", f"<b>{g.get('opponent') or 'соперник'} · {when}</b>"]
+        for r in one["rows"]:
+            lines.append(f"   • {r['title']} — {_rub(r['amount'])}")
+        if len(one["rows"]) > 1:
+            lines.append(f"   <i>{len(one['rows'])} чел. · {_rub(one['total'])}</i>")
+
+    # Тренировки — по месяцам. Непогашенный месяц остаётся своим блоком рядом
+    # с новым, а не сливается с ним в одну сумму.
+    by_month = training_dues.debts_by_month()
+    lines += ["", "🏋️ <b>За тренировки</b>"]
+    if not by_month:
+        lines.append("   Никто не должен.")
+    for one in by_month:
+        lines += ["", f"<b>{training_dues.month_title(one['period']).capitalize()}</b>"]
+        for r in one["rows"]:
+            lines.append(f"   • {r['title']} — {_rub(r['debt'])}")
+        if len(one["rows"]) > 1:
+            lines.append(f"   <i>{len(one['rows'])} чел. · {_rub(one['total'])}</i>")
 
     extra = coach_payments.extra_debts()
     if extra:
-        lines += ["", "📌 <b>Добавлено вручную</b>"]
+        lines += ["", "📌 <b>Добавлено вручную</b>", ""]
         for d in extra:
             who = coach_payments.debt_title(d)
             note = f" — {d['note']}" if d["note"] else ""
             # Кого нет в листе, помечаем: тренер должен видеть, что напоминание
             # такому человеку бот не отправит — телеграма его он не знает.
             mark = "" if int(d.get("player_row") or 0) > 0 else " (не из состава)"
-            lines.append(f"   • {who}{mark}: {d['amount']} ₽{note}")
+            lines.append(f"   • {who}{mark}: {_rub(d['amount'])}{note}")
 
-    total = (sum(r["debt"] for _, people in train for r in people)
-             + sum(g["amount"] for g in games)
+    total = (sum(one["total"] for one in by_month)
+             + sum(one["total"] for one in by_game)
              + sum(d["amount"] for d in extra))
-    lines += ["", f"Итого: {total} ₽" if total else "Долгов нет."]
+    lines += ["", f"<b>Всего: {_rub(total)}</b>" if total else "Долгов нет."]
 
     rows = [[InlineKeyboardButton(
         f"✅ Погасить: {coach_payments.debt_title(d)}"[:BTN_TEXT],
@@ -5334,9 +5334,8 @@ PRIV_NAME = 18
 
 
 def _rub(amount: int) -> str:
-    """1500 → «1 500 ₽» — тем же правилом, что и внутри раздела."""
-    import private_lessons
-    return private_lessons.rub(amount)
+    """1500 → «1 500 ₽». Неразрывный пробел: сумма не рвётся переносом строки."""
+    return f"{int(amount):,}".replace(",", "\u00a0") + "\u00a0₽"
 
 
 def _priv_main(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
