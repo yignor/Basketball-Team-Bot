@@ -5480,6 +5480,9 @@ def _priv_session(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
                                           callback_data=f"pl:done:{sid}")])
     rows.append([InlineKeyboardButton("💵 Цена этого занятия",
                                       callback_data=f"pl:sprice:{sid}")])
+    if s["members"]:
+        rows.append([InlineKeyboardButton("💵 Цена по людям",
+                                          callback_data=f"pl:pp:{sid}")])
     rows.append([InlineKeyboardButton(
         "🔁 Повторение" if row else "🔁 Повторять каждую неделю",
         callback_data=f"pl:rep:{sid}")])
@@ -5488,6 +5491,36 @@ def _priv_session(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
     rows.append([InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")])
     if done:
         lines += ["", "Нажми на человека — отметится оплата."]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _priv_spot_prices(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Цена каждому на этом занятии. Разовая, не трогает постоянную.
+
+    Бывает, что с одного сегодня берут меньше: пришёл на полчаса, привёл
+    друга, отрабатывает пропуск. Менять ради этого его постоянную цену нельзя —
+    она вернётся не сразу и не вспомнится."""
+    import private_lessons as pl
+    s = pl.session(uid, sid)
+    if not s:
+        return "Занятие не найдено.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К занятиям", callback_data="pl:days")]])
+    when = pl.human_date(s["day"]) + (f", {s['at_time']}" if s["at_time"] else "")
+    lines = [f"💵 Цена на {when}", ""]
+    if not s["members"]:
+        lines.append("На это занятие пока никто не записан.")
+    for m in s["members"]:
+        why = ("разовая" if m.get("price_once") else
+               "своя" if m.get("price_own") else "обычная")
+        tail = " · уже начислено" if m["charged"] else ""
+        lines.append(f"• {m['label']} — {_rub(m['price'])} ({why}){tail}")
+    if any(m["charged"] for m in s["members"]):
+        lines += ["", "Начисленное правка цены не изменит: занятие прошло по "
+                      "той цене, что была."]
+    rows = [[InlineKeyboardButton(
+        f"{m['label'][:PRIV_NAME]} · {m['price']} ₽"[:BTN_TEXT],
+        callback_data=f"pl:sp:{sid}:{m['id']}")] for m in s["members"]]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:s:{sid}")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -5857,6 +5890,25 @@ async def handle_private_callback(update: Update, context: ContextTypes.DEFAULT_
                     + (f" Убрал дат: {res['dropped']}." if res.get("dropped") else ""))
             text = f"{head}\n\n{text}"
 
+        elif what == "pp":
+            text, markup = await asyncio.to_thread(_priv_spot_prices, uid, int(arg))
+
+        elif what == "sp" and len(parts) > 3:
+            _clear_pending(uid)
+            _awaiting_priv[uid] = f"sp:{arg}:{parts[3]}"
+            s = await asyncio.to_thread(pl.session, uid, int(arg))
+            who = next((m for m in (s or {}).get("members", [])
+                        if int(m["id"]) == int(parts[3])), None)
+            now = int((who or {}).get("price_once") or 0)
+            text = (f"💵 Разовая цена для {(who or {}).get('label', '?')} на "
+                    f"{pl.human_date((s or {})['day'])}.\n\n"
+                    f"Сейчас: {_rub(now) if now else 'обычная'}.\n"
+                    "Пришли число, «0» — вернуть обычную.\n\n"
+                    "Постоянную цену человека это не меняет — только эту дату."
+                    "\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:pp:{arg}")]])
+
         elif what == "cash":
             text, markup = await asyncio.to_thread(_priv_cash, uid)
 
@@ -6035,6 +6087,11 @@ async def handle_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif kind == "sprice":
         await asyncio.to_thread(pl.set_session_price, uid, int(arg), amount)
         screen, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+        await msg.reply_text(screen, reply_markup=markup)
+    elif kind == "sp":
+        sid, _, pid = arg.partition(":")
+        await asyncio.to_thread(pl.set_visit_price, uid, int(sid), int(pid), amount)
+        screen, markup = await asyncio.to_thread(_priv_spot_prices, uid, int(sid))
         await msg.reply_text(screen, reply_markup=markup)
     elif kind == "pprice":
         await asyncio.to_thread(pl.set_person_price, uid, int(arg), amount)

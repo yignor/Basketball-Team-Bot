@@ -465,6 +465,52 @@ async def test_delete(bd) -> None:
     check(int(who["id"]) not in ghosts, "и не всплыл в составах занятий")
 
 
+async def test_spot_price(bd) -> None:
+    """Разовая цена на одно занятие: сегодня с человека меньше.
+
+    Просьба тренера 14.08.2026. Менять ради этого его постоянную цену нельзя —
+    она вернётся не сразу и не вспомнится, а в следующий раз он заплатит не
+    столько."""
+    print("\n=== разовая цена на одно занятие ===")
+    import private_lessons as pl
+    folk = pl.people(COACH.id)
+    who = folk[0]
+    await press(bd, "pl:new")
+    await say(bd, "завтра 12:00")
+    sid = newest(pl, COACH.id)
+    await press(bd, f"pl:t:{sid}:{who['id']}")
+
+    было = pl.session(COACH.id, sid)["members"][0]["price"]
+    text, markup, _ = await press(bd, f"pl:pp:{sid}")
+    check("Цена на" in text, f"экран цен по людям открылся: {text[:30]}")
+    btn = find(markup, who["label"][:10])
+    check(bool(btn), "человек — кнопка")
+
+    await press(bd, btn)
+    text, _ = await say(bd, "700")
+    m = pl.session(COACH.id, sid)["members"][0]
+    check(m["price"] == 700, f"разовая цена применилась: {m['price']}")
+    check("разовая" in text, "и помечена как разовая")
+
+    # Постоянная цена человека не изменилась.
+    check(int(pl.person(COACH.id, who["id"])["price"] or 0) == int(who["price"] or 0),
+          "постоянная цена не тронута")
+
+    # На другом занятии — снова обычная.
+    await press(bd, "pl:new")
+    await say(bd, "послезавтра 12:00")
+    other = newest(pl, COACH.id)
+    await press(bd, f"pl:t:{other}:{who['id']}")
+    check(pl.session(COACH.id, other)["members"][0]["price"] == было,
+          "на соседнюю дату не поехала")
+
+    # Ноль возвращает обычную.
+    await press(bd, f"pl:sp:{sid}:{who['id']}")
+    await say(bd, "0")
+    check(pl.session(COACH.id, sid)["members"][0]["price"] == было,
+          "ноль вернул обычную цену")
+
+
 async def test_button_width(bd) -> None:
     """Подписи не должны обрезаться на телефоне.
 
@@ -520,6 +566,7 @@ async def main() -> int:
     await test_back_steps(bd)
     await test_repeat(bd)
     await test_rename(bd)
+    await test_spot_price(bd)
     await test_button_width(bd)
     await test_delete(bd)
     await test_nothing_leaves(bd)

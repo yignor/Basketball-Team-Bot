@@ -73,6 +73,7 @@ CREATE INDEX IF NOT EXISTS priv_sessions_day
 CREATE TABLE IF NOT EXISTS priv_visits (
     session_id INTEGER NOT NULL,
     person_id  INTEGER NOT NULL,
+    price      INTEGER NOT NULL DEFAULT 0, -- разовая цена; 0 = как обычно
     PRIMARY KEY (session_id, person_id)
 );
 
@@ -131,6 +132,8 @@ def init() -> None:
     with sheets_cache.get_connection() as conn:
         conn.executescript(SCHEMA)
         _ensure_column(conn, "priv_sessions", "series_id",
+                       "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "priv_visits", "price",
                        "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     _ready = True
@@ -263,17 +266,41 @@ def set_general_price(owner_id: Any, value: int) -> None:
 
 
 def price_for(owner_id: Any, person: Dict[str, Any],
-              session: Optional[Dict[str, Any]] = None) -> int:
+              session: Optional[Dict[str, Any]] = None,
+              once: int = 0) -> int:
     """Сколько платит этот человек за это занятие.
 
-    От частного к общему: своя цена человека → цена занятия → общая цена.
-    Индивидуальная цена бьёт цену занятия намеренно: скидка или доплата
-    привязана к человеку, а не к дате."""
+    От частного к общему: разовая цена на этой дате → своя цена человека →
+    цена занятия → общая цена.
+
+    Разовая бьёт всё остальное: «сегодня с него 1000, хотя обычно 1500» — это
+    решение про конкретное занятие, и оно не должно менять ни его постоянную
+    цену, ни цену занятия для остальных."""
+    if int(once or 0) > 0:
+        return int(once)
     if int(person.get("price") or 0) > 0:
         return int(person["price"])
     if session and int(session.get("price") or 0) > 0:
         return int(session["price"])
     return general_price(owner_id)
+
+
+def set_visit_price(owner_id: Any, session_id: Any, person_id: Any,
+                    price: int) -> bool:
+    """Разовая цена человеку на одном занятии. 0 — вернуть обычную.
+
+    Уже начисленное не трогаем: занятие прошло по той цене, которая была. Это
+    тот же инвариант, что и везде в разделе, — задним числом деньги не
+    переписываем."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE priv_visits SET price = ? WHERE session_id = ? AND "
+            "person_id = ? AND session_id IN (SELECT id FROM priv_sessions "
+            "WHERE owner_id = ?)",
+            (int(price), int(session_id), int(person_id), _own(owner_id)))
+        conn.commit()
+        return cur.rowcount > 0
 
 
 # ─────────────────────────── люди ──────────────────────────────────────────
@@ -460,9 +487,11 @@ def session(owner_id: Any, session_id: Any) -> Optional[Dict[str, Any]]:
         if not row:
             return None
         got = dict(row)
-        going = {int(r["person_id"]) for r in conn.execute(
-            "SELECT person_id FROM priv_visits WHERE session_id = ?",
-            (int(session_id),))}
+        rows = conn.execute(
+            "SELECT person_id, COALESCE(price, 0) AS price FROM priv_visits "
+            "WHERE session_id = ?", (int(session_id),)).fetchall()
+        going = {int(r["person_id"]) for r in rows}
+        once = {int(r["person_id"]): int(r["price"]) for r in rows}
         money = {}
         for r in conn.execute(
                 "SELECT person_id, kind, amount FROM priv_money "
@@ -479,8 +508,10 @@ def session(owner_id: Any, session_id: Any) -> Optional[Dict[str, Any]]:
         # price — что человек платит именно за это занятие: уже начисленное,
         # если занятие проведено, иначе расчётное. price_own — его личная
         # цена, чтобы экран мог показать «(своя цена)».
+        spot = once.get(int(p["id"]), 0)
         members.append({**p, "price_own": int(p["price"] or 0),
-                        "price": m.get(CHARGE, price_for(owner_id, p, got)),
+                        "price_once": spot,
+                        "price": m.get(CHARGE, price_for(owner_id, p, got, spot)),
                         "charged": CHARGE in m, "paid": PAY in m})
     members.sort(key=lambda p: p["label"])
     got["members"] = members
