@@ -2092,6 +2092,7 @@ def _clear_pending(uid: int) -> None:
     _awaiting_access.pop(uid, None)
     _debt_draft.pop(uid, None)
     _awaiting_priv.pop(uid, None)
+    _awaiting_guest.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -2637,6 +2638,17 @@ async def handle_money_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await asyncio.to_thread(sheets_cache.set_setting, key, amount)
         screen, markup = await asyncio.to_thread(_sched_screen)
         await msg.reply_text(f"Записал.\n\n{screen}", reply_markup=markup,
+                             parse_mode="HTML")
+        raise ApplicationHandlerStop
+
+    if pending.startswith("editdebt:"):
+        debt_id = int(pending.split(":", 1)[1])
+        await asyncio.to_thread(coach_payments.edit_debt, debt_id, amount,
+                                note if note else None)
+        screen, markup = await asyncio.to_thread(_debts_screen)
+        await msg.reply_text(f"✏️ Поправил: {amount} ₽"
+                             + (f" ({note})" if note else "")
+                             + f"\n\n{screen}", reply_markup=markup,
                              parse_mode="HTML")
         raise ApplicationHandlerStop
 
@@ -4099,9 +4111,14 @@ def _debts_screen() -> Tuple[str, InlineKeyboardMarkup]:
              + sum(d["amount"] for d in extra))
     lines += ["", f"<b>Всего: {_rub(total)}</b>" if total else "Долгов нет."]
 
+    # Разовый долг заводят руками — и суммой, и пояснением ошибаются так же.
+    # Гасить и заводить заново неправильно: в истории останется закрытый долг,
+    # которого никто не платил.
     rows = [[InlineKeyboardButton(
-        f"✅ Погасить: {coach_payments.debt_title(d)}"[:BTN_TEXT],
-        callback_data=f"coach:closedebt:{d['id']}")] for d in extra[:5]]
+        f"✅ Погасить: {coach_payments.debt_title(d)}"[:BTN_TEXT - 3],
+        callback_data=f"coach:closedebt:{d['id']}"),
+        InlineKeyboardButton("✏️", callback_data=f"coach:editdebt:{d['id']}")]
+        for d in extra[:5]]
     rows.append([InlineKeyboardButton("➕ Добавить долг", callback_data="coach:adddebt")])
     rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:money")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
@@ -4322,9 +4339,15 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
                 f"➕ {v['title']}"[:BTN_TEXT],
                 callback_data=f"rost:add:{source}:{game_id}:{v['row']}")])
     for p in picked[:16]:
-        rows.append([InlineKeyboardButton(
+        # Гостя вписывают руками — значит и опечатываются руками. Рядом с
+        # «убрать» даём «поправить имя», чтобы не сносить и не заводить заново.
+        line = [InlineKeyboardButton(
             f"➖ {p['title']}"[:BTN_TEXT],
-            callback_data=f"rost:del:{source}:{game_id}:{p['row']}")])
+            callback_data=f"rost:del:{source}:{game_id}:{p['row']}")]
+        if p.get("guest"):
+            line.append(InlineKeyboardButton(
+                "✏️", callback_data=f"rost:gname:{source}:{game_id}:{p['row']}"))
+        rows.append(line)
     if picked and stale:
         rows.append([InlineKeyboardButton(
             "✏️ Обновить сообщение в чате",
@@ -4626,6 +4649,9 @@ _roster_focus: Dict[int, Tuple[str, str]] = {}
 # гостями. В callback_data не влезают — кириллица по два байта на знак.
 _roster_guests: Dict[int, List[str]] = {}
 
+# Кого из гостей сейчас переименовывают: {tg id: (источник, игра, строка)}.
+_awaiting_guest: Dict[int, Tuple[str, str, int]] = {}
+
 
 async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Кнопки состава на игру. Только для тренерского доступа."""
@@ -4652,6 +4678,16 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         if what == "add":
             await asyncio.to_thread(game_roster.add, source, game_id, row, str(user.id))
             _drop_pending(user.id)
+        elif what == "gname":
+            _clear_pending(user.id)
+            _awaiting_guest[user.id] = (source, game_id, row)
+            one = await asyncio.to_thread(game_roster.guest_card, source,
+                                          game_id, row)
+            await query.edit_message_text(
+                f"✏️ Новое имя вместо «{(one or {}).get('title', '?')}».\n\n"
+                "Пришли как надо.\n\nПередумал — /start.")
+            return
+
         elif what == "guest":
             # Имя в callback_data не кладём: кириллица это два байта на знак,
             # и лимит в 64 байта кончается на середине фамилии. Держим список
@@ -4875,7 +4911,20 @@ async def handle_roster_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     if not _can_see_reports(user):
         _roster_focus.pop(user.id, None)
+        _awaiting_guest.pop(user.id, None)
         return
+
+    # Правка имени гостя перехватывает ввод: тренер сейчас отвечает на вопрос
+    # «как его зовут», а не дописывает людей в состав.
+    if user.id in _awaiting_guest:
+        src, gid, row = _awaiting_guest.pop(user.id)
+        ok = await asyncio.to_thread(game_roster.rename_guest, src, gid, row,
+                                     msg.text or "")
+        screen, markup = await asyncio.to_thread(_roster_screen, src, gid)
+        head = "✏️ Поправил." if ok else "⚠️ Не вышло — гостя уже убрали."
+        await msg.reply_text(f"{head}\n\n{screen}", reply_markup=markup)
+        raise ApplicationHandlerStop
+
     source, game_id = _roster_focus[user.id]
     names = _split_names(msg.text or "")
     if not names:
@@ -5119,6 +5168,18 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             text, markup = await asyncio.to_thread(_debts_screen)
             await query.edit_message_text(text, reply_markup=markup,
                                           parse_mode="HTML")
+
+        elif what == "editdebt" and len(parts) > 2:
+            _clear_pending(user.id)
+            _awaiting_money[user.id] = f"editdebt:{parts[2]}"
+            one = next((d for d in await asyncio.to_thread(
+                coach_payments.extra_debts) if d["id"] == int(parts[2])), None)
+            who = coach_payments.debt_title(one) if one else "?"
+            note = (one or {}).get("note") or "без пояснения"
+            await query.edit_message_text(
+                f"✏️ Долг: {who} — {(one or {}).get('amount', 0)} ₽ ({note}).\n\n"
+                "Пришли новую сумму: «500». Можно сразу с пояснением: "
+                "«500 мяч».\n\nПередумал — /start.")
 
         elif what == "closedebt" and len(parts) > 2:
             import coach_payments
@@ -5474,7 +5535,8 @@ def _priv_session(uid: int, sid: int) -> Tuple[str, InlineKeyboardMarkup]:
             rows.append([InlineKeyboardButton(
                 f"{'✅' if m['paid'] else '▫️'} {m['label'][:PRIV_NAME]} · "
                 f"{m['price']} ₽", callback_data=f"pl:paid:{sid}:{m['id']}")])
-    rows.append([InlineKeyboardButton("✏️ Кто идёт", callback_data=f"pl:pick:{sid}")])
+    rows.append([InlineKeyboardButton("✏️ Кто идёт", callback_data=f"pl:pick:{sid}"),
+                 InlineKeyboardButton("🕒 Когда", callback_data=f"pl:when:{sid}")])
     if not done and s["members"]:
         rows.append([InlineKeyboardButton("✅ Занятие прошло",
                                           callback_data=f"pl:done:{sid}")])
@@ -5890,6 +5952,20 @@ async def handle_private_callback(update: Update, context: ContextTypes.DEFAULT_
                     + (f" Убрал дат: {res['dropped']}." if res.get("dropped") else ""))
             text = f"{head}\n\n{text}"
 
+        elif what == "when":
+            _clear_pending(uid)
+            _awaiting_priv[uid] = f"when:{arg}"
+            s = await asyncio.to_thread(pl.session, uid, int(arg))
+            now = (pl.human_date((s or {})["day"])
+                   + (f", {s['at_time']}" if (s or {}).get("at_time") else "")
+                   + (f" · {s['place']}" if (s or {}).get("place") else ""))
+            text = (f"🕒 Когда занятие?\n\nСейчас: {now}.\n\n"
+                    "Пришли новое одной строкой: «12.08 19:00 Зал на Ленина», "
+                    "«завтра 19:00».\n\nЛюди и начисления останутся при нём."
+                    "\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"pl:s:{arg}")]])
+
         elif what == "pp":
             text, markup = await asyncio.to_thread(_priv_spot_prices, uid, int(arg))
 
@@ -6052,6 +6128,19 @@ async def handle_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         screen, markup = await asyncio.to_thread(_priv_person, uid, int(arg))
         await msg.reply_text(f"Теперь это {res['label']}.\n\n{screen}",
                              reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    if kind == "when":
+        got = await asyncio.to_thread(pl.parse_when, text)
+        if not got:
+            _awaiting_priv[uid] = pending
+            await msg.reply_text("Не понял дату. Напиши «12.08 19:00» или "
+                                 "«завтра 19:00».\n\nПередумал — /start.")
+            raise ApplicationHandlerStop
+        await asyncio.to_thread(pl.set_session_when, uid, int(arg), got["day"],
+                                got["at_time"], got["place"])
+        screen, markup = await asyncio.to_thread(_priv_session, uid, int(arg))
+        await msg.reply_text(f"🕒 Перенёс.\n\n{screen}", reply_markup=markup)
         raise ApplicationHandlerStop
 
     if kind == "new":

@@ -345,6 +345,32 @@ def test_grouping() -> None:
               f"итог месяца сходится: {one['period']}")
 
 
+def test_edit_manual_debt() -> None:
+    """Разовый долг можно поправить, а не гасить и заводить заново.
+
+    Иначе в истории останется закрытый долг, которого никто не платил, — и
+    сводка «кто сколько внёс» начнёт врать."""
+    print("\n=== правка ручного долга ===")
+    import coach_payments as cp
+    debt_id = cp.add_debt(101, 450, "тренировка", by="test")
+    check(debt_id > 0, "долг заведён")
+
+    check(cp.edit_debt(debt_id, amount=700), "правка суммы прошла")
+    one = next(d for d in cp.extra_debts() if d["id"] == debt_id)
+    check(one["amount"] == 700, f"сумма новая: {one['amount']}")
+    check(one["note"] == "тренировка", "пояснение не затёрто")
+
+    cp.edit_debt(debt_id, amount=700, note="мяч")
+    one = next(d for d in cp.extra_debts() if d["id"] == debt_id)
+    check(one["note"] == "мяч", f"пояснение новое: {one['note']}")
+
+    было = len(cp.extra_debts())
+    cp.close_debt(debt_id)
+    check(len(cp.extra_debts()) == было - 1, "погашённый ушёл из открытых")
+    check(not cp.edit_debt(debt_id, amount=1),
+          "погашённый долг править нельзя — история не переписывается")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     test_posted_roster_counts()
@@ -354,6 +380,7 @@ def main() -> int:
     test_roster_change_moves_debt()
     test_paid_closes_debt()
     test_payment_for_uncounted_game()
+    test_edit_manual_debt()
     test_mark_paid_is_idempotent()
     test_confirmed_text()
     test_grouping()

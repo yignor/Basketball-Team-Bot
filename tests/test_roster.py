@@ -137,12 +137,32 @@ def test_start_counts_only_live() -> None:
           "снятый из состава вычищен из пятёрки")
 
 
+def test_rename_guest() -> None:
+    """Имя гостя можно поправить, не убирая его из состава."""
+    print("\n=== правка имени гостя ===")
+    guest = next(p for p in game_roster.roster(SRC, GID) if p.get("guest"))
+    was = len(game_roster.roster(SRC, GID))
+
+    ok = game_roster.rename_guest(SRC, GID, guest["row"], "  Гостев   Пётр ")
+    check(ok, "переименование прошло")
+    now = next(p for p in game_roster.roster(SRC, GID) if p.get("guest"))
+    check(now["title"] == "Гостев Пётр", f"имя поправлено: {now['title']}")
+    check(now["row"] == guest["row"], "номер тот же — связи не порвались")
+    check(len(game_roster.roster(SRC, GID)) == was, "из состава не выпал")
+
+    check(not game_roster.rename_guest(SRC, GID, guest["row"], "   "),
+          "пустое имя не принимаем")
+    check(not game_roster.rename_guest(SRC, GID, -99999, "Кто-то"),
+          "чужой номер не переименовать")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
     test_guest_in_roster()
     test_guest_not_in_money()
     test_guest_to_start()
+    test_rename_guest()
     test_start_counts_only_live()
 
     print("\n" + "=" * 60)

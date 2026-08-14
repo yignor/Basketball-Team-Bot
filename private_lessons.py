@@ -536,6 +536,26 @@ def sessions(owner_id: Any, limit: int = 10) -> List[Dict[str, Any]]:
     return (ahead + past)[:limit]
 
 
+def set_session_when(owner_id: Any, session_id: Any, day: str,
+                     at_time: str = "", place: str = "") -> bool:
+    """Перенести занятие: дата, время, место.
+
+    Заводится оно руками и руками же ошибается — перепутанный день недели или
+    не тот зал вылезают уже после того, как всё записано. Заводить занятие
+    заново нельзя: к нему привязаны люди, а если оно прошло — ещё и деньги.
+
+    Начисления не трогаем: они сделаны по факту занятия, а не по его дате."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE priv_sessions SET day = ?, at_time = ?, place = ? "
+            "WHERE id = ? AND owner_id = ?",
+            (str(day), str(at_time), str(place)[:40], int(session_id),
+             _own(owner_id)))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def set_session_price(owner_id: Any, session_id: Any, price: int) -> bool:
     init()
     with sheets_cache.get_connection() as conn:

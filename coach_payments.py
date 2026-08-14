@@ -574,6 +574,32 @@ def add_debt(player_row: int, amount: int, note: str = "", by: str = "",
         return int(cur.lastrowid)
 
 
+def edit_debt(debt_id: int, amount: Optional[int] = None,
+              note: Optional[str] = None) -> bool:
+    """Поправить разовый долг: сумму или пояснение.
+
+    Заводится руками, значит и ошибается руками: не та сумма, опечатка в
+    пояснении. Гасить и заводить заново неправильно — в истории останется
+    закрытый долг, которого никто не платил."""
+    sheets_cache.init_db()
+    sets, args = [], []
+    if amount is not None:
+        sets.append("amount = ?")
+        args.append(int(amount))
+    if note is not None:
+        sets.append("note = ?")
+        args.append(str(note)[:60])
+    if not sets:
+        return False
+    args.append(int(debt_id))
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            f"UPDATE extra_debts SET {', '.join(sets)} WHERE id = ? "
+            "AND closed_at = ''", args)
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def debt_title(debt: Dict[str, Any]) -> str:
     """Чей долг — по строке листа или по вписанному имени."""
     if int(debt.get("player_row") or 0) > 0:

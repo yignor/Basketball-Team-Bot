@@ -211,6 +211,20 @@ def add_guest(source: str, game_id: str, title: str, by: str = "") -> Dict[str, 
     return {"row": -gid, "title": name}
 
 
+def rename_guest(source: str, game_id: str, row: int, title: str) -> bool:
+    """Поправить имя гостя: вписывают его руками и ошибаются так же руками."""
+    name = " ".join(str(title or "").split())[:40]
+    if not name:
+        return False
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        cur = conn.execute(
+            "UPDATE game_guests SET title = ? WHERE id = ? AND source = ? "
+            "AND game_id = ?", (name, abs(int(row)), source, str(game_id)))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def roster(source: str, game_id: str) -> List[Dict[str, Any]]:
     """Состав на игру: игроки из листа плюс гости на эту игру."""
     sheets_cache.init_db()

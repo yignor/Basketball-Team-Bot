@@ -511,6 +511,41 @@ async def test_spot_price(bd) -> None:
           "ноль вернул обычную цену")
 
 
+async def test_move_session(bd) -> None:
+    """Занятие можно перенести: дата, время, место.
+
+    Заводится оно руками и руками же ошибается — перепутанный день или не тот
+    зал вылезают уже после того, как всё записано. Заводить заново нельзя: к
+    занятию привязаны люди, а если оно прошло — ещё и деньги."""
+    print("\n=== перенос занятия ===")
+    import private_lessons as pl
+    folk = pl.people(COACH.id)
+    await press(bd, "pl:new")
+    await say(bd, "завтра 10:00 Первый зал")
+    sid = newest(pl, COACH.id)
+    await press(bd, f"pl:t:{sid}:{folk[0]['id']}")
+    было = pl.session(COACH.id, sid)
+
+    text, markup, _ = await press(bd, f"pl:when:{sid}")
+    check("Сейчас:" in text, f"показано текущее время: {text[:60]}")
+
+    text, markup = await say(bd, "20.12 18:30 Другой зал")
+    now = pl.session(COACH.id, sid)
+    check(now["day"] == "2026-12-20", f"дата перенесена: {now['day']}")
+    check(now["at_time"] == "18:30", f"время: {now['at_time']}")
+    check(now["place"] == "Другой зал", f"место: {now['place']}")
+    check(len(now["members"]) == len(было["members"]),
+          "люди остались при занятии")
+
+    # Непонятный ввод не должен стирать то, что было.
+    await press(bd, f"pl:when:{sid}")
+    text, _ = await say(bd, "как-нибудь")
+    check("Не понял" in text, "мусор переспрашиваем")
+    check(pl.session(COACH.id, sid)["day"] == "2026-12-20",
+          "и дату при этом не трогаем")
+    await say(bd, "21.12 19:00")
+
+
 async def test_button_width(bd) -> None:
     """Подписи не должны обрезаться на телефоне.
 
@@ -567,6 +602,7 @@ async def main() -> int:
     await test_repeat(bd)
     await test_rename(bd)
     await test_spot_price(bd)
+    await test_move_session(bd)
     await test_button_width(bd)
     await test_delete(bd)
     await test_nothing_leaves(bd)
