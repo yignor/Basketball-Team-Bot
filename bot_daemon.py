@@ -4622,6 +4622,10 @@ def _pay_last_text() -> str:
 # в базе.
 _roster_focus: Dict[int, Tuple[str, str]] = {}
 
+# Фамилии, которых не нашлось в листе: держим, чтобы предложить дописать их
+# гостями. В callback_data не влезают — кириллица по два байта на знак.
+_roster_guests: Dict[int, List[str]] = {}
+
 
 async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Кнопки состава на игру. Только для тренерского доступа."""
@@ -4647,6 +4651,18 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
     try:
         if what == "add":
             await asyncio.to_thread(game_roster.add, source, game_id, row, str(user.id))
+            _drop_pending(user.id)
+        elif what == "guest":
+            # Имя в callback_data не кладём: кириллица это два байта на знак,
+            # и лимит в 64 байта кончается на середине фамилии. Держим список
+            # ненайденных в памяти и ссылаемся номером.
+            names = _roster_guests.get(user.id) or []
+            name = names[row] if 0 <= row < len(names) else ""
+            made = await asyncio.to_thread(game_roster.add_guest, source,
+                                           game_id, name, str(user.id))
+            if made.get("error"):
+                await query.answer(made["error"], show_alert=True)
+            _roster_guests.pop(user.id, None)
             _drop_pending(user.id)
         elif what == "skip":
             _drop_pending(user.id)
@@ -4883,14 +4899,33 @@ async def handle_roster_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     head = []
     if added:
         head.append("➕ Добавил: " + ", ".join(added))
-    if missing:
-        head.append("Не нашёл в листе «Игроки»: " + ", ".join(missing))
+    _roster_guests[user.id] = missing
     question = _next_roster_question(user.id, source, game_id)
     if question:
+        if missing:
+            head.append("Не нашёл в листе «Игроки»: " + ", ".join(missing))
         text, markup = question
         await msg.reply_text(("\n".join(head) + "\n\n" if head else "") + text,
                              reply_markup=markup)
         raise ApplicationHandlerStop
+
+    # Никого похожего нет — предлагаем дописать гостем, а не оставляем тупик.
+    # Играют не только те, кто в листе: подмена, легионер, отец игрока. В лист
+    # их заводить нельзя — там опросы, взносы и статистика.
+    if missing:
+        rows = [[InlineKeyboardButton(f"✍️ Гость: {name}"[:BTN_TEXT],
+                                      callback_data=f"rost:guest:{source}:{game_id}:{i}")]
+                for i, name in enumerate(missing[:5])]
+        rows.append([InlineKeyboardButton(
+            "⬅️ К составу", callback_data=f"rost:open:{source}:{game_id}")])
+        await msg.reply_text(
+            ("\n".join(head) + "\n\n" if head else "")
+            + "В листе «Игроки» никого похожего нет: " + ", ".join(missing)
+            + "\n\nЕсли он всё-таки играет — допиши гостем. Он попадёт в состав "
+              "и в пятёрку, но не в опросы, взносы и статистику.",
+            reply_markup=InlineKeyboardMarkup(rows))
+        raise ApplicationHandlerStop
+
     screen, markup = await asyncio.to_thread(_roster_screen, source, game_id)
     await msg.reply_text(("\n".join(head) + "\n\n" if head else "") + screen,
                          reply_markup=markup)

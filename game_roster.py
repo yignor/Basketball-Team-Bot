@@ -161,7 +161,58 @@ def voters(game_id: str, vote_type: str = VOTE_READY) -> List[Dict[str, Any]]:
 
 # ─────────────────────────── Состав ────────────────────────────────────────
 
+def guest_card(source: str, game_id: str, row: int) -> Optional[Dict[str, Any]]:
+    """Карточка гостя по отрицательному номеру. Формой совпадает с игроком из
+    листа, чтобы экраны и пятёрка не различали, кто откуда."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        got = conn.execute(
+            "SELECT id, title FROM game_guests WHERE id = ? AND source = ? "
+            "AND game_id = ?", (abs(int(row)), source, str(game_id))).fetchone()
+    if not got:
+        return None
+    title = str(got["title"]).strip()
+    parts = title.split()
+    return {"row": -int(got["id"]), "guest": True, "title": title,
+            "surname": parts[0] if parts else title,
+            "name": " ".join(parts[1:]),
+            "nickname": "", "birthday": "", "role": "", "status": "",
+            "team": "", "pay_season": 0, "pay_game": 0, "active_mark": "",
+            "pays_season": False}
+
+
+def add_guest(source: str, game_id: str, title: str, by: str = "") -> Dict[str, Any]:
+    """Дописать в состав человека не из листа «Игроки».
+
+    Заводить его в лист ради одной игры нельзя: там он получит опросы, взносы
+    и статистику, к которым отношения не имеет. Поэтому гость живёт при игре и
+    исчезает вместе с ней."""
+    name = " ".join(str(title or "").split())[:40]
+    if not name:
+        return {"error": "Пустое имя."}
+    sheets_cache.init_db()
+    key = name.lower().replace("ё", "е")
+    with sheets_cache.get_connection() as conn:
+        # Сравниваем в питоне, а не в SQL: lower() у SQLite кириллицу не знает,
+        # и «Иванов» с «иванов» прошли бы как разные гости.
+        gid = next((int(r["id"]) for r in conn.execute(
+            "SELECT id, title FROM game_guests WHERE source = ? AND game_id = ?",
+            (source, str(game_id)))
+            if str(r["title"]).lower().replace("ё", "е") == key), None)
+        if gid is None:
+            cur = conn.execute(
+                "INSERT INTO game_guests (source, game_id, title, added_by, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (source, str(game_id), name, str(by),
+                 datetime.now().isoformat(timespec="seconds")))
+            gid = int(cur.lastrowid)
+        conn.commit()
+    add(source, game_id, -gid, by=by)
+    return {"row": -gid, "title": name}
+
+
 def roster(source: str, game_id: str) -> List[Dict[str, Any]]:
+    """Состав на игру: игроки из листа плюс гости на эту игру."""
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
@@ -169,7 +220,9 @@ def roster(source: str, game_id: str) -> List[Dict[str, Any]]:
             (source, str(game_id))).fetchall()
     out = []
     for r in rows:
-        player = coach_payments.player_by_row(int(r["player_row"]))
+        row = int(r["player_row"])
+        player = (guest_card(source, game_id, row) if row < 0
+                  else coach_payments.player_by_row(row))
         if player:
             out.append(player)
     out.sort(key=_by_surname)
@@ -465,6 +518,11 @@ def unpaid_games(player_row: int) -> List[Tuple[str, str, str]]:
     до начала порядка, — получал лишнюю оплату в зачёт, и она съедала долг за
     будущую игру. Так пропали долги за 15.08 и 16.08 у половины состава
     (12.08.2026)."""
+    # Гость (отрицательный номер) в денежный учёт не входит: его нет в листе,
+    # у него нет ни цены игры, ни телеграма, и требовать с него нечего. Если
+    # деньги за него всё-таки ждут — это разовый долг, там есть свободное имя.
+    if int(player_row) <= 0:
+        return []
     games = _countable_games(player_row)
     refs, free = _payments_of(player_row)
     rest = [g for g in games if f"{g[0]}:{g[1]}" not in refs]
@@ -519,7 +577,7 @@ def game_debts() -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     with sheets_cache.get_connection() as conn:
         rows = [int(r["player_row"]) for r in conn.execute(
-            "SELECT DISTINCT player_row FROM game_rosters")]
+            "SELECT DISTINCT player_row FROM game_rosters WHERE player_row > 0")]
     for row in rows:
         owed_games = unpaid_games(row)
         if not owed_games:
@@ -546,7 +604,7 @@ def debts_by_game() -> List[Dict[str, Any]]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         rows = [int(r["player_row"]) for r in conn.execute(
-            "SELECT DISTINCT player_row FROM game_rosters")]
+            "SELECT DISTINCT player_row FROM game_rosters WHERE player_row > 0")]
     by_ref: Dict[str, List[int]] = {}
     for row in rows:
         for src, gid, _ in unpaid_games(row):

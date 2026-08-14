@@ -97,7 +97,13 @@ def toggle_start(source: str, game_id: str, player_row: int) -> Tuple[bool, str]
     Больше пяти не берём: пятёрка — это пятёрка, и молча растянуть её значит
     прислать в чат список, который не соответствует названию."""
     import json
+    import game_roster
     current = start_five(source, game_id)
+    # Считаем только тех, кто ещё в составе. Состав меняется до последнего, и
+    # снятый игрок оставался в пятёрке: тренер видел четверых, а бот отказывал
+    # добавить пятого — «в старте уже 5».
+    live = {p["row"] for p in game_roster.roster(source, str(game_id))}
+    current = [r for r in current if r in live]
     row = int(player_row)
     if row in current:
         current.remove(row)
@@ -312,7 +318,12 @@ def player_card(p: Dict[str, Any], number: str = "") -> List[str]:
     # Почему нет цифр — говорим прямо. «Нет в заявке» чинит тренер (дозаявить),
     # «не играл» не чинится ничем и пройдёт само; молчание же выглядит как
     # поломка бота.
-    if avg.get("unlisted"):
+    if p.get("guest"):
+        # У гостя цифр нет и быть не может: он не в листе и не в заявке лиги.
+        # «Нет в заявке» тут читалось бы как недоработка тренера, а чинить
+        # нечего — человек просто не наш.
+        second = ["гость на эту игру"]
+    elif avg.get("unlisted"):
         second.append("нет в заявке лиги")
     elif not avg.get("games"):
         second.append("в этом турнире не играл")

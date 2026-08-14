@@ -621,6 +621,24 @@ CREATE TABLE IF NOT EXISTS game_rosters (
     PRIMARY KEY (source, game_id, player_row)
 );
 
+-- Гости на одну игру: люди не из листа «Игроки». Подмена, легионер, отец
+-- игрока — они играют, попадают в состав и в стартовую пятёрку, но заводить
+-- их в лист нельзя: там они получат опросы, взносы и статистику, к которым
+-- отношения не имеют.
+--
+-- В game_rosters такой человек лежит с ОТРИЦАТЕЛЬНЫМ player_row (= -id). Так
+-- ключ состава остаётся одним числом, и всё, что построено на номерах строк —
+-- стартовая пятёрка, кнопки, снимок публикации, — работает без переделки.
+CREATE TABLE IF NOT EXISTS game_guests (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    source     TEXT NOT NULL,
+    game_id    TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    added_by   TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS game_guests_game ON game_guests (source, game_id);
+
 -- Состояние сбора состава: черновик, отправлен ли в чат, когда.
 CREATE TABLE IF NOT EXISTS game_roster_state (
     source      TEXT NOT NULL,
