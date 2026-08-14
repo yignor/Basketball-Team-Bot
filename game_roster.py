@@ -465,17 +465,21 @@ def delivery_report(game: Dict[str, Any], sent: List[str], failed: List[str],
 
     Причины разведены намеренно: они чинятся по-разному. «Не запускал бота» —
     человека надо привязать, «заблокировал» — с ним говорить лично."""
+    # Каждый с новой строки, а не через запятую: список из десяти фамилий в
+    # одну строку телефон переносит как попало, и глазами по нему не пройтись.
+    def block(names: List[str]) -> List[str]:
+        return [f"  • {n}" for n in names]
+
     when = "Завтра игра" if ahead else f"Игра {game_label(game)} прошла"
     lines = [f"💰 {when} — напомнил про оплату.", ""]
     lines.append(f"Дошло: {len(sent)}")
-    if sent:
-        lines.append("  " + ", ".join(sent))
+    lines += block(sent)
     if failed:
         lines += ["", f"Не дошло — закрыли личку или заблокировали бота: "
-                      f"{len(failed)}", "  " + ", ".join(failed)]
+                      f"{len(failed)}"] + block(failed)
     if unknown:
-        lines += ["", f"Не написать — не запускали бота: {len(unknown)}",
-                  "  " + ", ".join(unknown)]
+        lines += ["", f"Не написать — не запускали бота: {len(unknown)}"] \
+                 + block(unknown)
     if failed or unknown:
         lines += ["", "С этими придётся поговорить лично."]
     return "\n".join(lines)

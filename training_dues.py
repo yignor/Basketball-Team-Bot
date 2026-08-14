@@ -338,17 +338,21 @@ def last_call_text(row: Dict[str, Any], period: str) -> str:
 def delivery_report(period: str, sent: List[str], failed: List[str],
                     unknown: List[str]) -> str:
     """Отбивка тренеру: кому дошло, кому нет и почему."""
+    # Каждый с новой строки: список из двадцати фамилий в одну строку телефон
+    # переносит как попало, и глазами по нему не пройтись.
+    def block(names: List[str]) -> List[str]:
+        return [f"  • {n}" for n in names]
+
     title = month_title(period)
     lines = [f"📨 Напоминание про {title} разослано.", ""]
     lines.append(f"Дошло: {len(sent)}")
-    if sent:
-        lines.append("  " + ", ".join(sent))
+    lines += block(sent)
     if failed:
-        lines += ["", f"Не дошло — закрыли личку или заблокировали бота: {len(failed)}",
-                  "  " + ", ".join(failed)]
+        lines += ["", f"Не дошло — закрыли личку или заблокировали бота: "
+                      f"{len(failed)}"] + block(failed)
     if unknown:
-        lines += ["", f"Не написать — не запускали бота: {len(unknown)}",
-                  "  " + ", ".join(unknown)]
+        lines += ["", f"Не написать — не запускали бота: {len(unknown)}"] \
+                 + block(unknown)
     if failed or unknown:
         lines += ["", "С этими придётся поговорить лично."]
     return "\n".join(lines)
