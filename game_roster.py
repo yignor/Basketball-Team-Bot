@@ -455,6 +455,32 @@ def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     return out
 
 
+def delivery_report(game: Dict[str, Any], sent: List[str], failed: List[str],
+                    unknown: List[str], ahead: bool = False) -> str:
+    """Отбивка тренеру после рассылки: кому дошло, кому нет и почему.
+
+    Числами тут не обойтись. «Напомнил шестерым, не дошло до четверых» — это
+    сообщение, после которого тренер всё равно идёт выяснять, кто эти четверо,
+    то есть бот сделал полработы.
+
+    Причины разведены намеренно: они чинятся по-разному. «Не запускал бота» —
+    человека надо привязать, «заблокировал» — с ним говорить лично."""
+    when = "Завтра игра" if ahead else f"Игра {game_label(game)} прошла"
+    lines = [f"💰 {when} — напомнил про оплату.", ""]
+    lines.append(f"Дошло: {len(sent)}")
+    if sent:
+        lines.append("  " + ", ".join(sent))
+    if failed:
+        lines += ["", f"Не дошло — закрыли личку или заблокировали бота: "
+                      f"{len(failed)}", "  " + ", ".join(failed)]
+    if unknown:
+        lines += ["", f"Не написать — не запускали бота: {len(unknown)}",
+                  "  " + ", ".join(unknown)]
+    if failed or unknown:
+        lines += ["", "С этими придётся поговорить лично."]
+    return "\n".join(lines)
+
+
 def post_text(game: Dict[str, Any], people: List[Dict[str, Any]]) -> str:
     """Сообщение в общий чат — единственное, что уходит не в личку."""
     head = f"🏀 Состав на игру: {game_label(game)}"

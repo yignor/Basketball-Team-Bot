@@ -6821,13 +6821,9 @@ async def _game_schedule(app: Application) -> None:
                 ahead = kind == "player_before"
                 stat = await _remind_game_debtors(app, game, ahead=ahead)
                 if _reminder_worth_telling(stat):
-                    when = ("Завтра игра" if ahead else
-                            f"Игра {game_roster.game_label(game)} прошла")
-                    await _tell_coaches(
-                        app, f"💰 {when} — напомнил про оплату "
-                             f"{len(stat['sent'])} игрокам."
-                             + (f"\nНе дошло до {len(stat['failed']) + len(stat['unknown'])}."
-                                if stat["failed"] or stat["unknown"] else ""))
+                    await _tell_coaches(app, game_roster.delivery_report(
+                        game, stat["sent"], stat["failed"], stat["unknown"],
+                        ahead=ahead))
                 else:
                     log.info(f"Оплата игры {game_roster.game_label(game)}: "
                              "должников нет, тренера не беспокою")
