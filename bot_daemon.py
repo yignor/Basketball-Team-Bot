@@ -5453,8 +5453,15 @@ def _priv_main(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     if plans:
         lines += ["", "Расписание: " + "; ".join(pl.series_title(s) for s in plans)]
     if now["sessions"] or now["paid"]:
+        # Раньше стояло одно число — «получено», — и оно ничего не объясняло:
+        # тренер видел 8 100 при шести занимавшихся по 900 и не понимал, откуда
+        # оно. Рядом с ним начислено, и любое расхождение сразу видно.
         lines += ["", f"{pl.month_title(now['ym']).capitalize()}: "
-                      f"занятий {now['sessions']}, получено {_rub(now['paid'])}"]
+                      f"занятий {now['sessions']}",
+                  f"Начислено {_rub(now['charged'])} · "
+                  f"получено {_rub(now['paid'])}"]
+        if now.get("ahead"):
+            lines.append(f"Из них авансом: {_rub(now['ahead'])}")
     return "\n".join(lines), InlineKeyboardMarkup([
         [InlineKeyboardButton("📅 Занятия", callback_data="pl:days")],
         [InlineKeyboardButton("👥 Люди", callback_data="pl:who")],
@@ -5790,6 +5797,9 @@ def _priv_cash(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
              f"Занятий провёл: {now['sessions']}",
              f"Начислено: {_rub(now['charged'])}",
              f"Получено: {_rub(now['paid'])}"]
+    if now.get("ahead"):
+        # Иначе «получено больше, чем начислено» читается как ошибка счёта.
+        lines.append(f"Из них авансом: {_rub(now['ahead'])}")
     if now["debt"]:
         lines += ["", f"Всего долгов на сегодня: {_rub(now['debt'])}"]
     return "\n".join(lines), InlineKeyboardMarkup([

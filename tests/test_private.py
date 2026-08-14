@@ -546,6 +546,55 @@ async def test_move_session(bd) -> None:
     await say(bd, "21.12 19:00")
 
 
+async def test_no_double_payment(bd) -> None:
+    """Одно занятие — одна оплата, каким бы путём её ни внесли.
+
+    Жалоба 14.08.2026: тренер провёл занятие на шестерых по 900, все заплатили,
+    а бот показал «получено 8 100». У троих оказалось по две оплаты: одна
+    внесена на карточке человека, вторая — галочкой на занятии. Две дороги
+    записывали одно и то же и не знали друг о друге."""
+    print("\n=== оплата не задваивается ===")
+    import private_lessons as pl
+    made = pl.add_person(COACH.id, "Двойнов Д")
+    pid = made["id"]
+    await press(bd, "pl:new")
+    await say(bd, "завтра 08:00")
+    sid = newest(pl, COACH.id)
+    await press(bd, f"pl:t:{sid}:{pid}")
+    await press(bd, f"pl:done:{sid}")
+    цена = pl.session(COACH.id, sid)["members"][0]["price"]
+    check(pl.balance(COACH.id, pid) == цена, f"начислено {цена}")
+
+    # Тренер вносит деньги на карточке человека.
+    await press(bd, f"pl:pay:{pid}")
+    await say(bd, str(цена))
+    check(pl.balance(COACH.id, pid) == 0, "рассчитались")
+
+    # И тут же отмечает галочкой на занятии — второй оплаты быть не должно.
+    await press(bd, f"pl:paid:{sid}:{pid}")
+    оплат = len([h for h in pl.history(COACH.id, pid) if h["kind"] == pl.PAY])
+    check(оплат == 1, f"оплата одна, а не две: {оплат}")
+    check(pl.balance(COACH.id, pid) == 0, f"баланс не уехал в аванс: "
+                                          f"{pl.money_word(pl.balance(COACH.id, pid))}")
+    check(pl.session(COACH.id, sid)["members"][0]["paid"], "галочка стоит")
+
+    # Снятие галочки не должно стирать реально внесённые деньги.
+    await press(bd, f"pl:paid:{sid}:{pid}")
+    оплат = len([h for h in pl.history(COACH.id, pid) if h["kind"] == pl.PAY])
+    check(оплат == 1, f"деньги остались: оплат {оплат}")
+    check(pl.balance(COACH.id, pid) == 0, "и баланс прежний")
+
+    # А оплату, заведённую самой галочкой, снятие убирает.
+    другой = pl.add_person(COACH.id, "Одиночный О")["id"]
+    await press(bd, f"pl:t:{sid}:{другой}")
+    await press(bd, f"pl:done:{sid}")
+    await press(bd, f"pl:paid:{sid}:{другой}")
+    check(pl.balance(COACH.id, другой) == 0, "отметил — рассчитались")
+    await press(bd, f"pl:paid:{sid}:{другой}")
+    check(pl.balance(COACH.id, другой) > 0,
+          f"снял — снова должен: {pl.money_word(pl.balance(COACH.id, другой))}")
+
+
 async def test_button_width(bd) -> None:
     """Подписи не должны обрезаться на телефоне.
 
@@ -603,6 +652,7 @@ async def main() -> int:
     await test_rename(bd)
     await test_spot_price(bd)
     await test_move_session(bd)
+    await test_no_double_payment(bd)
     await test_button_width(bd)
     await test_delete(bd)
     await test_nothing_leaves(bd)

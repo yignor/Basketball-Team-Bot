@@ -841,7 +841,20 @@ def series_roster(owner_id: Any, series_id: Any, people_ids: List[int]) -> bool:
 
 
 def toggle_paid(owner_id: Any, session_id: Any, person_id: Any) -> bool:
-    """Отметка «заплатил за это занятие». Возвращает «оплачено ли теперь»."""
+    """Отметка «заплатил за это занятие». Возвращает «оплачено ли теперь».
+
+    Сначала засчитываем то, что человек уже внёс без привязки к занятию, и
+    только если такого нет — заводим новую оплату.
+
+    Без этого две дороги записывали одно и то же. Тренер вносил деньги на
+    карточке человека («💰 Внести оплату»), а потом отмечал его же галочкой на
+    проведённом занятии — и получалось две оплаты за одно занятие. У троих так
+    и вышло 14.08.2026: начислено 5 400, «получено» 8 100, у каждого лишний
+    аванс в 900 ₽.
+
+    Снятие отметки: оплату, заведённую самой галочкой, удаляем; засчитанную —
+    возвращаем в неразнесённые. Деньги человек отдал, и стирать их из-за
+    снятой галочки нельзя."""
     init()
     owner = _own(owner_id)
     got = session(owner_id, session_id)
@@ -852,17 +865,34 @@ def toggle_paid(owner_id: Any, session_id: Any, person_id: Any) -> bool:
         return False
     with sheets_cache.get_connection() as conn:
         if who["paid"]:
-            conn.execute("DELETE FROM priv_money WHERE session_id = ? AND "
-                         "person_id = ? AND kind = ?",
-                         (int(session_id), int(person_id), PAY))
+            row = conn.execute(
+                "SELECT id, note FROM priv_money WHERE session_id = ? AND "
+                "person_id = ? AND kind = ?",
+                (int(session_id), int(person_id), PAY)).fetchone()
+            if row and str(row["note"] or "") == "за занятие":
+                conn.execute("DELETE FROM priv_money WHERE id = ?", (row["id"],))
+            elif row:
+                conn.execute("UPDATE priv_money SET session_id = 0 WHERE id = ?",
+                             (row["id"],))
             conn.commit()
             return False
-        conn.execute(
-            "INSERT INTO priv_money (owner_id, person_id, kind, amount, "
-            "session_id, note, at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (owner, int(person_id), PAY, int(who["price"]), int(session_id),
-             "за занятие", got["day"],
-             datetime.now().isoformat(timespec="seconds")))
+
+        # Неразнесённая оплата этого человека, которой хватает на занятие.
+        free = conn.execute(
+            "SELECT id FROM priv_money WHERE owner_id = ? AND person_id = ? "
+            "AND kind = ? AND session_id = 0 AND amount >= ? "
+            "ORDER BY at, id LIMIT 1",
+            (owner, int(person_id), PAY, int(who["price"]))).fetchone()
+        if free:
+            conn.execute("UPDATE priv_money SET session_id = ? WHERE id = ?",
+                         (int(session_id), int(free["id"])))
+        else:
+            conn.execute(
+                "INSERT INTO priv_money (owner_id, person_id, kind, amount, "
+                "session_id, note, at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (owner, int(person_id), PAY, int(who["price"]), int(session_id),
+                 "за занятие", got["day"],
+                 datetime.now().isoformat(timespec="seconds")))
         conn.commit()
     return True
 
@@ -961,8 +991,14 @@ def month(owner_id: Any, ym: str = "") -> Dict[str, Any]:
             "SELECT kind, SUM(amount) AS s FROM priv_money WHERE owner_id = ? "
             "AND at LIKE ? GROUP BY kind", (owner, ym + "-%")).fetchall()
     got = {r["kind"]: int(r["s"] or 0) for r in rows}
+    # Авансы считаем отдельно: без них «получено больше, чем начислено»
+    # выглядит ошибкой, а это чаще всего плата вперёд.
+    ahead = sum(-p["balance"] for p in people(owner_id) if p["balance"] < 0)
+    ahead += sum(-p["balance"] for p in people(owner_id, archived=True)
+                 if p["balance"] < 0)
     return {"ym": ym, "sessions": held,
             "charged": got.get(CHARGE, 0), "paid": got.get(PAY, 0),
+            "ahead": ahead,
             "debt": sum(p["balance"] for p in debtors(owner_id))}
 
 
