@@ -402,13 +402,14 @@ def upcoming(hours: int = 2) -> List[Dict[str, Any]]:
     now = get_moscow_time()
     out = []
     for g in game_roster.games(from_day=now.date(), until_day=now.date()):
-        start = game_roster._game_time(g) if hasattr(game_roster, "_game_time") else None
+        # Время начала берём одной общей функцией. Здесь стояла проверка
+        # hasattr(game_roster, "_game_time") — функции с таким именем в
+        # game_roster нет и не было, так что ветка не выполнялась ни разу, а
+        # запасной разбор дублировал `_game_start` и делал это хуже: собирал
+        # момент от СЕГОДНЯШНЕЙ даты, а не от даты игры.
+        start = game_roster._game_start(g)
         if start is None:
-            try:
-                hh, mm = str(g.get("time") or "").split(":")[:2]
-                start = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-            except (ValueError, TypeError):
-                continue
+            continue          # в расписании нет времени — сторожить нечего
         left = (start - now).total_seconds() / 3600.0
         if 0 <= left <= hours:
             out.append(g)
