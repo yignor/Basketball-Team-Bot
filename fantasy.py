@@ -750,8 +750,19 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
     out: List[Dict[str, Any]] = []
     import fantasy_modes
     with sheets_cache.get_connection() as conn:
+        # Кто вообще выходил в этой игре: снимок имеет смысл только тому, у
+        # кого в ней был хоть один игрок. Иначе человек копит строки «0 очков»
+        # за матчи чужих команд.
+        present = {str(r["player_id"]) for r in conn.execute(
+            "SELECT DISTINCT player_id FROM game_player_stats "
+            "WHERE source = ? AND game_id = ?", (source, str(game_id)))}
         for uid, entry in rosters.items():
             refs = entry["refs"]
+            if not any(pid in present
+                       for src, pid in (fantasy_stats.parse_ref(r)
+                                        for r in fantasy_stats.expand_refs(refs))
+                       if src == source):
+                continue
             # Считаем по правилам режима, которым состав собирали: коэффициент и
             # категории могли смениться после игры, а снимок обязан остаться тем.
             pts = fantasy_modes.game_points(season, entry.get("mode") or fantasy_modes.FREE,
@@ -771,6 +782,50 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
             out.append({"user_id": uid, "points": pts})
         conn.commit()
     return out
+
+
+def prune_absent_snapshots(season_id: int, apply: bool = False) -> Dict[str, Any]:
+    """Снимки по играм, где у человека не было ни одного игрока.
+
+    apply=False только считает, apply=True удаляет. Возвращает сколько и у
+    скольких людей.
+
+    Такие строки — не история, а мусор: они говорят «ты набрал 0 в матче, где
+    твоих не было». На сумму очков они не влияют (ноль), зато раздувают число
+    «игр в зачёте» и лезут в разбивку по играм. Настоящий ноль — когда игрок
+    вышел и ничего не набрал; он остаётся, потому что игрок в протоколе есть."""
+    sheets_cache.init_db()
+    doomed: List[Tuple[str, str, str]] = []
+    people: set = set()
+    with sheets_cache.get_connection() as conn:
+        present: Dict[Tuple[str, str], set] = {}
+        for r in conn.execute("SELECT DISTINCT source, game_id, player_id "
+                              "FROM game_player_stats"):
+            present.setdefault((r["source"], str(r["game_id"])), set()).add(
+                str(r["player_id"]))
+        for r in conn.execute(
+                "SELECT user_id, source, game_id, refs_json FROM "
+                "fantasy_game_scores WHERE season_id = ? AND points = 0",
+                (season_id,)):
+            try:
+                refs = json.loads(r["refs_json"] or "[]") or []
+            except (json.JSONDecodeError, TypeError):
+                refs = []
+            in_game = present.get((r["source"], str(r["game_id"])), set())
+            played = any(pid in in_game
+                         for src, pid in (fantasy_stats.parse_ref(x)
+                                          for x in fantasy_stats.expand_refs(refs))
+                         if src == r["source"])
+            if not played:
+                doomed.append((str(r["user_id"]), r["source"], str(r["game_id"])))
+                people.add(str(r["user_id"]))
+        if apply and doomed:
+            conn.executemany(
+                "DELETE FROM fantasy_game_scores WHERE season_id = ? AND "
+                "user_id = ? AND source = ? AND game_id = ?",
+                [(season_id, u, s, g) for u, s, g in doomed])
+            conn.commit()
+    return {"rows": len(doomed), "people": len(people), "applied": bool(apply)}
 
 
 def backfill_game_scores(season: Dict[str, Any]) -> int:
@@ -832,10 +887,19 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
             per_player = fp_by_game.get((g["source"], g["game_id"]), {})
             for uid, refs in refs_by_week.get(wk, {}).items():
                 pts = 0.0
+                played = False
                 for ref in fantasy_stats.expand_refs(refs):
                     src, pid = fantasy_stats.parse_ref(ref)
-                    if src == g["source"]:
-                        pts += per_player.get(pid, 0.0)
+                    if src == g["source"] and pid in per_player:
+                        played = True
+                        pts += per_player[pid]
+                # Игра, где не было НИ ОДНОГО из его игроков, — не его игра.
+                # Раньше снимок писался на каждую игру лиги подряд, и человек
+                # получал десятки строк «0 очков» за матчи чужих команд: 651
+                # запись из 705 была таким мусором. Ноль от игрока, который
+                # вышел и ничего не набрал, — другое дело, он остаётся.
+                if not played:
+                    continue
                 batch.append((uid, season["id"], g["source"], str(g["game_id"]),
                               g["game_date"], round(pts, 2),
                               json.dumps(refs, ensure_ascii=False), now_iso))
@@ -944,7 +1008,7 @@ def top_participants(season_id: int, d_from: Optional[str] = None,
     with sheets_cache.get_connection() as conn:
         rows = [dict(r) for r in conn.execute(query, params).fetchall()]
         picks = _picks_by_user(conn, season_id, d_from, d_to,
-                               [r["user_id"] for r in rows])
+                               [r["user_id"] for r in rows], mode=mode)
     names = display_names([r["user_id"] for r in rows])
     for r in rows:
         r["user_id"] = str(r["user_id"])
@@ -988,17 +1052,27 @@ PICKS_PER_USER = 3
 
 
 def _picks_by_user(conn, season_id: int, d_from: Optional[str], d_to: Optional[str],
-                   user_ids: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
+                   user_ids: List[Any], mode: str = "") -> Dict[str, List[Dict[str, Any]]]:
     """Кого участник ставил в последних играх периода: [{date, points, refs}].
 
     Берём из снимков — там записан состав, которым игра реально считалась, а не
     тот, что стоит сейчас. За неделю и месяц состав меняется, поэтому отдаём
-    несколько последних игр, а не «текущий» состав."""
+    несколько последних игр, а не «текущий» состав.
+
+    Режим обязателен к учёту. Без него таблица «Бюджет» показывала строки из
+    свободного режима: в шапке «1 игра в зачёте», а под ней три игры, две по
+    нулю. Считали одно, показывали другое."""
     if not user_ids:
         return {}
     query = ("""SELECT user_id, game_date, points, refs_json FROM fantasy_game_scores
                 WHERE season_id = ?""")
     params: List[Any] = [season_id]
+    if mode:
+        import fantasy_modes
+        if mode == fantasy_modes.FREE:
+            query += " AND (mode = ? OR mode = '')"; params.append(mode)
+        else:
+            query += " AND mode = ?"; params.append(mode)
     if d_from:
         query += " AND game_date >= ?"; params.append(d_from)
     if d_to:
