@@ -96,7 +96,7 @@ def test_bad_goes_after_good() -> None:
     Порядок в сводке при этом жёсткий — сначала сделанное. Иначе она
     открывается фолом, а это не то, ради чего лезут в запись."""
     print("\n=== неудачное идёт после удачного ===")
-    text = gt.format_moments(SOURCE, GAME, ME, VIDEO)
+    text, _, _ = gt.format_moments_page(SOURCE, GAME, ME, VIDEO)
     check("Твои моменты" in text, "заголовок на месте")
     check("трёхочковый" in text and "подбор" in text and "перехват" in text,
           "удачное названо")
@@ -111,8 +111,9 @@ def test_bad_goes_after_good() -> None:
     last_good = max(summary.index(gt.MOMENT_TITLES[k])
                     for k in ("reb", "stl", "pts3") if gt.MOMENT_TITLES[k] in summary)
     check(last_good < first_bad, f"всё плохое после всего хорошего: {summary}")
-    check(not gt.format_moments(SOURCE, GAME, "нет-такого"),
-          "у кого моментов нет — пустая строка, а не пустой заголовок")
+    empty, _, pages = gt.format_moments_page(SOURCE, GAME, "нет-такого")
+    check(not empty and pages == 0,
+          "у кого моментов нет — пусто, а не пустой заголовок")
 
 
 def test_ib_codes_are_the_verified_ones() -> None:
@@ -154,13 +155,44 @@ def test_ib_codes_are_the_verified_ones() -> None:
           "у каждого вида есть подпись и значок")
 
 
-def test_note_not_doubled() -> None:
-    """Приписку про точность сдвига даёт только первый блок."""
-    print("\n=== приписка не двоится ===")
-    with_note = gt.format_moments(SOURCE, GAME, ME, VIDEO, with_note=True)
-    without = gt.format_moments(SOURCE, GAME, ME, VIDEO, with_note=False)
-    check(len(with_note) > len(without), "без приписки текст короче")
-    check("<i>" not in without, "и тега приписки в нём нет")
+def test_pages_show_everything() -> None:
+    """Список не обрывается: длинный режется на страницы, но целиком.
+
+    Было «…и ещё 27», и досмотреть остальное было нельзя. Режем по ДЛИНЕ
+    строк, а не по их числу: у лиг разной длины ссылки, и по счёту строк
+    сообщение то не добирало до предела, то не влезало в него."""
+    print("\n=== видно всё, страницами ===")
+    long_id = "многобукв"
+    gt.store_moments(SOURCE, "big", [
+        {"player_id": long_id, "kind": "pts2", "period": 1 + i // 10,
+         "left": 600 - i, "real": 100 + i * 20, "order": i}
+        for i in range(60)])
+    lines = gt.moment_lines(SOURCE, "big", long_id, VIDEO)
+    check(len(lines) == 60, f"строк по числу моментов: {len(lines)}")
+
+    pages = gt.moment_pages(lines)
+    check(len(pages) > 1, f"длинный список разложен на страницы: {len(pages)}")
+    check(sum(len(p) for p in pages) == 60, "ни одна строка не потерялась")
+    check(all(p for p in pages), "пустых страниц нет")
+
+    seen = []
+    for i in range(len(pages)):
+        text, page, total = gt.format_moments_page(SOURCE, "big", long_id, VIDEO, i)
+        check(page == i and total == len(pages), f"страница {i}: {page}/{total}")
+        check(len(text) < 4096, f"страница {i} влезает в сообщение: {len(text)}")
+        check("Страница" in text, "номер страницы виден")
+        # Признак строки момента — «-й период»: сводка сверху начинается с
+        # того же значка, и по значку она попала бы в счёт.
+        seen += [ln for ln in text.split("\n") if "-й период" in ln]
+    check(len(seen) == 60, f"за все страницы показаны все моменты: {len(seen)}")
+
+    # Выход за края не роняет экран, а прижимается к последней странице.
+    _, page, _ = gt.format_moments_page(SOURCE, "big", long_id, VIDEO, 99)
+    check(page == len(pages) - 1, f"номер страницы больше последней прижат: {page}")
+
+    # Короткому списку страницы не нужны — незачем показывать «1 из 1».
+    short, _, total = gt.format_moments_page(SOURCE, GAME, ME, VIDEO)
+    check(total == 1 and "Страница" not in short, "короткому списку номера не нужны")
 
 
 def test_admin_can_show_anyone() -> None:
@@ -218,7 +250,7 @@ def main() -> int:
     test_link_opens_before_the_action()
     test_bad_goes_after_good()
     test_ib_codes_are_the_verified_ones()
-    test_note_not_doubled()
+    test_pages_show_everything()
     test_admin_can_show_anyone()
 
     print("\n" + "=" * 60)

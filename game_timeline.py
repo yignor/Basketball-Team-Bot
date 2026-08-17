@@ -919,45 +919,76 @@ def moment_codes(source: str, game_id: Any, player_id: Any,
     return out
 
 
-def format_moments(source: str, game_id: Any, player_id: Any,
-                   video_url: str = "", max_items: int = 12,
-                   with_note: bool = True) -> str:
-    """Блок «твои моменты» (HTML). Пусто — если протокол ничего не дал.
+# Сколько знаков отдаём под строки моментов на одной странице. Телеграм режет
+# сообщение на 4096, а строка со ссылкой — полторы сотни знаков; считаем по
+# длине, а не по числу строк, потому что длина ссылки у лиг разная.
+MOMENTS_BUDGET = 2600
 
-    Неудачное — потери, фолы, промахи — идёт после удачного, а не вперемешку:
-    иначе список открывается фолом, а это не то, ради чего лезут в запись."""
-    items = moment_codes(source, game_id, player_id, video_url)
-    if not items:
-        return ""
+
+def moment_lines(source: str, game_id: Any, player_id: Any,
+                 video_url: str = "") -> List[str]:
+    """Готовые строки списка моментов — по одной на действие."""
+    out = []
+    for m in moment_codes(source, game_id, player_id, video_url):
+        mark = f"{m['period']}-й период"
+        if m.get("left"):
+            mark += f", на табло {m['left_label']}"
+        if video_url:
+            out.append(f"{m['icon']} <a href=\"{m['link']}\">{m['label']}</a> "
+                       f"— {m['title']}, {mark}")
+        else:
+            out.append(f"{m['icon']} {m['label']} — {m['title']}, {mark}")
+    return out
+
+
+def moment_pages(lines: List[str], budget: int = MOMENTS_BUDGET) -> List[List[str]]:
+    """Режет список на страницы по длине.
+
+    Раньше список обрывался на «…и ещё 27», и остальное посмотреть было
+    нельзя. Теперь видно всё, просто по частям."""
+    pages: List[List[str]] = [[]]
+    used = 0
+    for line in lines:
+        if pages[-1] and used + len(line) > budget:
+            pages.append([])
+            used = 0
+        pages[-1].append(line)
+        used += len(line) + 1
+    return pages
+
+
+def format_moments_page(source: str, game_id: Any, player_id: Any,
+                        video_url: str = "", page: int = 0) -> Tuple[str, int, int]:
+    """Одна страница списка моментов: (текст, номер страницы, всего страниц)."""
+    lines = moment_lines(source, game_id, player_id, video_url)
+    if not lines:
+        return "", 0, 0
+    pages = moment_pages(lines)
+    page = max(0, min(int(page), len(pages) - 1))
+    head = [_moments_head(source, game_id, player_id, video_url, len(lines))]
+    if len(pages) > 1:
+        head.append(f"Страница {page + 1} из {len(pages)}")
+    body = head + [""] + pages[page]
+    kind = offset_kind(source, game_id)
+    body.append(NOTE_HAND if kind == "hand"
+                else NOTE_EXACT if kind == "vk" else NOTE_GUESS)
+    return "\n".join(body), page, len(pages)
+
+
+def _moments_head(source: str, game_id: Any, player_id: Any,
+                  video_url: str, total: int) -> str:
+    """Заголовок со сводкой по видам — он же одинаков на всех страницах."""
     by_kind: Dict[str, int] = {}
-    for m in items:
+    for m in moments(source, game_id, player_id):
         by_kind[m["kind"]] = by_kind.get(m["kind"], 0) + 1
     summary = " · ".join(
         f"{MOMENT_ICONS.get(k, '•')} {n} {MOMENT_TITLES.get(k, k)}"
         for k, n in sorted(by_kind.items(),
                            key=lambda kv: (kv[0] in MOMENT_BAD, -kv[1])))
-    head = f"✨ <b>Твои моменты</b> · {len(items)}"
+    head = f"✨ <b>Твои моменты</b> · {total}"
     if video_url:
         head += f" · <a href=\"{video_url}\">запись</a>"
-    lines = [head, summary]
-    for m in items[:max_items]:
-        mark = f"{m['period']}-й период"
-        if m.get("left"):
-            mark += f", на табло {m['left_label']}"
-        if video_url:
-            lines.append(f"{m['icon']} <a href=\"{m['link']}\">{m['label']}</a> "
-                         f"— {m['title']}, {mark}")
-        else:
-            lines.append(f"{m['icon']} {m['label']} — {m['title']}, {mark}")
-    if len(items) > max_items:
-        lines.append(f"…и ещё {len(items) - max_items}")
-    # Приписку про точность сдвига даёт тот блок, который идёт первым: она про
-    # разметку целиком, и повторять её дважды в одном сообщении незачем.
-    if with_note:
-        kind = offset_kind(source, game_id)
-        lines.append(NOTE_HAND if kind == "hand"
-                     else NOTE_EXACT if kind == "vk" else NOTE_GUESS)
-    return "\n".join(lines)
+    return head + "\n" + summary
 
 
 def format_block(source: str, game_id: Any, player_id: Any,

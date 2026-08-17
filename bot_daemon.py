@@ -1492,6 +1492,16 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
         _awaiting_video[uid] = f"rep:{parts[2]}:{parts[3]}:{parts[4]}"
         await query.edit_message_text(VIDTIME_ASK)
         return
+    if len(parts) >= 6 and parts[1] == "vidm":
+        back = [[InlineKeyboardButton(
+            "⬅️ К игре", callback_data=f"rep:vidg:{parts[2]}:{parts[3]}:{parts[4]}")],
+            [InlineKeyboardButton("⬅️ К списку игр", callback_data="rep:vid")]]
+        text, markup = await asyncio.to_thread(
+            _moments_screen, parts[2], parts[3], parts[4], int(parts[5]),
+            back, "rep:vidm")
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML",
+                                      disable_web_page_preview=True)
+        return
     if len(parts) >= 5 and parts[1] == "vidg":
         text, markup = await asyncio.to_thread(_my_video_game, parts[2], parts[3], parts[4])
         await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML",
@@ -4594,13 +4604,14 @@ def _my_games_video(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
 
 
 def _my_video_game(source: str, game_id: str, player_id: str,
-                   back: Optional[List[List[InlineKeyboardButton]]] = None
+                   back: Optional[List[List[InlineKeyboardButton]]] = None,
+                   moments_cb: str = "rep:vidm"
                    ) -> Tuple[str, InlineKeyboardMarkup]:
-    """Тайм-коды выходов и моментов в одной игре (HTML).
+    """Тайм-коды выходов в одной игре плюс вход в список моментов (HTML).
 
     Игрок задаётся снаружи, поэтому тот же экран показывает и «себя» игроку, и
     любого — админу: показывать разное было бы двумя разными правдами.
-    Отличаются только кнопки возврата, их и передаём."""
+    Отличаются только кнопки возврата и адрес экрана моментов."""
     import coach_payments
     import game_timeline
     import vk_video
@@ -4613,13 +4624,15 @@ def _my_video_game(source: str, game_id: str, player_id: str,
     link = vk_video.link_of(source, game_id)
     block = game_timeline.format_block(source, game_id, player_id, link,
                                        max_items=12)
-    # Моменты — под выходами: сначала «где я был», потом «что я сделал».
-    # Отрезки без действий бывают (секретарь отмечал замены и молчал), действия
-    # без отрезков — тоже, поэтому показываем то, что есть.
-    spots = game_timeline.format_moments(source, game_id, player_id, link,
-                                         max_items=12, with_note=not block)
+    # Моменты — отдельным экраном, а не следом за выходами. Вместе они не
+    # помещаются в сообщение: у активного игрока их бывает за сорок, а Телеграм режет
+    # на 4096 знаках. Здесь остаётся сводка одной строкой, полный список — по
+    # кнопке, со страницами.
+    spots = game_timeline.moment_lines(source, game_id, player_id, link)
     if spots:
-        block = f"{block}\n\n{spots}" if block else spots
+        head_spots = game_timeline._moments_head(source, game_id, player_id,
+                                                 "", len(spots))
+        block = f"{block}\n\n{head_spots}" if block else head_spots
     head = "🎬 Я в записи"
     if meta:
         head += (f"\n{coach_payments._human_date(str(meta['game_date']))} · "
@@ -4629,6 +4642,10 @@ def _my_video_game(source: str, game_id: str, player_id: str,
     text = f"{head}\n\n{block}" if block else (
         f"{head}\n\nВ этой игре разметки нет — протокол лиги не размечен.")
     rows = []
+    if spots:
+        rows.append([InlineKeyboardButton(
+            f"✨ Показать все моменты ({len(spots)})",
+            callback_data=f"{moments_cb}:{source}:{game_id}:{player_id}:0")])
     if block:
         # Поправить может любой, кто смотрит запись: сверять время с табло
         # умеет только человек. Введённое действует для всех и переживает
@@ -4638,6 +4655,35 @@ def _my_video_game(source: str, game_id: str, player_id: str,
     rows += back or [
         [InlineKeyboardButton("⬅️ К списку игр", callback_data="rep:vid")],
         [InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")]]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _moments_screen(source: str, game_id: str, player_id: str, page: int,
+                    back: List[List[InlineKeyboardButton]],
+                    cb: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Полный список моментов игрока, страницами.
+
+    Раньше список обрывался на «…и ещё 27», и досмотреть остальное было
+    нельзя. Страницы режутся по длине строк, а не по их числу: у лиг разной
+    длины ссылки, и по счёту строк сообщение то не добирало, то не влезало."""
+    import game_timeline
+    import vk_video
+    link = vk_video.link_of(source, game_id)
+    text, page, pages = game_timeline.format_moments_page(
+        source, game_id, player_id, link, page)
+    if not pages:
+        return ("✨ В этой игре моментов не нашлось.", InlineKeyboardMarkup(back))
+    rows: List[List[InlineKeyboardButton]] = []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "⬅️ Раньше", callback_data=f"{cb}:{source}:{game_id}:{player_id}:{page - 1}"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton(
+            "Позже ➡️", callback_data=f"{cb}:{source}:{game_id}:{player_id}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows += back
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -7008,6 +7054,21 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                                               parse_mode="HTML",
                                               disable_web_page_preview=True)
                 return
+            if what == "mom" and len(parts) > 6:
+                source, game_id, pid, page = parts[3], parts[4], parts[5], int(parts[6])
+                back = [[InlineKeyboardButton(
+                    "⬅️ К игре",
+                    callback_data=f"admin:tc:show:{source}:{game_id}:{pid}")],
+                    [InlineKeyboardButton(
+                        "⬅️ К игрокам",
+                        callback_data=f"admin:tc:who:{source}:{game_id}")]]
+                text, markup = await asyncio.to_thread(
+                    _moments_screen, source, game_id, pid, page, back,
+                    "admin:tc:mom")
+                await query.edit_message_text(text, reply_markup=markup,
+                                              parse_mode="HTML",
+                                              disable_web_page_preview=True)
+                return
             if what == "show" and len(parts) > 5:
                 source, game_id, pid = parts[3], parts[4], parts[5]
                 back = [[InlineKeyboardButton(
@@ -7016,7 +7077,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     [InlineKeyboardButton("⬅️ К играм",
                                           callback_data="admin:tc:games")]]
                 text, markup = await asyncio.to_thread(
-                    _my_video_game, source, game_id, pid, back)
+                    _my_video_game, source, game_id, pid, back, "admin:tc:mom")
                 await query.edit_message_text(text, reply_markup=markup,
                                               parse_mode="HTML",
                                               disable_web_page_preview=True)
@@ -8192,7 +8253,7 @@ def main() -> None:
     app.add_handler(CommandHandler("season", handle_season))
     app.add_handler(CommandHandler("feedback", handle_feedback))
     app.add_handler(CommandHandler("joke", handle_joke_command))
-    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file|vid|vidg)"))
+    app.add_handler(CallbackQueryHandler(handle_report_prefs_callback, pattern=r"^rep:(cmp|ntf|met|mets|allmet|deep|back|file|vid|vidg|vidm)"))
 
     # Обработчики, которые смотрят ЛЮБОЙ текст в личке, — каждый в своей группе.
     # Из одной группы python-telegram-bot выполняет ровно один подошедший
