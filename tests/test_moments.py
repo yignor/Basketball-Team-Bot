@@ -129,6 +129,54 @@ def test_note_not_doubled() -> None:
     check("<i>" not in without, "и тега приписки в нём нет")
 
 
+def test_admin_can_show_anyone() -> None:
+    """Админ показывает тайм-коды за любого игрока — это демонстрация.
+
+    Через «🎬 Я в записи» так не сделать: там человек видит только себя. А
+    показать вживую, за что просим деньги, надо ещё до того, как человек
+    привязал профиль и заплатил."""
+    print("\n=== админ показывает за любого ===")
+    os.environ.setdefault("BOT_TOKEN", "0:test")
+    os.environ.setdefault("DAEMON_LOG_PATH", str(ROOT / "tests" / "test.log"))
+    import bot_daemon as bd
+    import player_names
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO game_meta (source, game_id, game_date, "
+            "home_name, guest_name, home_team_id, guest_team_id, video_vk, "
+            "fetched_at) VALUES (?, ?, '2026-08-16', 'Балтика', 'PullUp Farm', "
+            "'711', '707', ?, ?)", (SOURCE, GAME, VIDEO, now))
+        for pid, team, pts in ((ME, "707", 18), ("999", "711", 25)):
+            conn.execute(
+                "INSERT OR REPLACE INTO game_player_stats (source, game_id, "
+                "game_date, player_id, team_id, number, pts, reb, ast, "
+                "fetched_at) VALUES (?, ?, '2026-08-16', ?, ?, '7', ?, 4, 2, ?)",
+                (SOURCE, GAME, pid, team, pts, now))
+        conn.commit()
+    player_names.put(SOURCE, ME, "Шлепикас Роман")
+
+    text, markup = bd._tc_players(SOURCE, GAME)
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    check(any(f"admin:tc:show:{SOURCE}:{GAME}:{ME}" == d for d in data),
+          "свой игрок в списке")
+    check(any(f"admin:tc:show:{SOURCE}:{GAME}:999" == d for d in data),
+          "игрок соперника тоже — протокол лиги публичный")
+    labels = " ".join(b.text for row in markup.inline_keyboard for b in row)
+    check("Шлепикас Роман" in labels, f"имя подставлено: {labels[:60]}")
+    check("✨" in labels, "у кого моменты разобраны — помечен")
+
+    # Тот же экран, что видит игрок, только кнопки возврата свои: показывать
+    # разное было бы двумя разными правдами.
+    back = [[bd.InlineKeyboardButton("назад", callback_data="admin:tc:games")]]
+    shown, markup2 = bd._my_video_game(SOURCE, GAME, ME, back)
+    tail = [b.callback_data for row in markup2.inline_keyboard for b in row]
+    check("admin:tc:games" in tail, f"возврат ведёт в админку: {tail}")
+    check("rep:back" not in tail, "и не в личный отчёт игрока")
+    check("Твои моменты" in shown, "моменты показаны")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -137,6 +185,7 @@ def main() -> int:
     test_text_has_no_misses()
     test_ib_codes_are_the_verified_ones()
     test_note_not_doubled()
+    test_admin_can_show_anyone()
 
     print("\n" + "=" * 60)
     if bad:

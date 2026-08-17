@@ -1684,6 +1684,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
         [InlineKeyboardButton("🎯 Профили в лигах", callback_data="admin:idn:list:0")],
+        [InlineKeyboardButton("🎬 Тайм-коды за любого", callback_data="admin:tc:games")],
         [InlineKeyboardButton("📈 Прогресс команды", callback_data="prog:list")],
         [InlineKeyboardButton("🔑 Доступы", callback_data="admin:acc:list")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
@@ -3840,6 +3841,88 @@ def _identity_who(row: int) -> Tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
+TC_PAGE = 10
+
+
+def _tc_games() -> Tuple[str, InlineKeyboardMarkup]:
+    """Наши игры с записью — выбор для показа тайм-кодов за любого игрока.
+
+    Экран нужен для демонстрации: показать человеку, что он получит, ещё до
+    того, как он привязал профиль и оплатил. Своими руками через «🎬 Я в
+    записи» этого не сделать — там показывается только сам админ."""
+    import coach_payments
+    import game_timeline
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        games = game_timeline.our_games(conn, limit=TC_PAGE)
+    back = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")]]
+    if not games:
+        return ("🎬 Тайм-коды за любого игрока\n\nИгр с записью пока нет.",
+                InlineKeyboardMarkup(back))
+    lines = ["🎬 Тайм-коды за любого игрока", "",
+             "Выбери игру, потом человека — покажу его выходы на площадку и "
+             "моменты со ссылками прямо в запись.", "",
+             "Это тот самый экран, который получает игрок. Годится, чтобы "
+             "показать вживую, за что просим деньги.", ""]
+    rows = []
+    for g in games:
+        day = coach_payments._human_date(str(g["game_date"]))
+        title = f"{g['home_name'] or '—'} — {g['guest_name'] or '—'}"
+        mark = "" if g.get("shifts") else " (не размечена)"
+        lines.append(f"• {day} · {title}{mark}")
+        rows.append([InlineKeyboardButton(
+            f"{day} · {title}"[:BTN_TEXT],
+            callback_data=f"admin:tc:who:{g['source']}:{g['game_id']}")])
+    rows += back
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _tc_players(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто играл в этом матче — по протоколу, обе команды.
+
+    Имена берём из памяти (`player_names`) — те же, что в фэнтези. Кого лига
+    не назвала, показываем номером: пустая кнопка хуже некрасивой."""
+    import game_timeline
+    import player_names
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        # dict, а не sqlite3.Row: у Row нет .get(), и на игре без строки в
+        # game_meta экран падал бы вместо того, чтобы показать список.
+        row = conn.execute(
+            "SELECT home_name, guest_name, home_team_id, guest_team_id "
+            "FROM game_meta WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+        meta = dict(row) if row else {}
+        rows_db = [dict(r) for r in conn.execute(
+            """SELECT player_id, team_id, number, pts, reb, ast
+                 FROM game_player_stats WHERE source = ? AND game_id = ?
+                ORDER BY pts DESC""", (source, str(game_id)))]
+    back = [[InlineKeyboardButton("⬅️ К играм", callback_data="admin:tc:games")],
+            [InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")]]
+    if not rows_db:
+        return ("🎬 В этой игре нет протокола — показывать некого.",
+                InlineKeyboardMarkup(back))
+
+    marked = {str(m["player_id"]) for m in game_timeline.moments(source, game_id)}
+    teams = {str(meta.get("home_team_id") or ""): meta.get("home_name") or "",
+             str(meta.get("guest_team_id") or ""): meta.get("guest_name") or ""}
+    lines = [f"🎬 {meta.get('home_name') or '—'} — {meta.get('guest_name') or '—'}", "",
+             "Игроки по протоколу. ✨ — у кого разобраны моменты.", ""]
+    rows: List[List[InlineKeyboardButton]] = []
+    for r in rows_db:
+        pid = str(r["player_id"])
+        name = player_names.get(source, pid) or f"№{r['number'] or '?'}"
+        team = teams.get(str(r["team_id"]), "")
+        mark = "✨" if pid in marked else "▫️"
+        label = (f"{mark} {name} · {r['pts']}+{r['reb']}+{r['ast']}"
+                 + (f" · {team}" if team else ""))
+        rows.append([InlineKeyboardButton(
+            label[:BTN_TEXT],
+            callback_data=f"admin:tc:show:{source}:{game_id}:{pid}")])
+    rows += back
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 def _identity_set(row: int, source: str, player_id: str, by: str) -> bool:
     """Привязывает профиль лиги к человеку из строки листа. От имени тренера."""
     import player_identity
@@ -4478,8 +4561,14 @@ def _my_games_video(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def _my_video_game(source: str, game_id: str, player_id: str) -> Tuple[str, InlineKeyboardMarkup]:
-    """Тайм-коды своих выходов в одной игре (HTML)."""
+def _my_video_game(source: str, game_id: str, player_id: str,
+                   back: Optional[List[List[InlineKeyboardButton]]] = None
+                   ) -> Tuple[str, InlineKeyboardMarkup]:
+    """Тайм-коды выходов и моментов в одной игре (HTML).
+
+    Игрок задаётся снаружи, поэтому тот же экран показывает и «себя» игроку, и
+    любого — админу: показывать разное было бы двумя разными правдами.
+    Отличаются только кнопки возврата, их и передаём."""
     import coach_payments
     import game_timeline
     import vk_video
@@ -4514,8 +4603,9 @@ def _my_video_game(source: str, game_id: str, player_id: str) -> Tuple[str, Inli
         # автоматические пересчёты.
         rows.append([InlineKeyboardButton(
             "⏱ Время не сходится", callback_data=f"rep:vidt:{source}:{game_id}:{player_id}")])
-    rows.append([InlineKeyboardButton("⬅️ К списку игр", callback_data="rep:vid")])
-    rows.append([InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")])
+    rows += back or [
+        [InlineKeyboardButton("⬅️ К списку игр", callback_data="rep:vid")],
+        [InlineKeyboardButton("⬅️ К отчёту", callback_data="rep:back")]]
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -6860,6 +6950,32 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 sheets_cache.revoke_access(parts[3], parts[4])
             text, markup = _render_access_list()
             await query.edit_message_text(text, reply_markup=markup)
+
+        elif parts[1] == "tc":
+            what = parts[2] if len(parts) > 2 else "games"
+            if what == "who" and len(parts) > 4:
+                text, markup = await asyncio.to_thread(_tc_players, parts[3], parts[4])
+                await query.edit_message_text(text, reply_markup=markup,
+                                              parse_mode="HTML",
+                                              disable_web_page_preview=True)
+                return
+            if what == "show" and len(parts) > 5:
+                source, game_id, pid = parts[3], parts[4], parts[5]
+                back = [[InlineKeyboardButton(
+                    "⬅️ К игрокам",
+                    callback_data=f"admin:tc:who:{source}:{game_id}")],
+                    [InlineKeyboardButton("⬅️ К играм",
+                                          callback_data="admin:tc:games")]]
+                text, markup = await asyncio.to_thread(
+                    _my_video_game, source, game_id, pid, back)
+                await query.edit_message_text(text, reply_markup=markup,
+                                              parse_mode="HTML",
+                                              disable_web_page_preview=True)
+                return
+            text, markup = await asyncio.to_thread(_tc_games)
+            await query.edit_message_text(text, reply_markup=markup,
+                                          disable_web_page_preview=True)
+            return
 
         elif parts[1] == "idn":
             what = parts[2] if len(parts) > 2 else "list"
