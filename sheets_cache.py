@@ -758,6 +758,28 @@ CREATE TABLE IF NOT EXISTS game_shifts (
     PRIMARY KEY (source, game_id, player_id, start_sec)
 );
 
+-- Отдельные действия игрока с привязкой к записи: бросок, подбор, перехват.
+-- Та же хроника лиги, из которой берутся выходы на площадку (game_shifts), но
+-- по одному событию, а не отрезком: человек хочет посмотреть свой трёхочковый,
+-- а не восемь минут, внутри которых он был.
+--
+-- kind — наш словарь, а не код лиги: коды у Инфобаскета числовые и разъезжаются
+-- с названиями SLPRO. Приводим к общему виду при разборе.
+CREATE TABLE IF NOT EXISTS game_moments (
+    source      TEXT NOT NULL,
+    game_id     TEXT NOT NULL,
+    player_id   TEXT NOT NULL,
+    kind        TEXT NOT NULL,           -- pts3/pts2/ft/miss/reb/stl/blk/ast
+    period      INTEGER NOT NULL DEFAULT 0,
+    real_sec    INTEGER NOT NULL,        -- секунда записи от спорного
+    left_sec    INTEGER NOT NULL DEFAULT 0,  -- сколько было на табло
+    ord         INTEGER NOT NULL DEFAULT 0,
+    fetched_at  TEXT NOT NULL,
+    PRIMARY KEY (source, game_id, player_id, kind, real_sec, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_game_moments_who
+    ON game_moments(source, game_id, player_id);
+
 -- Привязка записи ВК к игре: на какой секунде видео происходит спорный мяч.
 -- Трансляцию включают заранее и по-разному, поэтому сдвиг задаётся руками
 -- один раз на игру; пока не задан — считаем тайм-коды от спорного (0).

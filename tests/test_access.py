@@ -156,10 +156,20 @@ def test_admin_owns_rebinding() -> None:
     src = (ROOT / "bot_daemon.py").read_text()
     at = src.index("async def handle_profile_link")
     body = src[at:at + 3000]
-    check("только тренер" in body,
+    # Ищем сам текст отказа, а не слово «админ»: оно встречается и в
+    # пояснении наверху функции, и позиция тогда сравнивается не с тем.
+    refusal = "🔒 Профиль уже привязан"
+    check(refusal in body,
           "игроку на попытку смены отвечают отказом, а не молчанием")
-    check(body.index("_awaiting_identity") < body.index("только тренер"),
-          "ссылка тренера уходит выбранному игроку раньше проверки на смену")
+    check(body.index("_awaiting_identity") < body.index(refusal),
+          "ссылка админа уходит выбранному игроку раньше проверки на смену")
+
+    # Экран привязки живёт в админ-панели, а она целиком за _is_admin. Тренеру
+    # туда хода нет намеренно: он рядом с командой каждый день, и просьбу
+    # «перецепи на минутку» ему проще выполнить, чем отказать.
+    at_router = src.index("async def handle_admin_callback")
+    check("_is_admin" in src[at_router:at_router + 400],
+          "весь админ-роутер, включая привязку, закрыт проверкой на админа")
 
     # Инструмент, ради которого запрет вообще возможен.
     for what in ("_identity_screen", "_identity_who", "_identity_set",

@@ -50,6 +50,32 @@ IB_PLAY_OUT = 9      # уход с площадки
 IB_PERIOD_START = 21  # старт периода — у него всегда есть VideoFrom
 HTTP_TIMEOUT = 25
 
+# Что человек хочет пересмотреть. Ключи — наш общий словарь: у Инфобаскета коды
+# числовые, у SLPRO строковые, и сводить их надо здесь, а не в показе.
+MOMENT_TITLES = {
+    "pts3": "трёхочковый",
+    "pts2": "двухочковый",
+    "ft": "штрафной",
+    "reb": "подбор",
+    "stl": "перехват",
+    "blk": "блок-шот",
+    "ast": "передача",
+}
+MOMENT_ICONS = {"pts3": "🎯", "pts2": "🏀", "ft": "⚪️", "reb": "🔄",
+                "stl": "🧤", "blk": "🚫", "ast": "🎁"}
+
+# Коды Инфобаскета опознаны сверкой с бокс-скором игры 1081391: количество
+# событий каждого типа по каждому игроку совпало с его строкой протокола, а
+# 1×1 + 2×2 + 3×3 сошлось с очками у всех до единого. Промахи (4/5/6) в моменты
+# не берём: смотреть свои промахи никто не просил.
+IB_MOMENTS = {1: "ft", 2: "pts2", 3: "pts3", 26: "stl", 27: "blk", 28: "reb"}
+
+# У SLPRO события названы словами — гадать не приходится. Передачи здесь есть,
+# а у Инфобаскета кода передачи я не нашёл и выдумывать не стал: неверная
+# подпись отправит человека смотреть чужой момент.
+SLPRO_MOMENTS = {"ast": "ast", "stl": "stl", "block": "blk",
+                 "rebD": "reb", "rebA": "reb"}
+
 # Длина периода по умолчанию, если лига не прислала свою (десятые доли секунды
 # в Infobasket, секунды в SLPRO).
 DEFAULT_PERIOD_SECONDS = 600
@@ -236,7 +262,26 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Opt
             "in": kind == IB_PLAY_IN,
             "order": int(p.get("PlaySortOrder") or 0),
         })
-    return _pair(events), zero, _seconds_of_day(datetime.fromtimestamp(zero, MSK))
+
+    moments: List[Dict[str, Any]] = []
+    for p in plays:
+        what = IB_MOMENTS.get(int(p.get("PlayTypeID") or 0))
+        pid = person.get(int(p.get("StartID") or 0))
+        if not what or not pid:
+            continue
+        period = int(p.get("PlayPeriod") or 0)
+        clock = _elapsed(period, p.get("PlaySecond"), offsets)
+        in_period = clock - offsets.get(period, 0.0)
+        period_len = offsets.get(period + 1, 0.0) - offsets.get(period, 0.0) \
+            or DEFAULT_PERIOD_SECONDS
+        moments.append({
+            "player_id": pid, "kind": what, "period": period,
+            "left": max(0.0, period_len - in_period),
+            "real": _place(per_anchors.get(period) or every, clock) - zero,
+            "order": int(p.get("PlaySortOrder") or 0),
+        })
+    return (_pair(events), zero,
+            _seconds_of_day(datetime.fromtimestamp(zero, MSK)), moments)
 
 
 # ─────────────────────────────── SLPRO ─────────────────────────────────────
@@ -335,7 +380,32 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
             "in": int(e.get("value") or 0) == 1,
             "order": idx,
         })
-    return _pair(events), zero, _seconds_of_day(datetime.fromtimestamp(zero, MSK))
+
+    moments: List[Dict[str, Any]] = []
+    for idx, e in enumerate(log):
+        action = str(e.get("action") or "")
+        pid = str(e.get("player_id") or "")
+        if not pid:
+            continue
+        if action == "points":
+            # Сколько очков стоил бросок, лига пишет прямо в событии.
+            what = {1: "ft", 2: "pts2", 3: "pts3"}.get(int(e.get("points") or 0))
+        else:
+            what = SLPRO_MOMENTS.get(action)
+        if not what:
+            continue
+        elapsed = _elapsed_of(e)
+        stamp = _slpro_time(e.get("date_add"))
+        real = _place(anchors, elapsed) if anchors else stamp
+        if real is None:
+            continue
+        moments.append({
+            "player_id": pid, "kind": what, "period": int(e.get("period") or 0),
+            "left": float(e.get("game_time") or 0),
+            "real": real - zero, "order": idx,
+        })
+    return (_pair(events), zero,
+            _seconds_of_day(datetime.fromtimestamp(zero, MSK)), moments)
 
 
 # ──────────────────────────── Общая сборка ─────────────────────────────────
@@ -399,6 +469,39 @@ def store(source: str, game_id: Any, shifts: List[Dict[str, Any]]) -> int:
     return len(shifts)
 
 
+def store_moments(source: str, game_id: Any, items: List[Dict[str, Any]]) -> int:
+    """Переписывает моменты игры целиком — как и отрезки: протокол правят."""
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM game_moments WHERE source = ? AND game_id = ?",
+                     (source, str(game_id)))
+        conn.executemany(
+            """INSERT OR REPLACE INTO game_moments
+                   (source, game_id, player_id, kind, period, real_sec,
+                    left_sec, ord, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(source, str(game_id), m["player_id"], m["kind"], int(m["period"]),
+              int(m["real"]), int(m.get("left") or 0), int(m.get("order") or 0), now)
+             for m in items])
+        conn.commit()
+    return len(items)
+
+
+def moments(source: str, game_id: Any, player_id: Any = None) -> List[Dict[str, Any]]:
+    """Моменты из кеша. Наружу отсюда не ходим — это путь ответа человеку."""
+    sheets_cache.init_db()
+    sql = ("SELECT player_id, kind, period, real_sec, left_sec FROM game_moments "
+           "WHERE source = ? AND game_id = ?")
+    args: List[Any] = [source, str(game_id)]
+    if player_id is not None:
+        sql += " AND player_id = ?"
+        args.append(str(player_id))
+    sql += " ORDER BY real_sec, ord"
+    with sheets_cache.get_connection() as conn:
+        return [dict(r) for r in conn.execute(sql, args)]
+
+
 def has_shifts(source: str, game_id: Any) -> bool:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
@@ -428,17 +531,21 @@ async def refresh(source: str, game_id: Any, client=None) -> int:
     source = str(source)
     try:
         if source == "infobasket":
-            found, at, tipoff = await asyncio.to_thread(_ib_shifts, str(game_id))
+            found, at, tipoff, mom = await asyncio.to_thread(_ib_shifts, str(game_id))
         elif source == "slpro":
             if client is None:
                 from slpro_client import SlproClient
                 client = SlproClient()
-            found, at, tipoff = await _slpro_shifts(client, str(game_id))
+            found, at, tipoff, mom = await _slpro_shifts(client, str(game_id))
         else:
             return 0
     except Exception as exc:  # сеть/формат — не роняем ingest из-за тайм-кодов
         logger.warning("Тайм-коды %s/%s: %s", source, game_id, exc)
         return 0
+    # Моменты кладём и тогда, когда отрезков не вышло: замену секретарь мог не
+    # отметить ни разу, а броски отмечает всегда.
+    if mom:
+        store_moments(source, game_id, mom)
     n = store(source, game_id, found)
     if n:
         await sync_offset(source, game_id, at, tipoff)
@@ -745,6 +852,74 @@ def timecodes(source: str, game_id: Any, player_id: Any,
             "link": vk_link(video_url, start),
         })
     return out
+
+
+# За сколько до самого действия открывать запись. Бросок — это ещё и то, что
+# было секунду назад: проход, заслон, пас. Открывать ровно на отметке протокола
+# значит показать мяч уже в кольце.
+MOMENT_LEAD_SECONDS = 8
+
+
+def moment_codes(source: str, game_id: Any, player_id: Any,
+                 video_url: str = "") -> List[Dict[str, Any]]:
+    """Действия игрока, готовые к показу: время в записи + ссылка."""
+    shift = offset(source, game_id)
+    out = []
+    for m in moments(source, game_id, player_id):
+        at = max(0, int(m["real_sec"]) + shift - MOMENT_LEAD_SECONDS)
+        left = int(m["left_sec"] or 0)
+        out.append({
+            "kind": m["kind"],
+            "title": MOMENT_TITLES.get(m["kind"], m["kind"]),
+            "icon": MOMENT_ICONS.get(m["kind"], "•"),
+            "period": m["period"],
+            "at": at,
+            "label": hhmmss(at),
+            "left": left,
+            "left_label": f"{left // 60}:{left % 60:02d}",
+            "link": vk_link(video_url, at),
+        })
+    return out
+
+
+def format_moments(source: str, game_id: Any, player_id: Any,
+                   video_url: str = "", max_items: int = 12,
+                   with_note: bool = True) -> str:
+    """Блок «твои моменты» (HTML). Пусто — если протокол ничего не дал.
+
+    Здесь нарочно нет промахов. Смотреть их никто не просил, а список, где
+    половина строк про неудачи, человек второй раз не откроет."""
+    items = moment_codes(source, game_id, player_id, video_url)
+    if not items:
+        return ""
+    by_kind: Dict[str, int] = {}
+    for m in items:
+        by_kind[m["kind"]] = by_kind.get(m["kind"], 0) + 1
+    summary = " · ".join(
+        f"{MOMENT_ICONS.get(k, '•')} {n} {MOMENT_TITLES.get(k, k)}"
+        for k, n in sorted(by_kind.items(), key=lambda kv: -kv[1]))
+    head = f"✨ <b>Твои моменты</b> · {len(items)}"
+    if video_url:
+        head += f" · <a href=\"{video_url}\">запись</a>"
+    lines = [head, summary]
+    for m in items[:max_items]:
+        mark = f"{m['period']}-й период"
+        if m.get("left"):
+            mark += f", на табло {m['left_label']}"
+        if video_url:
+            lines.append(f"{m['icon']} <a href=\"{m['link']}\">{m['label']}</a> "
+                         f"— {m['title']}, {mark}")
+        else:
+            lines.append(f"{m['icon']} {m['label']} — {m['title']}, {mark}")
+    if len(items) > max_items:
+        lines.append(f"…и ещё {len(items) - max_items}")
+    # Приписку про точность сдвига даёт тот блок, который идёт первым: она про
+    # разметку целиком, и повторять её дважды в одном сообщении незачем.
+    if with_note:
+        kind = offset_kind(source, game_id)
+        lines.append(NOTE_HAND if kind == "hand"
+                     else NOTE_EXACT if kind == "vk" else NOTE_GUESS)
+    return "\n".join(lines)
 
 
 def format_block(source: str, game_id: Any, player_id: Any,
