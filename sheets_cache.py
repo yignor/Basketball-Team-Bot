@@ -16,6 +16,7 @@
 
 import json
 import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -832,10 +833,46 @@ def _now_iso() -> str:
 now_iso = _now_iso  # публичный алиас для enhanced_duplicate_protection.py
 
 
+# Права базы выставляем сами и в каждом процессе. Причина та же, по которой
+# закрыты логи: файл ложится на диск и уезжает в бэкапы, а внутри вся команда —
+# ФИО, ники, дни рождения, оплаты и долги. Лежала она при этом с правами 644,
+# то есть на чтение любому пользователю сервера.
+#
+# Почему здесь, а не разово руками и не только в демоне: базу открывают ещё
+# десяток cron-скриптов, и файлы -wal/-shm создаёт тот процесс, который пришёл
+# первым, — с обычным umask, то есть снова широко. Так права возвращаются на
+# место сами после любого запуска.
+_DB_DIR_MODE = 0o750
+_DB_FILE_MODE = 0o640
+_hardened = False
+
+
+def _harden_db() -> None:
+    """Закрывает базу и её спутников от посторонних. Раз на процесс.
+
+    Не владелец — молча уходим: чужой процесс не обязан уметь это чинить, а
+    падать из-за прав на ЧТЕНИИ кэша нельзя."""
+    global _hardened
+    if _hardened:
+        return
+    _hardened = True
+    for path, mode in ((DB_PATH.parent, _DB_DIR_MODE),
+                       (DB_PATH, _DB_FILE_MODE),
+                       (DB_PATH.with_name(DB_PATH.name + "-wal"), _DB_FILE_MODE),
+                       (DB_PATH.with_name(DB_PATH.name + "-shm"), _DB_FILE_MODE)):
+        try:
+            if path.exists():
+                os.chmod(path, mode)
+        except OSError:
+            pass
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=8.0)
     conn.execute("PRAGMA journal_mode = WAL")
+    # После включения WAL — тогда -wal и -shm уже созданы и их тоже закроем.
+    _harden_db()
     # 8с (было 5с) — теперь пишут не только периодический sync демона, но и
     # ~10 cron-скриптов при включённом SERVICE_RECORDS_LOCAL_PRIMARY.
     conn.execute("PRAGMA busy_timeout = 8000")
