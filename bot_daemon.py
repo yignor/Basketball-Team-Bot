@@ -1678,26 +1678,53 @@ DAILY_SCRIPTS = [
 ]
 
 
+# Разделы админки. Было восемнадцать кнопок одним столбцом — столько в память
+# не помещается, и нужное искали перечитыванием всего списка. Сгруппировано по
+# тому, ЗАЧЕМ туда идут: разослать, разобрать игру, поправить человека,
+# посмотреть отчёт, починить бота. Один экран вглубь — плата за то, что список
+# читается целиком.
 def _main_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
+        [InlineKeyboardButton("🏀 Игры и записи", callback_data="admin:menu:games")],
+        [InlineKeyboardButton("👥 Люди и доступы", callback_data="admin:menu:people")],
+        [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
+        [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
+        [InlineKeyboardButton("⚙️ Обслуживание", callback_data="admin:menu:service")],
+    ])
+
+
+def _games_menu_markup() -> InlineKeyboardMarkup:
+    """Всё, что про сыгранное: записи, тайм-коды, полнота протоколов."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏱ Записи игр", callback_data="admin:video:list")],
+        [InlineKeyboardButton("🎬 Тайм-коды за любого", callback_data="admin:tc:games")],
+        [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
+        _back_button(),
+    ])
+
+
+def _people_menu_markup() -> InlineKeyboardMarkup:
+    """Всё, что про конкретного человека: кто он для бота и что ему открыто."""
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
         [InlineKeyboardButton("🎯 Профили в лигах", callback_data="admin:idn:list:0")],
-        [InlineKeyboardButton("🎬 Тайм-коды за любого", callback_data="admin:tc:games")],
-        [InlineKeyboardButton("📈 Прогресс команды", callback_data="prog:list")],
-        [InlineKeyboardButton("🔑 Доступы", callback_data="admin:acc:list")],
-        [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
-        [InlineKeyboardButton("📊 Отчёты", callback_data="admin:menu:reports")],
-        [InlineKeyboardButton("🏆 Фэнтези лига", callback_data="admin:menu:fantasy")],
-        [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
-        [InlineKeyboardButton("🗄 Статистика лиг", callback_data="admin:menu:stats")],
-        [InlineKeyboardButton("⏱ Записи игр", callback_data="admin:video:list")],
         [InlineKeyboardButton("🎂 Дни рождения и ники", callback_data="admin:field:list:0")],
-        [InlineKeyboardButton("🔌 Каналы связи", callback_data="admin:doors:list")],
-        [InlineKeyboardButton("💾 Резервная копия", callback_data="admin:backup")],
-        [InlineKeyboardButton("📈 Моя статистика (скрытое)", callback_data="admin:menu:profile")],
+        [InlineKeyboardButton("🔑 Доступы", callback_data="admin:acc:list")],
+        _back_button(),
+    ])
+
+
+def _service_menu_markup() -> InlineKeyboardMarkup:
+    """Обслуживание бота: сюда идут, когда что-то пошло не так."""
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Синхронизация", callback_data="admin:sync")],
+        [InlineKeyboardButton("💾 Резервная копия", callback_data="admin:backup")],
+        [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
+        [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
+        [InlineKeyboardButton("🔌 Каналы связи", callback_data="admin:doors:list")],
+        _back_button(),
     ])
 
 
@@ -1754,7 +1781,7 @@ def _stats_screen() -> Tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(
             f"♻️ Пометить к перекачке ({stale + no_stage})",
             callback_data="admin:stats:refetch")])
-    rows.append(_back_button())
+    rows.append(_back_button("admin:menu:games"))
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -2019,7 +2046,7 @@ def _log_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👤 Лог пользователей", callback_data="admin:log:users:0")],
         [InlineKeyboardButton("⚠️ Ошибки", callback_data="admin:log:errors:0")],
         [InlineKeyboardButton("💬 Обратная связь", callback_data="admin:log:feedback:0")],
-        _back_button(),
+        _back_button("admin:menu:service"),
     ])
 
 
@@ -2027,7 +2054,7 @@ def _users_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 По таблице", callback_data="admin:users:table:0")],
         [InlineKeyboardButton("🤖 В боте", callback_data="admin:users:bot:0")],
-        _back_button(),
+        _back_button("admin:menu:people"),
     ])
 
 
@@ -2542,7 +2569,7 @@ def _video_screen() -> Tuple[str, InlineKeyboardMarkup]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         games = game_timeline.our_games(conn, limit=8)
-    back = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")]]
+    back = [[InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu:games")]]
     if not games:
         return ("⏱ Записи игр\n\nНи у одной нашей игры пока нет ссылки на запись.",
                 InlineKeyboardMarkup(back))
@@ -3411,6 +3438,10 @@ def _reports_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏋️ Тренировки", callback_data="admin:menu:reports:training")],
         [InlineKeyboardButton("🏀 Игры", callback_data="admin:menu:reports:games")],
+        # Прогресс команды и личный разбор — тоже отчёты, просто по людям, а не
+        # по событиям. В общем списке они лежали отдельно и терялись.
+        [InlineKeyboardButton("📈 Прогресс команды", callback_data="prog:list")],
+        [InlineKeyboardButton("📊 Моя статистика", callback_data="admin:menu:profile")],
         _back_button(),
     ])
 
@@ -3781,7 +3812,7 @@ def _identity_screen(page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
         nav.append(InlineKeyboardButton("Ещё ➡️", callback_data=f"admin:idn:list:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu:people")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -3855,7 +3886,7 @@ def _tc_games() -> Tuple[str, InlineKeyboardMarkup]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         games = game_timeline.our_games(conn, limit=TC_PAGE)
-    back = [[InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")]]
+    back = [[InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu:games")]]
     if not games:
         return ("🎬 Тайм-коды за любого игрока\n\nИгр с записью пока нет.",
                 InlineKeyboardMarkup(back))
@@ -3898,7 +3929,7 @@ def _tc_players(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup]:
                  FROM game_player_stats WHERE source = ? AND game_id = ?
                 ORDER BY pts DESC""", (source, str(game_id)))]
     back = [[InlineKeyboardButton("⬅️ К играм", callback_data="admin:tc:games")],
-            [InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")]]
+            [InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu:games")]]
     if not rows_db:
         return ("🎬 В этой игре нет протокола — показывать некого.",
                 InlineKeyboardMarkup(back))
@@ -4167,7 +4198,8 @@ async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await _prog_send(query.message, parts[2], parts[3])
             return
         else:
-            text, markup = await _render_prog_list(is_admin=admin)
+            text, markup = await _render_prog_list(is_admin=admin,
+                                                   back="admin:menu:reports")
         await query.edit_message_text(text, reply_markup=markup)
     except Exception as e:
         log.error(f"Экран прогресса: {e}")
@@ -6800,7 +6832,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             lines += [f"   {p.name}" for p in have[:8]]
             await query.edit_message_text(
                 "\n".join(lines),
-                reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:main")]))
+                reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:service")]))
 
         elif parts[1] == "menu":
             screen = parts[2] if len(parts) > 2 else "main"
@@ -6820,6 +6852,23 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.edit_message_text("📊 Отчёты → Игры", reply_markup=_reports_games_menu_markup())
                 else:
                     await query.edit_message_text("📊 Отчёты", reply_markup=_reports_menu_markup())
+            elif screen == "games":
+                await query.edit_message_text(
+                    "🏀 Игры и записи\n\nЧто уже сыграно: записи в ВК, "
+                    "тайм-коды по игрокам и полнота скачанных протоколов.",
+                    reply_markup=_games_menu_markup())
+            elif screen == "people":
+                await query.edit_message_text(
+                    "👥 Люди и доступы\n\nКто есть кто для бота: связка с "
+                    "Telegram, профиль в лиге, дни рождения и ники, "
+                    "открытые платные разделы.",
+                    reply_markup=_people_menu_markup())
+            elif screen == "service":
+                await query.edit_message_text(
+                    "⚙️ Обслуживание\n\nСюда идут, когда что-то пошло не так: "
+                    "синхронизация с таблицей, копия базы, лог, настройки, "
+                    "каналы связи.",
+                    reply_markup=_service_menu_markup())
             elif screen == "fantasy":
                 await query.edit_message_text(_fantasy_menu_text(), reply_markup=_fantasy_menu_markup())
             elif screen == "profile":
@@ -6830,7 +6879,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             elif screen == "config":
                 await query.edit_message_text(
                     _config_screen_text(),
-                    reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:main")]))
+                    reply_markup=InlineKeyboardMarkup([_back_button("admin:menu:service")]))
 
         elif parts[1] == "fantasy":
             await _handle_fantasy_action(query, parts[2] if len(parts) > 2 else "",
