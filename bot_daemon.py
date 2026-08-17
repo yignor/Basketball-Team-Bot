@@ -479,13 +479,17 @@ async def send_bottom_keyboard(message, user, text: str) -> None:
     uid = str(user.id)
     # Закрытые разделы — по выданному доступу, у админа оба.
     with_reports = _can_see_reports(user)
-    with_personal = _can_see_personal(user)
     # Свой ли это человек: от этого зависят и «Меню», и запасная кнопка.
     try:
         is_member = is_admin or fantasy_api._is_team_member(uid, user.username or "")
     except Exception as e:
         log.warning(f"проверка состава для клавиатуры: {e}")
         is_member = is_admin
+    # Кнопку личной статистики видят все свои, а не только оплатившие: за ней
+    # для непривязанного лежит приглашение привязаться, а сам разбор закрыт
+    # отдельно. Иначе про раздел узнавал бы только тот, кому его уже открыли, —
+    # так и вышло: из 46 человек команды привязались двое.
+    with_personal = _can_see_personal(user) or is_member
     with_fantasy = bool(FANTASY_FALLBACK_BUTTON and FANTASY_WEBAPP_URL
                         and _webapp_url() and is_member)
 
@@ -630,6 +634,49 @@ def _format_progress(source: str, player_id: str) -> str:
         lines.append(f"   форма {arrow} за {form['n']} игр {form['recent']} против "
                      f"{form['earlier']} за предыдущие {form['prev_n']}")
     return "\n".join(lines)
+
+
+# Приглашение привязаться. Один текст на все входы: его показывает и /profile,
+# и экран без привязки, и разойтись эти формулировки не должны — человек
+# сверяет присланную ссылку с образцом буквально.
+_LINK_INVITE = (
+    "У тебя пока не привязан ни один профиль.\n\n"
+    "Пришли мне ссылку на свою страницу в лиге — например:\n"
+    "• https://slpro.basketstat.ru/player/XXXX\n"
+    "• https://www.fbp.ru/player.html?personId=XXXXXX&apiUrl=https://reg.infobasket.su\n\n"
+    "Найти её просто: открой себя на сайте лиги и скопируй адрес из строки "
+    "браузера.\n\n"
+    "Привязка бесплатная — я запомню твой номер в лиге и посчитаю, сколько "
+    "твоих игр у меня уже есть."
+)
+
+
+def _progress_or_teaser(user, source: str, player_id: str) -> str:
+    """Что показать сразу после привязки — разбор или предложение его купить.
+
+    Привязаться может любой, но разбор платный, поэтому здесь развилка. Тому,
+    у кого доступа нет, показываем ровно один факт: сколько его игр уже лежит
+    в базе и за какой срок. Это не часть продукта — это охват, и он же лучшая
+    причина купить: «мои игры у него есть, я хочу их увидеть». Средние, форма,
+    броски и таймкоды остаются за замком."""
+    if _can_see_personal(user):
+        return _format_progress(source, player_id)
+    import fantasy_stats
+    import player_identity
+    s = fantasy_stats.career_summary(source, player_id)
+    title = player_identity.SOURCE_TITLES.get(source, source)
+    if not s.get("games"):
+        return (f"• {title}: игр пока не нашёл. Если ты играешь в турнире, который "
+                f"бот ещё не зеркалит, они появятся после ближайшего обновления.")
+    return "\n".join([
+        f"• {title}: твоих игр в базе — {s['games']} "
+        f"({s['first_date']} … {s['last_date']}).",
+        "",
+        "🔒 Разбор пока закрыт. В нём: средние и форма, броски, как ты играешь "
+        "против конкретных соперников, отчёт после каждой игры, файл за месяц "
+        "и таймкоды — где именно смотреть себя в записи.",
+        "Напиши тренеру, чтобы открыть доступ.",
+    ])
 
 
 # Кто сейчас пишет обращение (нажал /feedback без текста). Только в памяти:
@@ -1089,14 +1136,18 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Личное сообщение со ссылкой на профиль в лиге -> привязка id к человеку.
 
     Молчим, если ссылки в сообщении нет: обработчик висит на всех текстах в
-    личке и не должен отвечать на обычную переписку."""
+    личке и не должен отвечать на обычную переписку.
+
+    Привязка открыта всем и бесплатна — раньше её мог сделать только админ, и
+    из 46 человек команды привязались двое: остальным бот на присланную ссылку
+    просто молчал. Сама привязка ничего не раскрывает, бот лишь запоминает
+    публичный номер человека в лиге; платный разбор закрыт отдельно
+    (_can_see_personal) и на каждом входе, включая рассылки."""
     msg = update.effective_message
     user = update.effective_user
     chat = update.effective_chat
     if not msg or not user or not chat or chat.type != "private":
         return
-    if not _is_admin(user):
-        return          # привязка профиля — часть скрытой личной статистики
     import player_identity
     parsed = None
     for word in (msg.text or "").split():
@@ -1148,10 +1199,12 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
                      f"игр {got['games']}, добавлено {got['added']}")
         except Exception as e:
             log.warning(f"личная история {parsed['player_id']} не скачалась: {e}")
-        await msg.reply_text(_format_progress(parsed["source"], parsed["player_id"]))
+        await msg.reply_text(
+            _progress_or_teaser(user, parsed["source"], parsed["player_id"]))
         return
 
-    text = head + "\n\n" + _format_progress(parsed["source"], parsed["player_id"])
+    text = head + "\n\n" + _progress_or_teaser(user, parsed["source"],
+                                               parsed["player_id"])
     if career:
         seasons = ", ".join(sorted({str(c.get("season")) for c in career if c.get("season")},
                                    reverse=True))
@@ -1203,13 +1256,31 @@ async def handle_season(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def handle_my_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/profile — какие профили привязаны и что по ним видно.
 
-    Пока функция скрытая: личная статистика открыта только админу, пока не
-    решён вопрос с оплатой и согласием игроков (бэклог п.4)."""
+    Разбор платный, но молчать в ответ нельзя: раньше человек без доступа не
+    получал ничего и уходил, не узнав, что привязка вообще существует. Теперь
+    без доступа он видит, как привязаться и что за этим стоит, — а сам разбор
+    по-прежнему закрыт."""
     user = update.effective_user
     chat = update.effective_chat
-    if not user or not chat or chat.type != "private" or not _can_see_personal(user):
+    if not user or not chat or chat.type != "private":
+        return
+    if not _can_see_personal(user):
+        await _send_profile_locked(update.message, user)
         return
     await _send_profile(update.message, user)
+
+
+async def _send_profile_locked(message, user) -> None:
+    """То же место для того, кому разбор ещё не открыт: привязка и охват."""
+    import player_identity
+    ids = player_identity.get_identities(user.id)
+    if not ids:
+        await message.reply_text(_LINK_INVITE)
+        return
+    parts = ["📊 Твой профиль", ""]
+    for rec in ids:
+        parts.append(_progress_or_teaser(user, rec["source"], rec["player_id"]))
+    await message.reply_text("\n".join(parts).strip())
 
 
 async def _send_profile(message, user) -> None:
@@ -1217,12 +1288,7 @@ async def _send_profile(message, user) -> None:
     import player_identity
     ids = player_identity.get_identities(user.id)
     if not ids:
-        await message.reply_text(
-            "У тебя пока не привязан ни один профиль.\n\n"
-            "Пришли мне ссылку на свою страницу в лиге — например:\n"
-            "• https://slpro.basketstat.ru/player/XXXX\n"
-            "• https://www.fbp.ru/player.html?personId=XXXXXX&apiUrl=https://reg.infobasket.su\n\n"
-            "Я запомню твой номер в лиге и буду показывать личный прогресс.")
+        await message.reply_text(_LINK_INVITE)
         return
     import personal_report
     prefs = personal_report.get_prefs(user.id)
@@ -3862,13 +3928,18 @@ async def handle_coach_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def handle_mystats_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопка «📊 Моя статистика» — тем, кому раздел открыт."""
+    """Кнопка «📊 Моя статистика».
+
+    Кнопку видят все свои, поэтому здесь развилка, а не отказ: у кого разбор
+    открыт — получает разбор, остальные приглашение привязаться и охват своих
+    игр. Молчаливый отказ здесь и был причиной, по которой раздел не рос."""
     msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
     if not msg or not user or not chat or chat.type != "private":
         return
-    if not _can_see_personal(user):
-        return
-    await _send_profile(msg, user)
+    if _can_see_personal(user):
+        await _send_profile(msg, user)
+    else:
+        await _send_profile_locked(msg, user)
     raise ApplicationHandlerStop
 
 
