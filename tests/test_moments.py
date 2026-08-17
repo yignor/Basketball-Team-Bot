@@ -4,8 +4,8 @@
     python3 tests/test_moments.py
 
 База временная, сеть не нужна. Проверяем разбор хроники и показ: ссылка должна
-открывать запись чуть РАНЬШЕ действия, промахов в списке быть не должно, а
-коды Инфобаскета — оставаться теми, что сверены с бокс-скором.
+открывать запись чуть РАНЬШЕ действия, неудачное — идти после удачного, а коды
+Инфобаскета оставаться теми, что сверены с бокс-скором.
 """
 
 from __future__ import annotations
@@ -52,6 +52,10 @@ def seed() -> None:
          "real": 1200, "order": 5},
         {"player_id": ME, "kind": "pf", "period": 3, "left": 200,
          "real": 2200, "order": 6},
+        {"player_id": ME, "kind": "miss3", "period": 1, "left": 500,
+         "real": 700, "order": 7},
+        {"player_id": ME, "kind": "missft", "period": 4, "left": 20,
+         "real": 3200, "order": 8},
         {"player_id": "999", "kind": "pts2", "period": 1, "left": 300,
          "real": 500, "order": 4},
     ])
@@ -60,9 +64,9 @@ def seed() -> None:
 def test_only_mine() -> None:
     print("\n=== чужие моменты не показываем ===")
     mine = gt.moments(SOURCE, GAME, ME)
-    check(len(mine) == 5, f"мои пять: {len(mine)}")
+    check(len(mine) == 7, f"мои семь: {len(mine)}")
     check(all(m["player_id"] == ME for m in mine), "и все мои")
-    check(len(gt.moments(SOURCE, GAME)) == 6, "без фильтра видно всю игру")
+    check(len(gt.moments(SOURCE, GAME)) == 8, "без фильтра видно всю игру")
 
 
 def test_link_opens_before_the_action() -> None:
@@ -86,26 +90,27 @@ def test_link_opens_before_the_action() -> None:
     check(edge[0]["at"] == 0, f"у самого начала не уходим в минус: {edge[0]['at']}")
 
 
-def test_text_has_no_misses() -> None:
-    """Потери и фолы показываем, промахи — нет.
+def test_bad_goes_after_good() -> None:
+    """В списке всё: и удачное, и потери с фолами и промахами.
 
-    Потерю и фол пересматривают, чтобы понять, что пошло не так. А бросок мимо
-    виден и по статистике: ссылка на каждый превратила бы список в перечень
-    неудач."""
-    print("\n=== потери и фолы есть, промахов нет ===")
+    Порядок в сводке при этом жёсткий — сначала сделанное. Иначе она
+    открывается фолом, а это не то, ради чего лезут в запись."""
+    print("\n=== неудачное идёт после удачного ===")
     text = gt.format_moments(SOURCE, GAME, ME, VIDEO)
     check("Твои моменты" in text, "заголовок на месте")
     check("трёхочковый" in text and "подбор" in text and "перехват" in text,
           "удачное названо")
     check("потеря" in text and "фол" in text, "потери и фолы тоже")
-    for word in ("промах", "мимо"):
-        check(word not in text.lower(), f"нет «{word}» — этого никто не просил")
+    check("промах трёхочкового" in text and "промах штрафного" in text,
+          "промахи названы по типу броска, а не одним словом")
     check("на табло" in text, "есть сверка с табло")
 
-    # Сводка начинается с того, ради чего запись открывают.
     summary = text.splitlines()[1]
-    check(summary.index("подбор") < summary.index("потеря"),
-          f"плохое в сводке идёт после хорошего: {summary}")
+    first_bad = min(summary.index(gt.MOMENT_TITLES[k])
+                    for k in gt.MOMENT_BAD if gt.MOMENT_TITLES[k] in summary)
+    last_good = max(summary.index(gt.MOMENT_TITLES[k])
+                    for k in ("reb", "stl", "pts3") if gt.MOMENT_TITLES[k] in summary)
+    check(last_good < first_bad, f"всё плохое после всего хорошего: {summary}")
     check(not gt.format_moments(SOURCE, GAME, "нет-такого"),
           "у кого моментов нет — пустая строка, а не пустой заголовок")
 
@@ -119,14 +124,17 @@ def test_ib_codes_are_the_verified_ones() -> None:
     print("\n=== коды лиг не разъехались ===")
     check(gt.IB_MOMENTS == {1: "ft", 2: "pts2", 3: "pts3", 26: "stl",
                             27: "blk", 28: "reb", 11: "tur",
-                            40: "pf", 41: "pf", 42: "pf"},
+                            40: "pf", 41: "pf", 42: "pf",
+                            4: "missft", 5: "miss2", 6: "miss3"},
           f"Инфобаскет: {gt.IB_MOMENTS}")
     # Фол — сумма трёх кодов: 41 и 42 редкие, по одному-два за матч, и на
     # одной игре разница потерялась бы. Сверено на трёх сразу.
     check(sorted(k for k, v in gt.IB_MOMENTS.items() if v == "pf") == [40, 41, 42],
           "фол собирается из трёх кодов")
-    check(4 not in gt.IB_MOMENTS and 5 not in gt.IB_MOMENTS
-          and 6 not in gt.IB_MOMENTS, "промахи (4/5/6) в моменты не берём")
+    # Промахи сверены тождествами: 1+4 = попытки штрафных, 3+6 = попытки
+    # трёхочковых, 2+3+5+6 = все броски с игры.
+    check(gt.IB_MOMENTS[4] == "missft" and gt.IB_MOMENTS[5] == "miss2"
+          and gt.IB_MOMENTS[6] == "miss3", "промахи разложены по типу броска")
     # У Инфобаскета кода передачи я не нашёл — и не выдумывал.
     check("ast" not in gt.IB_MOMENTS.values(),
           "передачи Инфобаскета не угаданы наугад")
@@ -141,7 +149,8 @@ def test_ib_codes_are_the_verified_ones() -> None:
           "фол на игроке не путаем с фолом игрока")
     check(all(k in gt.MOMENT_TITLES and k in gt.MOMENT_ICONS
               for k in set(gt.IB_MOMENTS.values()) | set(gt.SLPRO_MOMENTS.values())
-              | {"pts2", "pts3", "ft", "tur", "pf"}),
+              | {"pts2", "pts3", "ft", "tur", "pf",
+                 "miss2", "miss3", "missft"}),
           "у каждого вида есть подпись и значок")
 
 
@@ -207,7 +216,7 @@ def main() -> int:
     seed()
     test_only_mine()
     test_link_opens_before_the_action()
-    test_text_has_no_misses()
+    test_bad_goes_after_good()
     test_ib_codes_are_the_verified_ones()
     test_note_not_doubled()
     test_admin_can_show_anyone()
