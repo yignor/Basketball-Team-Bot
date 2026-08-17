@@ -273,6 +273,29 @@ def _prepare_db() -> Path:
     raise SystemExit("Не нашёл базу для теста. Укажи BOT_TEST_DB=<путь к копии>")
 
 
+def test_same_message_is_not_an_error(bd) -> bool:
+    """Повторное нажатие той же кнопки — не ошибка.
+
+    Телеграм отвечает «Message is not modified», когда правка ничего не
+    меняет: человек жмёт «Назад» с экрана, который и так открыт. Раньше это
+    падало в журнал ошибок и пряталось среди настоящих поломок."""
+    print("\n=== «сообщение не изменилось» не считается ошибкой ===")
+    from telegram.error import BadRequest
+    ok = BadRequest("Message is not modified: specified new message content "
+                    "and reply markup are exactly the same as a current content")
+    bad = [BadRequest("Message to edit not found"),
+           ValueError("can't subtract offset-naive and offset-aware datetimes")]
+    good = bd._same_message(ok)
+    print(("  ✅ " if good else "  ❌ ") + "повтор распознан")
+    left = [e for e in bad if bd._same_message(e)]
+    print(("  ✅ " if not left else "  ❌ ") + f"настоящие ошибки не глушим: {left}")
+
+    src = (ROOT / "bot_daemon.py").read_text()
+    hooked = "app.add_error_handler(_on_error)" in src
+    print(("  ✅ " if hooked else "  ❌ ") + "общий перехват подключён")
+    return good and not left and hooked
+
+
 async def main() -> int:
     db = _prepare_db()
     os.environ.setdefault("BOT_TOKEN", "0:test")
@@ -341,6 +364,9 @@ async def main() -> int:
             print("   ⏱ медленные: "
                   + ", ".join(f"{d} ({s:.1f} с)" for d, s in worst))
         total_problems += c.problems
+
+    if not test_same_message_is_not_an_error(bd):
+        total_problems = list(total_problems) + ["повтор нажатия считается ошибкой"]
 
     print("\n" + ("ВСЁ ЗЕЛЁНОЕ" if not total_problems
                   else f"ПРОБЛЕМ: {len(total_problems)}"))

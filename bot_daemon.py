@@ -2038,6 +2038,28 @@ async def _handle_fantasy_scope(query, parts: List[str]) -> None:
         reply_markup=await _fantasy_scope_markup())
 
 
+def _same_message(exc: Exception) -> bool:
+    """Телеграм ругается, если правка не меняет сообщение.
+
+    Это не ошибка, а обычное дело: человек жмёт «Назад» с экрана, который и
+    так открыт, или ту же кнопку дважды. Логировать такое незачем — в журнале
+    ошибок оно выглядит как поломка и прячет настоящие."""
+    return "message is not modified" in str(exc).lower()
+
+
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Общий перехват для всего, что не поймали сами обработчики.
+
+    Существует ради одного: «Message is not modified» приходит от Телеграма
+    при каждом повторном нажатии одной и той же кнопки и своими силами ловится
+    не везде. В журнале это выглядело поломкой и прятало настоящие ошибки.
+    Остальное логируем как раньше, с трассировкой."""
+    exc = context.error
+    if exc is not None and _same_message(exc):
+        return
+    log.exception("Необработанная ошибка обработчика", exc_info=exc)
+
+
 def _back_button(target: str = "admin:menu:main") -> List[InlineKeyboardButton]:
     return [InlineKeyboardButton("⬅️ Назад", callback_data=target)]
 
@@ -4212,6 +4234,8 @@ async def handle_prog_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                                                    back="admin:menu:reports")
         await query.edit_message_text(text, reply_markup=markup)
     except Exception as e:
+        if _same_message(e):
+            return
         log.error(f"Экран прогресса: {e}")
         await query.edit_message_text(f"⚠️ Не получилось: {e}")
 
@@ -7205,6 +7229,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("\n".join(lines), reply_markup=_main_menu_markup())
 
     except Exception as e:
+        if _same_message(e):
+            return          # нажали то, что уже открыто, — показывать нечего
         log.error(f"Ошибка в админ-меню (callback_data={data!r}): {e}")
         sheets_cache.report_error("admin_menu", f"{data!r}: {e}", _get_spreadsheet())
         try:
@@ -8307,6 +8333,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
     app.add_handler(CallbackQueryHandler(handle_roster_callback, pattern=r"^rost:"))
     app.add_handler(CallbackQueryHandler(handle_private_callback, pattern=r"^pl:"))
+    app.add_error_handler(_on_error)
 
     log.info("Запуск polling...")
     app.run_polling(
