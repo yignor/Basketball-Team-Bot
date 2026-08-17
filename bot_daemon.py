@@ -1157,6 +1157,39 @@ async def handle_profile_link(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not parsed:
         return
 
+    # Тренер нажал «Привязать по ссылке» на чьей-то карточке — ссылка идёт
+    # тому человеку, а не тому, кто её прислал. Развилка здесь, а не отдельным
+    # обработчиком: тот пришлось бы ставить в группу раньше этой, и стоило бы
+    # ошибиться с номером — админ привязал бы игрока к себе.
+    row = _awaiting_identity.pop(user.id, None)
+    if row is not None and _is_admin(user):
+        done = await asyncio.to_thread(_identity_set, int(row), parsed["source"],
+                                       parsed["player_id"], str(user.id))
+        if not done:
+            await msg.reply_text("❌ Не к кому привязывать: у человека нет "
+                                 "числового id — он ещё не писал боту.")
+            return
+        text, markup = await asyncio.to_thread(_identity_who, int(row))
+        await msg.reply_text(f"✅ Привязал.\n\n{text}", reply_markup=markup,
+                             disable_web_page_preview=True)
+        return
+
+    # Первую привязку человек делает сам, смену — нет. Иначе один оплативший
+    # перецепляется на товарища по команде и пересказывает ему платный разбор,
+    # и подписка расходится по кругу. Админа это не касается: перепривязка —
+    # его инструмент, экран «🔗 Привязки».
+    if not _is_admin(user):
+        have = {r["source"]: str(r["player_id"])
+                for r in player_identity.get_identities(user.id)}
+        old = have.get(parsed["source"])
+        if old and old != str(parsed["player_id"]):
+            await msg.reply_text(
+                "🔒 Профиль уже привязан, и сменить его может только тренер.\n\n"
+                "Так сделано, чтобы платный разбор нельзя было передавать по "
+                "цепочке. Если привязка ошибочная — напиши тренеру, он "
+                "поправит за минуту.")
+            return
+
     # SLPRO умеет сказать, существует ли такой игрок — спрашиваем ДО привязки,
     # иначе опечатка в ссылке молча запомнится как «твой» несуществующий id.
     career = None
@@ -1647,6 +1680,7 @@ def _main_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🚀 Запуск оповещений", callback_data="admin:menu:launch")],
         [InlineKeyboardButton("👥 Список пользователей", callback_data="admin:menu:users")],
         [InlineKeyboardButton("🔗 Опознание игроков", callback_data="admin:link:list")],
+        [InlineKeyboardButton("🎯 Профили в лигах", callback_data="admin:idn:list:0")],
         [InlineKeyboardButton("📈 Прогресс команды", callback_data="prog:list")],
         [InlineKeyboardButton("🔑 Доступы", callback_data="admin:acc:list")],
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
@@ -2159,6 +2193,7 @@ def _clear_pending(uid: int) -> None:
     _debt_draft.pop(uid, None)
     _awaiting_priv.pop(uid, None)
     _awaiting_guest.pop(uid, None)
+    _awaiting_identity.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -3650,6 +3685,10 @@ def _render_access_list() -> Tuple[str, InlineKeyboardMarkup]:
 # Кто вводит дату окончания доступа руками: {user_id: "вид:row:N" | "вид:nick:X"}.
 _awaiting_access: Dict[int, str] = {}
 
+# Тренер жмёт «Привязать по ссылке» и присылает адрес страницы игрока. Здесь
+# лежит строка листа, к которой эту ссылку прицепить.
+_awaiting_identity: Dict[int, int] = {}
+
 ACCESS_ASK = ("📅 До какого числа открыть доступ?\n\n"
               "Напиши дату: «10.09» или «10.09.2026». Без года возьму "
               "ближайшую будущую.\n\n"
@@ -3667,6 +3706,159 @@ def _add_months(day: date, months: int) -> date:
     year, month = divmod(total, 12)
     month += 1
     return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+IDENTITY_PAGE = 8
+
+
+def _identity_people() -> List[Dict[str, Any]]:
+    """Игроки листа с их привязками к профилям лиг.
+
+    Сначала непривязанные: экран нужен ровно для того, чтобы этот список
+    закончился. Внутри групп — по алфавиту."""
+    import coach_payments
+    import player_identity
+    people = coach_payments.players()
+    with sheets_cache.get_connection() as conn:
+        links = {int(r["player_row"]): str(r["tg_user_id"])
+                 for r in conn.execute(
+                     "SELECT player_row, tg_user_id FROM player_links")}
+    out = []
+    for p in people:
+        uid = links.get(int(p["row"]), "")
+        ids = player_identity.get_identities(uid) if uid else []
+        out.append({
+            "row": int(p["row"]), "title": p["title"], "uid": uid,
+            "nick": str(p.get("nickname") or "").lstrip("@").strip(),
+            "ids": [{"source": r["source"], "player_id": str(r["player_id"]),
+                     "games": player_identity.have_games(r["source"], r["player_id"])}
+                    for r in ids],
+            # Без Telegram-id привязывать не к кому: профиль лиги цепляется к
+            # человеку, а человек для бота — это числовой id, а не строка листа.
+            "reachable": bool(uid),
+        })
+    out.sort(key=lambda x: (bool(x["ids"]), x["title"].lower()))
+    return out
+
+
+def _identity_screen(page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто из команды привязан к профилю лиги, а кто ещё нет."""
+    people = _identity_people()
+    linked = [p for p in people if p["ids"]]
+    mute = [p for p in people if not p["reachable"]]
+    lines = ["🔗 Привязки профилей лиг", "",
+             "Привязка связывает человека с его страницей в лиге — без неё "
+             "личная статистика не знает, чьи игры показывать.", "",
+             f"Привязано: {len(linked)} из {len(people)}."]
+    if mute:
+        lines.append(f"⚠️ Не нажимали «Старт» ({len(mute)}): "
+                     + ", ".join(p["title"] for p in mute[:6])
+                     + ("…" if len(mute) > 6 else ""))
+        lines.append("   Пока не напишут боту, привязывать их не к чему.")
+    lines.append("")
+    lines.append("Смена привязки — только отсюда: сам игрок её поменять не может.")
+
+    start = max(0, page) * IDENTITY_PAGE
+    chunk = people[start:start + IDENTITY_PAGE]
+    rows: List[List[InlineKeyboardButton]] = []
+    for p in chunk:
+        if p["ids"]:
+            mark = "✅"
+        elif p["reachable"]:
+            mark = "▫️"
+        else:
+            mark = "🚫"
+        rows.append([InlineKeyboardButton(f"{mark} {p['title']}",
+                                          callback_data=f"admin:idn:w:{p['row']}")])
+    nav = []
+    if start:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:idn:list:{page - 1}"))
+    if start + IDENTITY_PAGE < len(people):
+        nav.append(InlineKeyboardButton("Ещё ➡️", callback_data=f"admin:idn:list:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ В админку", callback_data="admin:menu:main")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _identity_who(row: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Карточка одного игрока: что привязано и что можно привязать.
+
+    Кандидатов ищем по ФИО среди имён, которые лиги уже прислали в протоколах,
+    — те самые имена, по которым люди видят себя в фэнтези. Наружу за ними не
+    ходим."""
+    import player_identity
+    people = _identity_people()
+    p = next((x for x in people if x["row"] == int(row)), None)
+    if not p:
+        return "Игрок не найден.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ К списку", callback_data="admin:idn:list:0")]])
+
+    lines = [f"🔗 {p['title']}", ""]
+    rows: List[List[InlineKeyboardButton]] = []
+    if not p["reachable"]:
+        lines.append("🚫 Человек ещё не писал боту, числового id у нас нет — "
+                     "привязать не к кому. Попроси его нажать «Старт».")
+    else:
+        if p["ids"]:
+            lines.append("Привязано:")
+            for r in p["ids"]:
+                title = player_identity.SOURCE_TITLES.get(r["source"], r["source"])
+                lines.append(f"   • {title}: id {r['player_id']} — игр в базе "
+                             f"{r['games']}")
+                lines.append(f"     {player_identity.profile_url(r['source'], r['player_id'])}")
+                rows.append([InlineKeyboardButton(
+                    f"✂️ Отвязать {title}",
+                    callback_data=f"admin:idn:off:{p['row']}:{r['source']}")])
+        else:
+            lines.append("Пока ничего не привязано.")
+        lines.append("")
+
+        taken = {(r["source"], r["player_id"]) for r in p["ids"]}
+        found = [c for c in player_identity.suggest_for_name(p["title"])
+                 if (c["source"], c["player_id"]) not in taken]
+        if found:
+            lines.append("Похожие профили в лигах:")
+            for c in found:
+                title = player_identity.SOURCE_TITLES.get(c["source"], c["source"])
+                lines.append(f"   • {title}: {c['name']} — id {c['player_id']}, "
+                             f"игр {c['games']}")
+                rows.append([InlineKeyboardButton(
+                    f"🔗 {title}: {c['name']} ({c['games']} игр)",
+                    callback_data=f"admin:idn:set:{p['row']}:{c['source']}:{c['player_id']}")])
+        else:
+            lines.append("Похожих по ФИО не нашёл — лиги пишут имена по-своему. "
+                         "Открой его страницу на сайте лиги и пришли ссылку "
+                         "кнопкой ниже.")
+        rows.append([InlineKeyboardButton("✍️ Привязать по ссылке",
+                                          callback_data=f"admin:idn:man:{p['row']}")])
+
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:idn:list:0")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _identity_set(row: int, source: str, player_id: str, by: str) -> bool:
+    """Привязывает профиль лиги к человеку из строки листа. От имени тренера."""
+    import player_identity
+    people = _identity_people()
+    p = next((x for x in people if x["row"] == int(row)), None)
+    if not p or not p["uid"]:
+        return False
+    player_identity.link_identity(p["uid"], {
+        "source": source, "player_id": str(player_id),
+        "comp_id": "", "api_url": ""})
+    log.info("привязка профиля: строка %s -> %s:%s (кем: %s)",
+             row, source, player_id, by)
+    return True
+
+
+def _identity_off(row: int, source: str) -> bool:
+    import player_identity
+    people = _identity_people()
+    p = next((x for x in people if x["row"] == int(row)), None)
+    if not p or not p["uid"]:
+        return False
+    return bool(player_identity.unlink(p["uid"], source))
 
 
 def _access_people(kind: str) -> List[Dict[str, Any]]:
@@ -6658,6 +6850,51 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 sheets_cache.revoke_access(parts[3], parts[4])
             text, markup = _render_access_list()
             await query.edit_message_text(text, reply_markup=markup)
+
+        elif parts[1] == "idn":
+            what = parts[2] if len(parts) > 2 else "list"
+            if what == "w" and len(parts) > 3:
+                text, markup = await asyncio.to_thread(_identity_who, int(parts[3]))
+                await query.edit_message_text(text, reply_markup=markup,
+                                              disable_web_page_preview=True)
+                return
+            if what == "set" and len(parts) > 5:
+                row, source, pid = int(parts[3]), parts[4], parts[5]
+                done = await asyncio.to_thread(_identity_set, row, source, pid,
+                                               str(user.id))
+                if not done:
+                    await query.answer("Не к кому привязывать: нет id",
+                                       show_alert=True)
+                    return
+                text, markup = await asyncio.to_thread(_identity_who, row)
+                await query.edit_message_text(f"✅ Привязал.\n\n{text}",
+                                              reply_markup=markup,
+                                              disable_web_page_preview=True)
+                return
+            if what == "off" and len(parts) > 4:
+                row, source = int(parts[3]), parts[4]
+                await asyncio.to_thread(_identity_off, row, source)
+                text, markup = await asyncio.to_thread(_identity_who, row)
+                await query.edit_message_text(f"✂️ Отвязал.\n\n{text}",
+                                              reply_markup=markup,
+                                              disable_web_page_preview=True)
+                return
+            if what == "man" and len(parts) > 3:
+                _clear_pending(user.id)
+                _awaiting_identity[user.id] = int(parts[3])
+                people = await asyncio.to_thread(_identity_people)
+                p = next((x for x in people if x["row"] == int(parts[3])), None)
+                await query.edit_message_text(
+                    f"✍️ Пришли ссылку на страницу игрока в лиге — привяжу её "
+                    f"к «{(p or {}).get('title', '')}».\n\n"
+                    "• https://slpro.basketstat.ru/player/XXXX\n"
+                    "• https://www.fbp.ru/player.html?personId=XXXXXX"
+                    "&apiUrl=https://reg.infobasket.su")
+                return
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            text, markup = await asyncio.to_thread(_identity_screen, page)
+            await query.edit_message_text(text, reply_markup=markup)
+            return
 
         elif parts[1] == "link":
             what = parts[2] if len(parts) > 2 else "list"

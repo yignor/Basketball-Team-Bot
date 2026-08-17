@@ -119,6 +119,56 @@ def link_identity(tg_user_id: Any, parsed: Dict[str, str]) -> Dict[str, Any]:
             "previous": str(prev["player_id"]) if prev else None}
 
 
+def unlink(tg_user_id: Any, source: str = "") -> int:
+    """Снимает привязку. Без source — все лиги разом. Возвращает, сколько сняли."""
+    sheets_cache.init_db()
+    uid = str(tg_user_id)
+    with sheets_cache.get_connection() as conn:
+        if source:
+            n = conn.execute(
+                "DELETE FROM player_identities WHERE tg_user_id = ? AND source = ?",
+                (uid, source)).rowcount
+        else:
+            n = conn.execute(
+                "DELETE FROM player_identities WHERE tg_user_id = ?", (uid,)).rowcount
+        conn.commit()
+    return int(n or 0)
+
+
+def suggest_for_name(full_name: str, limit: int = 6) -> List[Dict[str, Any]]:
+    """Профили лиг, похожие на это ФИО из листа «Игроки».
+
+    Ради этого не нужен ни один запрос наружу: имена игроков лиг уже лежат в
+    памяти (`player_names`), потому что по ним подписываются протоколы. Там же
+    сведены разные написания одного человека — «Шлепикас Роман» в SLPRO и
+    «Ромас Шлепикас» в Инфобаскете, — так что искать достаточно по канону.
+
+    Отдаём кандидатов, а не «угаданного»: за списком стоит сверка по ФИО, и
+    ошибиться тут — значит показать человеку чужую статистику. Последнее слово
+    за тренером, поэтому список короткий и с числом игр у каждого."""
+    import player_names
+    want = player_names._norm(full_name or "")
+    if not want:
+        return []
+    out: List[Dict[str, Any]] = []
+    for key, name in player_names.get_all().items():
+        source, _, player_id = str(key).partition(":")
+        if not player_id:
+            continue
+        got = player_names._norm(name)
+        # Точное совпадение канона, перевёрнутый порядок или опечатка в одну
+        # букву: лиги и лист расходятся ровно на это.
+        if not (got == want or player_names._lev1(got, want)
+                or sorted(got.split()) == sorted(want.split())):
+            continue
+        out.append({"source": source, "player_id": player_id, "name": name,
+                    "games": have_games(source, player_id)})
+    # Больше игр — выше: если один и тот же человек заведён в лиге дважды,
+    # нужен тот id, под которым он реально играл.
+    out.sort(key=lambda x: (-x["games"], x["source"], x["player_id"]))
+    return out[:limit]
+
+
 def have_games(source: str, player_id: str) -> int:
     """Сколько игр этого человека уже есть в локальной копии. Ноль означает,
     что его соревнование мы не зеркалим — статистику придётся дотянуть."""

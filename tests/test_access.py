@@ -147,6 +147,62 @@ def test_old_buttons_die_with_access() -> None:
               f"{mod} не рассылает закрытое")
 
 
+def test_admin_owns_rebinding() -> None:
+    """Сменить привязку может только тренер.
+
+    Иначе оплативший перецепляется на товарища и пересказывает ему платный
+    разбор — подписка расходится по команде за вечер."""
+    print("\n=== перепривязка только через админа ===")
+    src = (ROOT / "bot_daemon.py").read_text()
+    at = src.index("async def handle_profile_link")
+    body = src[at:at + 3000]
+    check("только тренер" in body,
+          "игроку на попытку смены отвечают отказом, а не молчанием")
+    check(body.index("_awaiting_identity") < body.index("только тренер"),
+          "ссылка тренера уходит выбранному игроку раньше проверки на смену")
+
+    # Инструмент, ради которого запрет вообще возможен.
+    for what in ("_identity_screen", "_identity_who", "_identity_set",
+                 "_identity_off"):
+        check(what in src, f"у админа есть {what}")
+
+
+def test_candidates_by_name() -> None:
+    """Кандидатов ищем по именам, которые лиги уже прислали в протоколах.
+
+    Это те же имена, по которым игроки видят себя в фэнтези, — значит,
+    привязать команду можно не дожидаясь, пока каждый пришлёт ссылку."""
+    print("\n=== кандидаты подбираются по ФИО ===")
+    import player_identity
+    import player_names
+    player_names.clear()
+    player_names.put(SOURCE, PLAYER, "Шлепикас Роман")
+    player_names.put(SOURCE, "555", "Иванов Иван")
+    # Инфобаскет пишет того же человека наоборот — это должно совпасть.
+    player_names.put("infobasket", "400566", "Роман Шлепикас")
+
+    found = player_identity.suggest_for_name("Шлепикас Роман")
+    ids = sorted((c["source"], c["player_id"]) for c in found)
+    check(ids == [("infobasket", "400566"), (SOURCE, PLAYER)],
+          f"нашлись обе лиги, чужой не попал: {ids}")
+    check(found[0]["player_id"] == PLAYER,
+          f"первым тот, у кого игры есть: {found[0]}")
+
+    # Опечатка в одну букву — тоже он: лист и лига расходятся ровно на это.
+    check(any(c["player_id"] == PLAYER
+              for c in player_identity.suggest_for_name("Шлепикас Романа")),
+          "опечатка в одну букву не рвёт совпадение")
+    check(not player_identity.suggest_for_name("Петров Пётр"),
+          "чужому ФИО кандидатов не выдумываем")
+
+
+def test_unlink() -> None:
+    print("\n=== отвязать можно ===")
+    import player_identity
+    check(player_identity.unlink(FREE, SOURCE) == 1, "привязка снята")
+    check(not player_identity.get_identities(FREE), "и её больше нет")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -154,6 +210,9 @@ def main() -> int:
     test_teaser_does_not_leak()
     test_access_opens_and_expires()
     test_old_buttons_die_with_access()
+    test_admin_owns_rebinding()
+    test_candidates_by_name()
+    test_unlink()
 
     print("\n" + "=" * 60)
     if bad:
