@@ -54,8 +54,9 @@ ANNOUNCE_MAX_AGE_DAYS = 3
 # когда придётся — 09.08 через три часа после начала. Поэтому смотрим раньше и
 # чаще, а ищем в первую очередь среди видео группы, а не в постах.
 LIVE_LEAD_MINUTES = 30          # за сколько до начала начинаем смотреть
-LIVE_TAIL_HOURS = 3             # сколько ещё смотрим после начала
+LIVE_TAIL_HOURS = 3             # предел, если результат так и не приехал
 LIVE_SCAN_SECONDS = 60          # как часто дёргаем VK по одной игре
+LIVE_GAME_HOURS = 2             # столько идёт матч; дальше эфир уже не «идёт»
 
 
 _env_loaded = False
@@ -191,7 +192,7 @@ def store_video_meta(source: str, game_id: Any, meta: Dict[str, Any]) -> bool:
             """UPDATE game_meta SET video_started_at = ?, video_seconds = ?
                 WHERE source = ? AND game_id = ?""",
             (int(meta["started_at"]), int(meta.get("seconds") or 0),
-             source, str(game_id))).rowcount
+             source, meta_id(game_id))).rowcount
         conn.commit()
     return bool(n)
 
@@ -201,7 +202,7 @@ def video_started_at(source: str, game_id: Any) -> int:
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             "SELECT video_started_at FROM game_meta WHERE source = ? AND game_id = ?",
-            (source, str(game_id))).fetchone()
+            (source, meta_id(game_id))).fetchone()
     return int(row["video_started_at"] or 0) if row else 0
 
 
@@ -329,17 +330,17 @@ def store(source: str, game_id: Any, link: str,
         n = conn.execute(
             """UPDATE game_meta SET video_vk = ?
                WHERE source = ? AND game_id = ? AND video_vk = ''""",
-            (link, source, str(game_id))).rowcount
+            (link, source, meta_id(game_id))).rowcount
         if not n:
             exists = conn.execute(
                 "SELECT 1 FROM game_meta WHERE source = ? AND game_id = ?",
-                (source, str(game_id))).fetchone()
+                (source, meta_id(game_id))).fetchone()
             if not exists:
                 conn.execute(
                     """INSERT INTO game_meta (source, game_id, game_date,
                                               home_name, guest_name, video_vk, fetched_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (source, str(game_id), game_date, home, guest, link,
+                    (source, meta_id(game_id), game_date, home, guest, link,
                      sheets_cache.now_iso()))
                 n = 1
         conn.commit()
@@ -451,6 +452,16 @@ def live_candidates(now: Optional[Any] = None) -> List[Dict[str, Any]]:
             continue
         if link_of(g["source"], g["game_id"]):
             continue                      # ссылка уже есть — искать нечего
+        # Игра закончилась — сторожить нечего. Раньше окно закрывалось только
+        # по таймеру в три часа от начала, и бот ещё полтора часа после финала
+        # дёргал ВК каждую минуту. Хуже другое: найдись видео в этом хвосте, он
+        # объявил бы его как «Идёт трансляция» при давно сыгранном матче.
+        #
+        # Признак конца — известный счёт: он появляется вместе с протоколом.
+        # Трёхчасовой предел оставлен запасным: если результат так и не
+        # приехал, сторож обязан замолчать сам.
+        if is_finished(g["source"], g["game_id"]):
+            continue
         out.append({"source": g["source"], "game_id": g["game_id"],
                     "game_date": g["date"].isoformat(),
                     "home_name": g.get("opponent") or "",
@@ -475,13 +486,41 @@ def _game_start(game: Dict[str, Any]) -> Optional[Any]:
     return None
 
 
+def meta_id(game_id: Any) -> str:
+    """Ключ игры в game_meta.
+
+    В расписании матчи SLPRO записаны как «slpro-4558», а бокс-скор кладёт их
+    в game_meta голым числом «4558». Пока это не сводили к одному виду, поиск
+    по расписанию не находил в game_meta ничего: сторож трансляций считал, что
+    ссылки нет, и продолжал дёргать ВК даже по уже найденной игре."""
+    return str(game_id).split("-", 1)[1] if str(game_id).startswith("slpro-") \
+        else str(game_id)
+
+
 def link_of(source: str, game_id: Any) -> str:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             "SELECT video_vk FROM game_meta WHERE source = ? AND game_id = ?",
-            (source, str(game_id))).fetchone()
+            (source, meta_id(game_id))).fetchone()
     return str((row["video_vk"] if row else "") or "")
+
+
+def is_finished(source: str, game_id: Any) -> bool:
+    """Матч сыгран? Признак — счёт: он приходит вместе с протоколом.
+
+    Ноль-ноль за результат не считаем: так выглядит и заготовка расписания."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT home_score, guest_score FROM game_meta "
+            "WHERE source = ? AND game_id = ?", (source, meta_id(game_id))).fetchone()
+    if not row:
+        return False
+    try:
+        return int(row["home_score"] or 0) > 0 or int(row["guest_score"] or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 async def watch_live(bot: Any = None, chat_ids: Optional[List[Any]] = None,
@@ -519,8 +558,14 @@ async def watch_live(bot: Any = None, chat_ids: Optional[List[Any]] = None,
         print(f"📺 VK: трансляция {g['opponent']} ({g['game_date']}) — "
               f"нашлась через {how}: {link}")
         if bot is not None:
+            # Счёт приезжает не сразу, так что между финалом и протоколом окно
+            # ещё открыто. Называть найденное там «Идёт трансляция» нечестно:
+            # смотрим на часы и говорим про запись.
+            import datetime as _dt
+            live = _dt.datetime.now() < g["start"] + _dt.timedelta(
+                hours=LIVE_GAME_HOURS)
             try:
-                res = await announce(bot, g, link, chat_ids, topic_id, live=True)
+                res = await announce(bot, g, link, chat_ids, topic_id, live=live)
                 out["notified"] += res["chat"] + res["team"] + res["players"]
             except Exception as e:
                 print(f"⚠️ VK: оповещение о трансляции не ушло — {e}")
