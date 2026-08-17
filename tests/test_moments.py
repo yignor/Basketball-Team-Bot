@@ -48,6 +48,10 @@ def seed() -> None:
          "real": 1500, "order": 2},
         {"player_id": ME, "kind": "stl", "period": 4, "left": 45,
          "real": 3000, "order": 3},
+        {"player_id": ME, "kind": "tur", "period": 2, "left": 300,
+         "real": 1200, "order": 5},
+        {"player_id": ME, "kind": "pf", "period": 3, "left": 200,
+         "real": 2200, "order": 6},
         {"player_id": "999", "kind": "pts2", "period": 1, "left": 300,
          "real": 500, "order": 4},
     ])
@@ -56,9 +60,9 @@ def seed() -> None:
 def test_only_mine() -> None:
     print("\n=== чужие моменты не показываем ===")
     mine = gt.moments(SOURCE, GAME, ME)
-    check(len(mine) == 3, f"мои три: {len(mine)}")
+    check(len(mine) == 5, f"мои пять: {len(mine)}")
     check(all(m["player_id"] == ME for m in mine), "и все мои")
-    check(len(gt.moments(SOURCE, GAME)) == 4, "без фильтра видно всю игру")
+    check(len(gt.moments(SOURCE, GAME)) == 6, "без фильтра видно всю игру")
 
 
 def test_link_opens_before_the_action() -> None:
@@ -83,14 +87,25 @@ def test_link_opens_before_the_action() -> None:
 
 
 def test_text_has_no_misses() -> None:
-    print("\n=== в списке только удачное ===")
+    """Потери и фолы показываем, промахи — нет.
+
+    Потерю и фол пересматривают, чтобы понять, что пошло не так. А бросок мимо
+    виден и по статистике: ссылка на каждый превратила бы список в перечень
+    неудач."""
+    print("\n=== потери и фолы есть, промахов нет ===")
     text = gt.format_moments(SOURCE, GAME, ME, VIDEO)
     check("Твои моменты" in text, "заголовок на месте")
     check("трёхочковый" in text and "подбор" in text and "перехват" in text,
-          "все три действия названы")
-    for word in ("промах", "мимо", "потер"):
+          "удачное названо")
+    check("потеря" in text and "фол" in text, "потери и фолы тоже")
+    for word in ("промах", "мимо"):
         check(word not in text.lower(), f"нет «{word}» — этого никто не просил")
     check("на табло" in text, "есть сверка с табло")
+
+    # Сводка начинается с того, ради чего запись открывают.
+    summary = text.splitlines()[1]
+    check(summary.index("подбор") < summary.index("потеря"),
+          f"плохое в сводке идёт после хорошего: {summary}")
     check(not gt.format_moments(SOURCE, GAME, "нет-такого"),
           "у кого моментов нет — пустая строка, а не пустой заголовок")
 
@@ -102,9 +117,14 @@ def test_ib_codes_are_the_verified_ones() -> None:
     сошлось с очками. Если кто-то поправит словарь наугад, человек пойдёт
     смотреть чужой момент — поэтому таблица зафиксирована здесь."""
     print("\n=== коды лиг не разъехались ===")
-    check(gt.IB_MOMENTS == {1: "ft", 2: "pts2", 3: "pts3",
-                            26: "stl", 27: "blk", 28: "reb"},
+    check(gt.IB_MOMENTS == {1: "ft", 2: "pts2", 3: "pts3", 26: "stl",
+                            27: "blk", 28: "reb", 11: "tur",
+                            40: "pf", 41: "pf", 42: "pf"},
           f"Инфобаскет: {gt.IB_MOMENTS}")
+    # Фол — сумма трёх кодов: 41 и 42 редкие, по одному-два за матч, и на
+    # одной игре разница потерялась бы. Сверено на трёх сразу.
+    check(sorted(k for k, v in gt.IB_MOMENTS.items() if v == "pf") == [40, 41, 42],
+          "фол собирается из трёх кодов")
     check(4 not in gt.IB_MOMENTS and 5 not in gt.IB_MOMENTS
           and 6 not in gt.IB_MOMENTS, "промахи (4/5/6) в моменты не берём")
     # У Инфобаскета кода передачи я не нашёл — и не выдумывал.
@@ -112,11 +132,16 @@ def test_ib_codes_are_the_verified_ones() -> None:
           "передачи Инфобаскета не угаданы наугад")
     check(gt.SLPRO_MOMENTS.get("ast") == "ast"
           and gt.SLPRO_MOMENTS.get("rebD") == "reb"
-          and gt.SLPRO_MOMENTS.get("rebA") == "reb",
+          and gt.SLPRO_MOMENTS.get("rebA") == "reb"
+          and gt.SLPRO_MOMENTS.get("tur") == "tur"
+          and gt.SLPRO_MOMENTS.get("foul") == "pf",
           f"SLPRO: {gt.SLPRO_MOMENTS}")
+    # Фол НА игроке — другое событие, и в один список с «твой фол» не идёт.
+    check("foul_on_player" not in gt.SLPRO_MOMENTS,
+          "фол на игроке не путаем с фолом игрока")
     check(all(k in gt.MOMENT_TITLES and k in gt.MOMENT_ICONS
               for k in set(gt.IB_MOMENTS.values()) | set(gt.SLPRO_MOMENTS.values())
-              | {"pts2", "pts3", "ft"}),
+              | {"pts2", "pts3", "ft", "tur", "pf"}),
           "у каждого вида есть подпись и значок")
 
 
