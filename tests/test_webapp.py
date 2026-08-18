@@ -38,7 +38,8 @@ function mkEl(id){ const o = { id, className:'', textContent:'', value:'',
   addEventListener(){}, focus(){}, dispatchEvent(){}, remove(){} }; return o; }
 const _store = {};
 global.document = { getElementById:(id)=> _store[id] || (_store[id]=mkEl(id)),
-  createElement:(t)=> mkEl(t), querySelectorAll:()=>[], querySelector:()=>mkEl('q'),
+  createElement:(t)=> mkEl(t), querySelectorAll:()=>[],
+  querySelector:(sel)=> _store['sel:'+sel] || (_store['sel:'+sel]=mkEl(sel)),
   addEventListener(){}, body: mkEl('body'), documentElement: mkEl('html') };
 global.window = global;
 global.location = { search:'', hash:'', href:'' };
@@ -96,22 +97,31 @@ CHECKS = """
        'три объявленные игры видны, плюс «На все игры»');
 
     // Состава ещё нет — выбор из полного ростера, и это объяснено.
-    applyGamePool({ game:{label:'Резалит · 24.08'}, declared:false,
+    applyGamePool({ game:{label:'Резалит · 24.08', date:'2026-08-24',
+                            time:'21:00', opponent:'Резалит'}, declared:false,
       pool:[{ref:'ib:1:p1', name:'Иванов Иван'}, {ref:'ib:1:p2', name:'Петров Пётр'}],
       pick:[] }, 'slpro:4600');
     ok(pool.length === 2, 'без заявки показан весь ростер');
+    ok(document.getElementById('gameWhen').textContent.indexOf('августа') >= 0,
+       'дата матча написана словами: ' + document.getElementById('gameWhen').textContent);
     ok(!document.getElementById('poolNote').classList.contains('hidden'),
        'и человеку сказано, почему список полный');
 
-    applyGamePool({ game:{label:'Кирпичный Завод · 22.08'},
+    applyGamePool({ game:{label:'Кирпичный Завод · 22.08', date:'2026-08-22',
+                            time:'14:00', opponent:'Кирпичный Завод'},
       pool:[{refs:['ib:1:p1'], name:'Иванов Иван', games:2, in_games:['a','b']},
             {refs:[], name:'Гость Гостев', unlinked:true}], pick:[] }, 'infobasket:777');
-    ok(minimalChrome === true, 'внутри матча лишние кнопки убраны');
     ok(byName('Гость Гостев').unlinked === true, 'несведённый с лигой помечен');
     ok(byName('Иванов Иван').games === 2, 'играющий дважды отмечен счётчиком');
-    ok(document.getElementById('sort').classList.contains('hidden'), 'сортировки нет');
-    ok(document.getElementById('playedChip').classList.contains('hidden'), '«только с играми» нет');
-    ok(document.getElementById('filterBar').classList.contains('hidden'), 'полосы тиров нет');
+    // Инструменты выбора внутри матча ОСТАЮТСЯ: без фильтра по стоимости в
+    // бюджетном режиме состав не собрать. Я их было убрал — стало хуже.
+    ok(!document.getElementById('sort').classList.contains('hidden'), 'сортировка на месте');
+    ok(!document.getElementById('playedChip').classList.contains('hidden'), '«только с играми» на месте');
+    ok(minimalChrome === false, 'фильтры не подавляются');
+    // А верхние вкладки внутри матча не нужны — человек занят одним делом.
+    ok(document.querySelector('.tabs').classList.contains('hidden'), 'верхних вкладок нет');
+    ok(document.getElementById('gameName').textContent.length > 0, 'соперник в шапке назван');
+    ok(document.getElementById('gameEmblem').textContent.length > 0, 'эмблема на месте');
 
     weekRefs = ['ib:1:p1'];
     applyGamePool({ game:{label:'Все игры'}, all:true, differ:true,
@@ -134,6 +144,7 @@ CHECKS = """
 
     showGames();
     ok(!document.getElementById('gamesScreen').classList.contains('hidden'), 'возврат к списку игр');
+    ok(!document.querySelector('.tabs').classList.contains('hidden'), 'снаружи матча вкладки вернулись');
     ok(document.getElementById('draft').classList.contains('hidden'), 'набор при этом скрыт');
 
     // Экран не должен оставаться пустым ни при каких обстоятельствах: раньше
