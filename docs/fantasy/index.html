@@ -233,6 +233,13 @@
   .gs-hsub { font-size: 12px; opacity: .6; margin-top: 2px; }
   .backbtn { background: none; border: 0; color: var(--accent, #2ea6ff);
              font-size: 15px; padding: 6px 16px 2px; }
+  /* Счётчик-карточка: то же место и вес, что у соседнего бота, — сверху,
+     крупно, до фильтров. */
+  .budgetcard { margin: 4px 16px 10px; padding: 13px 14px; border-radius: 12px;
+                background: var(--secondary-bg); font-size: 15px; font-weight: 600; }
+  /* Сортировка на всю ширину: мелкий inline-select рядом со счётчиком терялся. */
+  .sortwide { flex: 1; width: 100%; padding: 11px 12px; font-size: 15px;
+              border-radius: 12px; }
   </style>
 </head>
 <body>
@@ -269,6 +276,9 @@
     <div class="bar hidden" id="modeBar"></div>
     <div class="note hidden" id="modeNote"></div>
     <div class="bar hidden" id="catBar"></div>
+    <!-- Главное число — сверху и крупно: человек смотрит на него постоянно,
+         а внизу мелкой строкой его приходилось искать. -->
+    <div class="budgetcard" id="counter"></div>
     <div class="bar hidden" id="filterBar"></div>
     <div class="bar" id="searchBar">
       <button class="chip" id="searchBtn" onclick="toggleSearch()">🔍 поиск</button>
@@ -276,9 +286,7 @@
     </div>
     <div class="note hidden" id="carryNote"></div>
     <div class="bar">
-      <div class="counter" id="counter"></div>
-      <button class="chip" id="playedChip" onclick="togglePlayed()">Только с играми</button>
-      <select id="sort" aria-label="Сортировка">
+      <select id="sort" class="sortwide" aria-label="Сортировка">
         <option value="fp">Фэнтези-очки</option>
         <option value="fp_avg">Очки за игру</option>
         <option value="games">Игры</option>
@@ -775,22 +783,43 @@
     return seen;
   }
 
+  // Полоса фильтров — по образцу соседнего бота: сначала «Все N» (сброс и
+  // заодно сколько всего), потом полосы стоимости, потом «по карману» ЧИСЛОМ
+  // (сколько игроков влезает в остаток, а не сколько осталось денег — деньги
+  // и так написаны в карточке сверху) и «только с играми».
   function renderFilterBar() {
     const bar = $('filterBar');
-    // Внутри матча полосы тиров нет: она делит длинный список по стоимости, а
-    // в заявке на игру человек десять — делить нечего.
-    const on = mode === 'budget' && !minimalChrome;
-    bar.classList.toggle('hidden', !on);
-    if (!on) { tierFilter.clear(); affordable = false; return; }
-    const left = budget() - spent();
-    bar.innerHTML = rankBands().map(b => {
-      const band = b.low ? ` ${b.low}–${b.high}` : '';
-      return `<button class="chip${tierFilter.has(b.rank) ? ' on' : ''}" ` +
-        `onclick="toggleTier(${jattr(b.rank)})">${TIER_ICON[b.rank] || ''}${band}</button>`;
-    }).join('') +
-      `<button class="chip${affordable ? ' on' : ''}" onclick="toggleAffordable()">` +
-      `💰 по карману (${left >= 0 ? left : 'перебор'})</button>`;
+    bar.classList.remove('hidden');
+    const money = mode === 'budget';
+    const left = money ? budget() - spent() : 0;
+    const fits = p => !p.excluded && (!money || (p.price || 0) <= left);
+    const all = pool.filter(p => !p.excluded).length;
+    const affordableCount = pool.filter(fits).length;
+    const clean = !tierFilter.size && !affordable && !playedOnly;
+
+    let html = `<button class="chip${clean ? ' on' : ''}" onclick="resetFilters()">` +
+               `Все ${all}</button>`;
+    if (money) {
+      html += rankBands().map(b => {
+        const band = b.low ? ` ${b.low}–${b.high}` : '';
+        return `<button class="chip${tierFilter.has(b.rank) ? ' on' : ''}" ` +
+          `onclick="toggleTier(${jattr(b.rank)})">${TIER_ICON[b.rank] || ''}${band}</button>`;
+      }).join('') +
+        `<button class="chip${affordable ? ' on' : ''}" onclick="toggleAffordable()">` +
+        `💰 ${affordableCount}</button>`;
+    }
+    html += `<button class="chip${playedOnly ? ' on' : ''}" onclick="togglePlayed()">` +
+            `Только с играми</button>`;
+    bar.innerHTML = html;
+    if (!money) { tierFilter.clear(); affordable = false; }
   }
+
+  function resetFilters() {
+    haptic('light');
+    tierFilter.clear(); affordable = false; playedOnly = false;
+    renderFilterBar(); renderPool();
+  }
+  window.resetFilters = resetFilters;
 
   function toggleTier(rank) {
     haptic('light');
@@ -1196,7 +1225,13 @@
     } else if (mode === 'category') {
       hint = ' · по игроку на категорию';
     }
-    $('counter').textContent = `Выбрано: ${total()} / ${slots()}${hint}`;
+    // Порядок как в образце: сначала деньги, потом сколько ещё брать.
+    const leftPicks = Math.max(0, slots() - total());
+    const tail = leftPicks ? `осталось выбрать ${leftPicks}` : 'состав собран';
+    $('counter').textContent = mode === 'budget'
+      ? `Бюджет ${spent()} из ${budget()} · ${tail}`
+        + (budget() - spent() < 0 ? ' — перебор!' : '')
+      : `Выбрано ${total()} из ${slots()} · ${tail}${hint}`;
     // Состав живёт, пока его не поменяли: человек должен видеть, что этот
     // набор перенесён с прошлой игры и уже играет — заново собирать не нужно.
     //
@@ -2422,8 +2457,7 @@
 
   function togglePlayed() {
     playedOnly = !playedOnly;
-    $('playedChip').classList.toggle('on', playedOnly);
-    renderPool();
+    renderFilterBar(); renderPool();
   }
   window.togglePlayed = togglePlayed;
 
