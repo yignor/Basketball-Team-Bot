@@ -197,6 +197,17 @@
     .row { display: flex; justify-content: space-between; padding: 9px 14px; margin: 6px 12px;
       background: var(--secondary-bg); border-radius: 10px; font-size: 14px; }
     .row .d { color: var(--hint); }
+  .gamebar { margin: 8px 0 10px; }
+  .gamebar-title { font-size: 12px; opacity: .65; margin-bottom: 6px; }
+  .gamebar-list { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  .gamebtn { flex: 0 0 auto; padding: 7px 11px; border-radius: 10px; font-size: 13px;
+             border: 1px solid var(--sep, #2a2a2a); background: transparent;
+             color: inherit; white-space: nowrap; }
+  .gamebtn.on { background: var(--accent, #2ea6ff); color: #fff; border-color: transparent; }
+  .tag { font-size: 11px; padding: 1px 5px; border-radius: 6px; margin-left: 5px;
+         vertical-align: middle; }
+  .tag-two { background: rgba(46,166,255,.18); color: var(--accent, #2ea6ff); }
+  .tag-off { background: rgba(255,159,10,.18); color: #ff9f0a; }
   </style>
 </head>
 <body>
@@ -239,8 +250,16 @@
       </select>
     </div>
     <div id="lockBanner" class="banner hidden">🔒 Идёт игра — состав заморожен. Менять можно будет сразу после результата.</div>
+    <!-- Ставка делается НА ИГРУ: список игроков в ней — те, кого тренер на эту
+         игру заявил, а не вся лига. Полоса появляется, только когда открытых
+         игр больше нуля. -->
+    <div id="gameBar" class="gamebar hidden">
+      <div class="gamebar-title">На какую игру ставишь</div>
+      <div id="gameList" class="gamebar-list"></div>
+    </div>
     <div class="list" id="pool"></div>
     <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
+    <div id="poolNote" class="banner hidden"></div>
   </div>
   <div id="table" class="hidden">
     <div class="tabs">
@@ -637,6 +656,9 @@
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
     // Кабинет — только тем, кого бот опознал как игрока команды (или админу).
     $('tab-me').classList.toggle('hidden', !(p.player || p.admin));
+    // Игры — после пула: если открытая игра есть, её заявка заменит общий
+    // список, а недельный набор останется запасным путём.
+    loadGames();
     return true;
   }
 
@@ -744,6 +766,72 @@
   }
   window.toggleAffordable = toggleAffordable;
 
+  // ─── ставка на конкретную игру ─────────────────────────────────────────────
+  //
+  // Раньше состав собирался на неделю и играл во всех матчах подряд. Теперь
+  // ставят на игру, а список игроков в ней — заявка тренера на этот матч.
+  // Игры и пул под них считает сервер: сколько у кого матчей и кто с лигой не
+  // сведён — знание базы, приложение получает готовое.
+  let betGames = [], gameKey = '', gamePool = null;
+
+  const keyOf = g => g ? g.source + ':' + g.game_id : '';
+
+  function renderGameBar() {
+    const bar = $('gameBar'), list = $('gameList');
+    bar.classList.toggle('hidden', betGames.length === 0);
+    if (!betGames.length) return;
+    list.innerHTML = '';
+    for (const g of betGames) {
+      const b = document.createElement('button');
+      b.className = 'gamebtn' + (keyOf(g) === gameKey ? ' on' : '');
+      b.textContent = g.label || (g.opponent + ' · ' + g.date);
+      b.onclick = () => { if (keyOf(g) !== gameKey) loadGame(keyOf(g)); };
+      list.appendChild(b);
+    }
+  }
+
+  async function loadGames(preferKey) {
+    if (!live) return;                       // без живого API игр не спросить
+    try {
+      const q = preferKey ? ('?source=' + encodeURIComponent(preferKey.split(':')[0])
+                             + '&game_id=' + encodeURIComponent(preferKey.split(':').slice(1).join(':')))
+                          : '';
+      const r = await api('/fantasy/games' + q);
+      betGames = r.games || [];
+      if (!betGames.length) { renderGameBar(); return; }
+      gameKey = keyOf(r.game);
+      applyGamePool(r);
+    } catch (e) {
+      betGames = []; renderGameBar();        // не сложилось — остаётся недельный набор
+    }
+  }
+
+  const loadGame = key => loadGames(key);
+
+  function applyGamePool(r) {
+    // Пул под игру заменяет общий: ставить можно только на заявленных.
+    gamePool = (r.pool || []).map(x => ({
+      ref: (x.refs || [])[0] || '',
+      refs: x.refs || [],
+      name: x.name || '', number: x.number || '', team: x.team || '',
+      price: x.price || 0, tier: x.tier || '',
+      st: Object.assign({}, ZERO, x.stats || {}),
+      last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
+      games: x.games || 1, unlinked: !!x.unlinked,
+    }));
+    pool = gamePool;
+    counts = {};
+    for (const ref of (r.pick || [])) counts[ref] = (counts[ref] || 0) + 1;
+    const lost = gamePool.filter(p => p.unlinked).length;
+    const note = $('poolNote');
+    note.classList.toggle('hidden', lost === 0);
+    if (lost) note.textContent = '⚠️ ' + lost + ' из состава не нашлись в заявке лиги — '
+      + 'поставить на них нельзя. Скажи тренеру, он поправит написание.';
+    renderGameBar();
+    renderPool();
+    updateCounter();
+  }
+
   function renderPool() {
     sortPool();
     renderFilterBar();
@@ -753,7 +841,7 @@
     $('poolEmpty').classList.toggle('hidden', visible.length > 0);
     for (const p of visible) {
       const n = counts[p.ref] || 0;
-      const canAdd = !locked && !full && n < maxPer;
+      const canAdd = !locked && !full && n < maxPer && !p.unlinked;
       const c = document.createElement('div');
       c.className = 'card' + (n ? ' sel' : '') + ((locked || (!n && full)) ? ' disabled' : '');
       const ctrl =
@@ -768,9 +856,13 @@
       // длинные превращались в «Шлепикас Р…». Цена в бюджете уже в кружке,
       // поэтому в строке статистики её не дублируем.
       const jersey = costMode && p.number ? `<b class="jersey">№${esc(p.number)}</b> · ` : '';
+      // «×2» — человек заявлен ещё на одну игру и наберёт очки и там; «нет в
+      // лиге» — состав его знает, а заявка лиги нет, ставить не на кого.
+      const tags = (p.games > 1 ? `<span class="tag tag-two">×${p.games}</span>` : '')
+        + (p.unlinked ? '<span class="tag tag-off">нет в лиге</span>' : '');
       c.innerHTML = badge +
         `<div class="info"><div class="pname">${tierBadge(p)}` +
-        `<span class="nm">${esc(p.name)}</span>` +
+        `<span class="nm">${esc(p.name)}</span>${tags}` +
         (live ? '<span class="chev">›</span>' : '') + `</div>` +
         `<div class="pstat">${jersey}${costMode ? '' : priceLabel(p)}` +
         `${esc(statLine(p))}</div></div>` +
@@ -1002,7 +1094,13 @@
     const btn = $('saveBtn');
     btn.disabled = true; btn.textContent = 'Сохраняю…';
     try {
-      await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs, mode, cats }) });
+      if (gameKey) {
+        const [src, ...rest] = gameKey.split(':');
+        await api('/fantasy/games', { method: 'POST',
+          body: JSON.stringify({ source: src, game_id: rest.join(':'), refs, mode }) });
+      } else {
+        await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs, mode, cats }) });
+      }
       inherited = false;
       savedMode = mode; savedCount = refs.length; renderModeNote();
       tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
