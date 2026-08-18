@@ -209,7 +209,7 @@
   .tag-two { background: rgba(46,166,255,.18); color: var(--accent, #2ea6ff); }
   .tag-off { background: rgba(255,159,10,.18); color: #ff9f0a; }
   .pgames { font-size: 11px; opacity: .55; margin-top: 3px; }
-  #gamesScreen { padding: 4px 0 12px; }
+  #gamesScreen { padding: 4px 16px 12px; }
   .gs-title { font-size: 13px; opacity: .65; margin: 6px 0 10px; }
   .gs-card { display: flex; align-items: center; gap: 10px; padding: 13px 14px;
              border-radius: 14px; background: var(--card, #1c1c1e); margin-bottom: 8px; }
@@ -222,9 +222,17 @@
   .gs-sub { font-size: 12px; opacity: .6; margin-top: 2px; }
   .gs-go { flex: 0 0 auto; opacity: .4; font-size: 20px; }
   .gs-all { border: 1px dashed var(--sep, #333); background: transparent; }
-  .gs-current { font-size: 15px; font-weight: 600; margin: 2px 0 10px; }
+  /* Шапка матча — по образцу соседнего бота: эмблема, соперник, под ним
+     дата и пара команд. Отступы те же 16px, что у полос ниже. */
+  .gs-head { display: flex; align-items: center; gap: 11px; padding: 2px 16px 10px; }
+  .gs-emblem { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 10px;
+               display: flex; align-items: center; justify-content: center;
+               background: var(--secondary-bg); font-size: 17px; font-weight: 700; }
+  .gs-htext { min-width: 0; }
+  .gs-hname { font-size: 19px; font-weight: 700; line-height: 1.15; }
+  .gs-hsub { font-size: 12px; opacity: .6; margin-top: 2px; }
   .backbtn { background: none; border: 0; color: var(--accent, #2ea6ff);
-             font-size: 15px; padding: 6px 0; margin-bottom: 2px; }
+             font-size: 15px; padding: 6px 16px 2px; }
   </style>
 </head>
 <body>
@@ -251,7 +259,13 @@
   </div>
   <div id="draft" class="hidden">
     <button class="backbtn" id="backToGames" onclick="showGames()">‹ К играм</button>
-    <div class="gs-current" id="currentGame"></div>
+    <div class="gs-head" id="gameHead">
+      <div class="gs-emblem" id="gameEmblem"></div>
+      <div class="gs-htext">
+        <div class="gs-hname" id="gameName"></div>
+        <div class="gs-hsub" id="gameWhen"></div>
+      </div>
+    </div>
     <div class="bar hidden" id="modeBar"></div>
     <div class="note hidden" id="modeNote"></div>
     <div class="bar hidden" id="catBar"></div>
@@ -806,6 +820,17 @@
 
   const keyOf = g => g ? g.source + ':' + g.game_id : '';
 
+  const MONTHS = ['января','февраля','марта','апреля','мая','июня',
+                  'июля','августа','сентября','октября','ноября','декабря'];
+
+  function whenLine(g) {
+    const [y, m, d] = String(g.date || '').split('-');
+    const when = (d && m) ? (Number(d) + ' ' + (MONTHS[Number(m) - 1] || '')) : '';
+    const at = g.time ? (', ' + g.time) : '';
+    return [when + at, g.opponent ? ('PullUp — ' + g.opponent) : '']
+      .filter(Boolean).join(' · ');
+  }
+
   // Экран матчей — вход в фэнтези. Карточка «Все игры» ведёт к прежнему
   // недельному составу: он и был «один состав на все матчи», отдельного
   // хранения ему не нужно.
@@ -818,6 +843,8 @@
     haptic('light');
     $('gamesScreen').classList.remove('hidden');
     $('draft').classList.add('hidden');
+    const tabs = document.querySelector('.tabs');
+    if (tabs) tabs.classList.remove('hidden');   // вкладки нужны снаружи матча
     renderGamesScreen();
   }
   window.showGames = showGames;
@@ -912,9 +939,15 @@
 
     // Внутри одного матча список короткий — фильтры и сортировка там лишние.
     // На «всех играх» список полный, и они нужны.
-    trimChrome(!isAll);
-    $('currentGame').textContent = isAll ? '∞ Все игры'
-      : ((r.game && r.game.label) || 'Игра');
+    trimChrome(true);
+    // Эмблемы команд у нас нет — ни лига, ни лист её не дают. Ставим первую
+    // букву соперника: честнее, чем чужая картинка или пустой квадрат.
+    const opp = isAll ? 'Все игры' : ((r.game && r.game.opponent) || 'Соперник');
+    $('gameEmblem').textContent = isAll ? '∞' : (opp.trim()[0] || '?').toUpperCase();
+    $('gameName').textContent = opp;
+    $('gameWhen').textContent = isAll
+      ? 'один состав на все известные матчи'
+      : whenLine(r.game || {});
 
     const note = $('poolNote');
     const lost = gamePool.filter(p => p.unlinked).length;
@@ -937,14 +970,17 @@
     updateCounter();
   }
 
-  // Экран матча — только про выбор состава. Полоса тиров, «Только с играми» и
-  // сортировка относятся к длинному списку, а в заявке на игру человек десять.
-  function trimChrome(minimal) {
-    minimalChrome = minimal;
-    for (const id of ['playedChip', 'sort']) {
-      const el = $(id); if (el) el.classList.toggle('hidden', minimal);
-    }
-    if (minimal) { tierFilter.clear(); affordable = false; }
+  // Внутри матча убираем ВЕРХНИЕ ВКЛАДКИ: человек пришёл собрать состав на
+  // конкретную игру, и «Таблица», «Правила», «Кабинет» ему сейчас не нужны —
+  // к ним он вернётся из списка матчей.
+  //
+  // А вот фильтры по стоимости, «Только с играми» и сортировка ОСТАЮТСЯ: они
+  // и есть инструменты выбора. Я их было убрал — стало хуже, в бюджетном
+  // режиме без них не собрать.
+  function trimChrome(inGame) {
+    minimalChrome = false;              // фильтры нужны всегда
+    const tabs = document.querySelector('.tabs');
+    if (tabs) tabs.classList.toggle('hidden', !!inGame);
     renderFilterBar();
   }
 
