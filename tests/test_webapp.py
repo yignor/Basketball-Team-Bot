@@ -116,7 +116,12 @@ CHECKS = """
     // Инструменты выбора внутри матча ОСТАЮТСЯ: без фильтра по стоимости в
     // бюджетном режиме состав не собрать. Я их было убрал — стало хуже.
     ok(!document.getElementById('sort').classList.contains('hidden'), 'сортировка на месте');
-    ok(!document.getElementById('playedChip').classList.contains('hidden'), '«только с играми» на месте');
+    ok(document.getElementById('filterBar').innerHTML.indexOf('Только с играми') >= 0,
+       '«только с играми» переехал в полосу фильтров');
+    ok(document.getElementById('filterBar').innerHTML.indexOf('Все ') >= 0,
+       'есть кнопка «Все N» — сброс фильтров');
+    ok(document.getElementById('counter').textContent.indexOf('осталось выбрать') >= 0,
+       'счётчик крупной строкой: ' + document.getElementById('counter').textContent);
     ok(minimalChrome === false, 'фильтры не подавляются');
     // А верхние вкладки внутри матча не нужны — человек занят одним делом.
     ok(document.querySelector('.tabs').classList.contains('hidden'), 'верхних вкладок нет');
@@ -164,6 +169,35 @@ CHECKS = """
     ok(!document.getElementById('search').classList.contains('hidden'), 'по кнопке разворачивается');
     toggleSearch();
     ok(document.getElementById('search').classList.contains('hidden'), 'и сворачивается обратно');
+
+    // ── верхняя панель: счётчик карточкой, «Все N», деньги числом ───────────
+    seasonInfo = { ranks: { ranks: [{rank:'platinum', low:70, high:100},
+                                    {rank:'gold', low:50, high:69}] },
+                   modes: [{id:'free'},{id:'budget', budget:100}] };
+    modes = seasonInfo.modes; mode = 'budget'; rosterSize = 3; maxPer = 3;
+    pool = [{ref:'a', name:'Дорогой', price:80, tier:'platinum', st:{games:5}},
+            {ref:'b', name:'Средний', price:40, tier:'gold', st:{games:3}},
+            {ref:'c', name:'Дешёвый', price:10, tier:'gold', st:{games:0}}];
+    counts = {}; renderFilterBar(); updateCounter();
+    ok(/Все 3/.test(document.getElementById('filterBar').innerHTML),
+       '«Все N» считает пул');
+    ok(/💰 3/.test(document.getElementById('filterBar').innerHTML),
+       'деньги — ЧИСЛОМ игроков по карману, а не остатком бюджета');
+    ok(document.getElementById('counter').textContent === 'Бюджет 0 из 100 · осталось выбрать 3',
+       'счётчик как в образце: ' + document.getElementById('counter').textContent);
+    // Взяли за 80 — остаток 20, влезает только «Дешёвый» за 10.
+    counts = {a:1}; renderFilterBar(); updateCounter();
+    ok(/💰 1/.test(document.getElementById('filterBar').innerHTML),
+       '«по карману» пересчитывается на остаток');
+    ok(document.getElementById('counter').textContent === 'Бюджет 80 из 100 · осталось выбрать 2',
+       'бюджет и остаток мест: ' + document.getElementById('counter').textContent);
+    mode = 'free'; renderFilterBar();
+    ok(!/💰/.test(document.getElementById('filterBar').innerHTML),
+       'в свободном режиме денег и полос стоимости нет');
+    ok(/Только с играми/.test(document.getElementById('filterBar').innerHTML),
+       'а «только с играми» остаётся');
+    resetFilters();
+    ok(tierFilter.size === 0 && !affordable && !playedOnly, '«Все N» сбрасывает всё');
 
     showGames();
     ok(!document.getElementById('gamesScreen').classList.contains('hidden'), 'возврат к списку игр');
