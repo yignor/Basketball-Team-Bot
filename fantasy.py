@@ -538,6 +538,72 @@ def save_roster(user_id: str, season_id: int, week_start: str,
     return {"ok": True}
 
 
+# ───────────────────── Ставка на конкретную игру ────────────────────────────
+#
+# Раньше состав набирался на неделю и играл во всех матчах подряд. Теперь
+# ставят на игру: у каждой свой состав, собранный из тех, кого тренер на неё
+# заявил. Недельный состав остался запасным — на нём доигрывают те, кто ставку
+# на игру не сделал, иначе переход обнулил бы всех посреди сезона.
+
+
+def get_game_pick(user_id: str, season_id: int, source: str,
+                  game_id: Any) -> Optional[Dict[str, Any]]:
+    """Ставка участника на эту игру. None — не ставил."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            """SELECT * FROM fantasy_game_picks
+                WHERE user_id=? AND season_id=? AND source=? AND game_id=?""",
+            (str(user_id), int(season_id), str(source), str(game_id))).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["refs"] = json.loads(d.get("player_refs_json") or "[]")
+    d["meta"] = _load_meta(d.get("meta_json"))
+    return d
+
+
+def set_game_pick(user_id: str, season_id: int, source: str, game_id: Any,
+                  refs: List[str], mode: str = "",
+                  meta: Optional[Dict[str, Any]] = None) -> None:
+    """Сохраняет ставку на игру. Пустой список — снять ставку."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO fantasy_game_picks
+                   (user_id, season_id, source, game_id, player_refs_json,
+                    mode, meta_json, updated_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id, season_id, source, game_id) DO UPDATE SET
+                   player_refs_json=excluded.player_refs_json,
+                   mode=excluded.mode, meta_json=excluded.meta_json,
+                   updated_at=excluded.updated_at""",
+            (str(user_id), int(season_id), str(source), str(game_id),
+             json.dumps(list(refs), ensure_ascii=False), mode,
+             json.dumps(meta or {}, ensure_ascii=False), sheets_cache.now_iso()))
+        conn.commit()
+
+
+def game_picks_by_user(season_id: int, source: str,
+                       game_id: Any) -> Dict[str, Dict[str, Any]]:
+    """{участник: ставка} по этой игре — для подсчёта очков."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT * FROM fantasy_game_picks
+                WHERE season_id=? AND source=? AND game_id=?""",
+            (int(season_id), str(source), str(game_id))).fetchall()
+    out = {}
+    for r in rows:
+        d = dict(r)
+        refs = json.loads(d.get("player_refs_json") or "[]")
+        if not refs:
+            continue                      # ставку сняли — считаем как «не ставил»
+        out[str(d["user_id"])] = {"refs": refs, "mode": d.get("mode") or "",
+                                  "meta": _load_meta(d.get("meta_json"))}
+    return out
+
+
 def get_roster(user_id: str, season_id: int, week_start: str) -> Optional[Dict[str, Any]]:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
@@ -734,7 +800,9 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
 
     inherit=False — считать строго по составу той недели, без переноса с
     предыдущей. Так достраивается история: до перехода на поигровую модель
-    несобранная неделя означала ноль, и задним числом менять это нельзя."""
+    несобранная неделя означала ноль, и задним числом менять это нельзя.
+
+    Ставка на конкретную игру, если она есть, ПЕРЕКРЫВАЕТ недельный состав."""
     sheets_cache.init_db()
     weights = season_weights(season)
     if inherit:
@@ -747,6 +815,10 @@ def record_game_scores(season: Dict[str, Any], source: str, game_id: Any,
         rosters = {str(r["user_id"]): {"refs": r["refs"], "mode": r.get("mode", ""),
                                        "meta": r.get("meta") or {}}
                    for r in get_week_rosters(season["id"], wk)}
+    # Ставка на игру сильнее недельного состава: её собирали под эту заявку и
+    # именно на этот матч. Недельный остаётся для тех, кто ставку не делал, —
+    # иначе переход на поигровую модель обнулил бы их посреди сезона.
+    rosters = {**rosters, **game_picks_by_user(season["id"], source, game_id)}
     out: List[Dict[str, Any]] = []
     import fantasy_modes
     with sheets_cache.get_connection() as conn:
@@ -835,7 +907,8 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
 
     Считает строго по составу той недели (inherit=False), чтобы сложившийся
     зачёт не поехал: раньше несобранная неделя давала ноль, и переносить в неё
-    состав задним числом нельзя.
+    состав задним числом нельзя. Ставка на конкретную игру, если она есть,
+    перекрывает недельный состав — она и собиралась под этот матч.
 
     Пакетно: статистику недостающих игр забираем ОДНИМ запросом и считаем в
     памяти. По игре на запрос выходило больше десятка секунд на полной копии
@@ -877,6 +950,19 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
             if refs:
                 refs_by_week.setdefault(r["week_start"], {})[str(r["user_id"])] = refs
 
+        # Ставки на конкретные игры — они сильнее недельного состава.
+        picks: Dict[Tuple[str, str], Dict[str, List[str]]] = {}
+        for r in conn.execute(
+                "SELECT user_id, source, game_id, player_refs_json "
+                "FROM fantasy_game_picks WHERE season_id = ?", (season["id"],)):
+            try:
+                refs = json.loads(r["player_refs_json"]) or []
+            except (json.JSONDecodeError, TypeError):
+                refs = []
+            if refs:
+                picks.setdefault((r["source"], str(r["game_id"])), {})[
+                    str(r["user_id"])] = refs
+
         now_iso = sheets_cache.now_iso()
         batch = []
         for g in missing:
@@ -885,7 +971,9 @@ def backfill_game_scores(season: Dict[str, Any]) -> int:
             except (ValueError, TypeError):
                 continue
             per_player = fp_by_game.get((g["source"], g["game_id"]), {})
-            for uid, refs in refs_by_week.get(wk, {}).items():
+            entries = {**refs_by_week.get(wk, {}),
+                       **picks.get((g["source"], str(g["game_id"])), {})}
+            for uid, refs in entries.items():
                 pts = 0.0
                 played = False
                 for ref in fantasy_stats.expand_refs(refs):

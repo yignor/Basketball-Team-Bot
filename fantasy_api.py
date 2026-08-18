@@ -593,6 +593,97 @@ async def build_pool(force: bool = False,
     return pool
 
 
+# ─────────────────── Заявка тренера на конкретную игру ──────────────────────
+#
+# Пул собран по заявкам лиг и адресуется id лиги, а состав на игру тренер ведёт
+# строками листа «Игроки». Общего ключа между ними нет — сводим по ФИО, тем же
+# способом, каким уже склеены один человек из SLPRO и из Инфобаскета.
+#
+# Сойдётся не всё: лига пишет «Шлепикас Ромас», лист — «Шлепикас Роман». Кого
+# не опознали, ПОКАЗЫВАЕМ с пометкой и без возможности поставить: молча убрать
+# человека из состава — значит заставить участника гадать, почему его нет.
+
+
+def _declared_names(source: str, game_id: str) -> List[Dict[str, Any]]:
+    """Кого тренер заявил на игру: [{row, title}]. Пусто — состав не собран."""
+    import game_roster
+    return [{"row": int(p["row"]), "title": str(p.get("title") or "").strip()}
+            for p in game_roster.roster(source, str(game_id))
+            if str(p.get("title") or "").strip()]
+
+
+def _same_person(a: str, b: str) -> bool:
+    """Одно ФИО с точностью до буквы и порядка слов.
+
+    Порядок разный (лига пишет «Имя Фамилия», лист — «Фамилия Имя»), а буква
+    расходится в написании. Требуем совпадения ВСЕХ слов: «Долгих Денис» и
+    «Долгих Владислав» — братья, и путать их нельзя."""
+    pa, pb = sorted(_norm_name(a).split()), sorted(_norm_name(b).split())
+    if not pa or len(pa) != len(pb):
+        return False
+    return all(x == y or _lev1(x, y) for x, y in zip(pa, pb))
+
+
+async def game_pool(source: str, game_id: str,
+                    season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Пул для ставки на конкретную игру — только заявленные тренером.
+
+    Возвращает карточки пула с полем `declared`, плюс тех из состава, кого в
+    пуле не нашли, — с `unlinked` и без ссылок: поставить на них нельзя."""
+    declared = _declared_names(source, str(game_id))
+    if not declared:
+        return []
+    pool = await build_pool(season=season)
+    out: List[Dict[str, Any]] = []
+    taken: set = set()
+    for person in declared:
+        hit = next((e for e in pool
+                    if id(e) not in taken and _same_person(e["name"], person["title"])), None)
+        if hit is None:
+            out.append({"refs": [], "name": person["title"], "number": "",
+                        "team": "", "leagues": [], "row": person["row"],
+                        "declared": True, "unlinked": True})
+            continue
+        taken.add(id(hit))
+        out.append({**hit, "row": person["row"], "declared": True,
+                    "unlinked": False})
+    return out
+
+
+def declared_games(limit: int = 6) -> List[Dict[str, Any]]:
+    """Игры, на которые можно ставить: состав собран и разослан в чат.
+
+    Пока состав не опубликован, ставить не на что: черновик тренера меняется, и
+    пул под ним ездил бы туда-сюда. Даты берём из расписания, а не из даты
+    публикации — ставят на будущее."""
+    import game_roster
+    from datetime_utils import get_moscow_time
+    today = get_moscow_time().date()
+    out = []
+    for g in game_roster.games(from_day=today):
+        if not game_roster.is_posted(g["source"], g["game_id"]):
+            continue
+        out.append({"source": g["source"], "game_id": g["game_id"],
+                    "date": g["date"].isoformat(), "time": g.get("time") or "",
+                    "opponent": g.get("opponent") or "",
+                    "label": game_roster.game_label(g)})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def declared_counts(games: List[Dict[str, Any]]) -> Dict[int, int]:
+    """{строка листа: на скольких из этих игр человек заявлен}.
+
+    Ради значка «играет ещё и там»: заявленный на два матча набирает очки в
+    обоих, и участнику стоит знать об этом до того, как он выберет игру."""
+    counts: Dict[int, int] = {}
+    for g in games:
+        for person in _declared_names(g["source"], g["game_id"]):
+            counts[person["row"]] = counts.get(person["row"], 0) + 1
+    return counts
+
+
 def _norm_name(name: str) -> str:
     return " ".join((name or "").lower().replace("ё", "е").split())
 
@@ -1594,6 +1685,101 @@ async def build_webapp_payload(user_id: str, max_len: Optional[int] = None) -> O
     return encode_webapp_payload(shared, user_id, max_len=max_len) if shared else None
 
 
+async def handle_games(request: web.Request) -> web.Response:
+    """Игры, на которые сейчас можно ставить, и заявка тренера по каждой.
+
+    Пул на игру собирается здесь же: приложение показывает список заявленных,
+    а не весь состав лиги. Значок «играет ещё и там» — из счётчика по всем
+    открытым играм: заявленный на два матча наберёт очки в обоих."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
+    season = _season(request)
+    games = await asyncio.to_thread(declared_games)
+    counts = await asyncio.to_thread(declared_counts, games)
+
+    want = request.query.get("game_id") or ""
+    want_src = request.query.get("source") or ""
+    chosen = next((g for g in games if str(g["game_id"]) == want
+                   and (not want_src or g["source"] == want_src)), None)
+    if chosen is None and games:
+        chosen = games[0]
+
+    pool: List[Dict[str, Any]] = []
+    pick: List[str] = []
+    if chosen:
+        raw = await game_pool(chosen["source"], chosen["game_id"], season)
+        # Значок ставим здесь, а не в приложении: сколько игр у человека —
+        # знание сервера, приложение получает готовое число.
+        for entry in raw:
+            entry["games"] = counts.get(int(entry.get("row") or 0), 1)
+        pool = await asyncio.to_thread(pool_with_stats_cached, raw, season)
+        if season:
+            saved = await asyncio.to_thread(
+                fantasy.get_game_pick, str(user["id"]), season["id"],
+                chosen["source"], chosen["game_id"])
+            pick = (saved or {}).get("refs") or []
+
+    return web.json_response({
+        "games": games,
+        "game": chosen,
+        "pool": pool,
+        "pick": pick,
+        "season": season and {"id": season["id"], "name": season["name"],
+                              "roster_size": fantasy.roster_size(season),
+                              "max_per_player": fantasy.max_per_player(season)},
+        "locked": fantasy.lock_details(),
+    })
+
+
+async def handle_save_game_pick(request: web.Request) -> web.Response:
+    """Сохранить ставку на игру. Пустой состав — снять ставку."""
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
+    season = _season(request)
+    if not season:
+        return web.json_response({"error": "no_season"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+
+    source = str(body.get("source") or "")
+    game_id = str(body.get("game_id") or "")
+    refs = [str(r) for r in (body.get("refs") or [])]
+    if not source or not game_id:
+        return web.json_response({"error": "no_game"}, status=400)
+
+    # Блокировка — та же, что и у недельного состава: идёт игра, состав не
+    # трогаем. Проверяем на сервере, а не в приложении: приложение можно
+    # открыть заранее и нажать «сохранить» уже после свистка.
+    lock = fantasy.lock_details()
+    if lock.get("locked"):
+        return web.json_response({"error": "locked", "lock": lock}, status=409)
+
+    # Ставить можно только на заявленных: список в приложении мог устареть,
+    # пока человек его листал, а тренер тем временем поправил состав.
+    allowed = {r for e in await game_pool(source, game_id, season)
+               for r in (e.get("refs") or [])}
+    bad = [r for r in refs if r not in allowed]
+    if bad:
+        return web.json_response({"error": "not_declared", "refs": bad}, status=400)
+
+    size = fantasy.roster_size(season)
+    if refs and len(refs) != size:
+        return web.json_response({"error": "wrong_size", "need": size,
+                                  "got": len(refs)}, status=400)
+
+    await asyncio.to_thread(fantasy.set_game_pick, str(user["id"]), season["id"],
+                            source, game_id, refs, body.get("mode") or "")
+    return web.json_response({"ok": True, "refs": refs})
+
+
 async def handle_pool(request: web.Request) -> web.Response:
     user = _auth_user(request)
     if not user:
@@ -1955,6 +2141,8 @@ def create_app(bot_token: str) -> web.Application:
     app["bot_token"] = bot_token
     app.add_routes([
         web.get("/fantasy/pool", handle_pool),
+        web.get("/fantasy/games", handle_games),
+        web.post("/fantasy/games", handle_save_game_pick),
         web.get("/fantasy/roster", handle_get_roster),
         web.post("/fantasy/roster", handle_save_roster),
         web.get("/fantasy/player", handle_player),

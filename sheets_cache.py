@@ -410,6 +410,26 @@ CREATE TABLE IF NOT EXISTS fantasy_rosters (
 );
 CREATE INDEX IF NOT EXISTS idx_fantasy_rosters_week ON fantasy_rosters(season_id, week_start);
 
+-- Ставка на КОНКРЕТНУЮ игру. Недельный состав (fantasy_rosters) остаётся
+-- запасным: нет ставки на игру — очки считаются по нему, иначе переход на
+-- поигровую модель обнулил бы всех посреди сезона.
+--
+-- Ключ — игра, а не неделя: на два матча одной недели ставят по-разному, и
+-- заявка тренера у них разная.
+CREATE TABLE IF NOT EXISTS fantasy_game_picks (
+    user_id          TEXT NOT NULL,
+    season_id        INTEGER NOT NULL,
+    source           TEXT NOT NULL,
+    game_id          TEXT NOT NULL,
+    player_refs_json TEXT NOT NULL DEFAULT '[]',
+    mode             TEXT NOT NULL DEFAULT '',
+    meta_json        TEXT NOT NULL DEFAULT '',
+    updated_at       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, season_id, source, game_id)
+);
+CREATE INDEX IF NOT EXISTS idx_fantasy_game_picks_game
+    ON fantasy_game_picks(season_id, source, game_id);
+
 CREATE TABLE IF NOT EXISTS fantasy_weekly_scores (
     user_id       TEXT NOT NULL,
     season_id     INTEGER NOT NULL,

@@ -153,12 +153,70 @@ def test_prune_keeps_real_zeros() -> None:
     check(left == ["our"], f"мусор убран, настоящий ноль остался: {left}")
 
 
+def test_game_pick_beats_week() -> None:
+    """Ставка на игру перекрывает недельный состав, но не отменяет его.
+
+    Недельный остаётся запасным: кто ставку не сделал, доигрывает на нём —
+    иначе переход на поигровую модель обнулил бы всех посреди сезона."""
+    print("\n=== ставка на игру сильнее недельного состава ===")
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        # Двое: один со ставкой на игру, второй только с недельным составом.
+        wk = fantasy.week_start_of(date.fromisoformat(DAY)).isoformat()
+        for uid in ("111", "222"):
+            conn.execute(
+                "INSERT OR REPLACE INTO fantasy_rosters (season_id, user_id, "
+                "week_start, player_refs_json, mode, updated_at) "
+                "VALUES (?, ?, ?, ?, '', ?)",
+                (SEASON, uid, wk, json.dumps(["ib:1:p1"]), now))
+        conn.commit()
+    # У 111 ставка на нашу игру — из ДРУГИХ игроков.
+    fantasy.set_game_pick("111", SEASON, "infobasket", "our",
+                          ["ib:1:p2", "ib:1:p3"])
+
+    season = fantasy._get_season(SEASON)
+    fantasy.record_game_scores(season, "infobasket", "our", DAY, inherit=False)
+    with sheets_cache.get_connection() as conn:
+        got = {r["user_id"]: json.loads(r["refs_json"]) for r in conn.execute(
+            "SELECT user_id, refs_json FROM fantasy_game_scores "
+            "WHERE game_id='our' AND user_id IN ('111','222')")}
+    check(got.get("111") == ["ib:1:p2", "ib:1:p3"],
+          f"у поставившего в снимок легла ставка: {got.get('111')}")
+    check(got.get("222") == ["ib:1:p1"],
+          f"у остальных — недельный состав: {got.get('222')}")
+
+    # Снятая ставка возвращает человека на недельный состав.
+    fantasy.set_game_pick("111", SEASON, "infobasket", "our", [])
+    check("111" not in fantasy.game_picks_by_user(SEASON, "infobasket", "our"),
+          "снятая ставка не участвует в подсчёте")
+
+
+def test_declared_bridge() -> None:
+    """Состав тренера сводится с пулом по ФИО, несведённые — видны.
+
+    Тренер ведёт состав строками листа, пул адресуется id лиги, общего ключа
+    нет. Молча спрятать неопознанного нельзя: участник будет гадать, почему
+    игрока из состава нет в списке."""
+    print("\n=== заявка тренера сводится с пулом ===")
+    import fantasy_api as fa
+    check(fa._same_person("Шлепикас Роман", "Роман Шлепикас"),
+          "порядок слов не мешает")
+    check(fa._same_person("Лысюк Денис", "Лисюк Денис"),
+          "буква в фамилии не мешает")
+    check(not fa._same_person("Долгих Денис", "Долгих Владислав"),
+          "братьев не путаем")
+    check(not fa._same_person("Иванов Иван", "Иванов"),
+          "неполное ФИО совпадением не считаем")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
     test_no_snapshot_for_alien_games()
     test_breakdown_matches_mode()
     test_prune_keeps_real_zeros()
+    test_game_pick_beats_week()
+    test_declared_bridge()
 
     print("\n" + "=" * 60)
     if bad:
