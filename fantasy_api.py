@@ -672,16 +672,64 @@ def declared_games(limit: int = 6) -> List[Dict[str, Any]]:
     return out
 
 
-def declared_counts(games: List[Dict[str, Any]]) -> Dict[int, int]:
-    """{строка листа: на скольких из этих игр человек заявлен}.
+def declared_where(games: List[Dict[str, Any]]) -> Dict[int, List[str]]:
+    """{строка листа: в каких из этих игр человек заявлен} — подписи игр.
 
     Ради значка «играет ещё и там»: заявленный на два матча набирает очки в
-    обоих, и участнику стоит знать об этом до того, как он выберет игру."""
-    counts: Dict[int, int] = {}
+    обоих, и участнику стоит знать об этом до того, как он выберет игру. А на
+    экране «все игры» из этого же видно, что заявки по матчам разные."""
+    where: Dict[int, List[str]] = {}
     for g in games:
         for person in _declared_names(g["source"], g["game_id"]):
-            counts[person["row"]] = counts.get(person["row"], 0) + 1
-    return counts
+            where.setdefault(person["row"], []).append(g["label"])
+    return where
+
+
+def declared_counts(games: List[Dict[str, Any]]) -> Dict[int, int]:
+    """{строка листа: на скольких из этих игр человек заявлен}."""
+    return {row: len(labels) for row, labels in declared_where(games).items()}
+
+
+async def all_games_pool(games: List[Dict[str, Any]],
+                         season: Optional[Dict[str, Any]] = None
+                         ) -> Tuple[List[Dict[str, Any]], bool]:
+    """Пул для ставки СРАЗУ НА ВСЕ игры плюс признак «заявки разные».
+
+    Здесь показываем всех: один состав играет во всех матчах, и запрещать
+    выбор по заявке одной игры было бы неверно — в другой этот человек есть.
+    Но разметить обязаны: у кого в каких матчах он заявлен и совпадают ли
+    заявки вообще. Иначе человек соберёт состав, половина которого выйдет
+    только в одном матче из трёх, и не поймёт, почему очков мало."""
+    pool = await build_pool(season=season)
+    where = declared_where(games)
+    if not where:
+        return [dict(e) for e in pool], False
+
+    # Заявки считаем разными, если хоть кто-то заявлен не во все игры.
+    total = len(games)
+    differ = any(len(labels) != total for labels in where.values())
+
+    # Ссылку пула на строку листа сводим по ФИО — тем же способом, что и
+    # заявка на одну игру.
+    by_row: Dict[int, str] = {}
+    import coach_payments
+    titles = {int(p["row"]): str(p.get("title") or "")
+              for p in coach_payments.players()}
+    out = []
+    for entry in pool:
+        e = dict(entry)
+        row = next((r for r in where
+                    if r in titles and _same_person(e["name"], titles[r])), None)
+        labels = where.get(row or -1, [])
+        e["in_games"] = labels
+        e["games"] = len(labels)
+        # Никем не заявлен — в матчах его не будет вовсе; показываем, но
+        # честно говорим об этом.
+        e["not_declared"] = bool(where) and not labels
+        out.append(e)
+        if row is not None:
+            by_row[row] = e["name"]
+    return out, differ
 
 
 def _norm_name(name: str) -> str:
@@ -1702,6 +1750,23 @@ async def handle_games(request: web.Request) -> web.Response:
 
     want = request.query.get("game_id") or ""
     want_src = request.query.get("source") or ""
+
+    # «Все игры» — псевдо-игра: один состав на все матчи. Хранится он там же,
+    # где и раньше (недельный состав), поэтому отдельной таблицы не нужно —
+    # это ровно то, чем недельный состав и был.
+    if want == "all":
+        pool_all, differ = await all_games_pool(games, season)
+        pool_all = await asyncio.to_thread(pool_with_stats_cached, pool_all, season)
+        return web.json_response({
+            "games": games, "game": {"game_id": "all", "source": "",
+                                     "label": "Все игры"},
+            "pool": pool_all, "pick": [], "all": True, "differ": differ,
+            "season": season and {"id": season["id"], "name": season["name"],
+                                  "roster_size": fantasy.roster_size(season),
+                                  "max_per_player": fantasy.max_per_player(season)},
+            "locked": fantasy.lock_details(),
+        })
+
     chosen = next((g for g in games if str(g["game_id"]) == want
                    and (not want_src or g["source"] == want_src)), None)
     if chosen is None and games:
