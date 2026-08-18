@@ -135,6 +135,14 @@ CHECKS = """
     showGames();
     ok(!document.getElementById('gamesScreen').classList.contains('hidden'), 'возврат к списку игр');
     ok(document.getElementById('draft').classList.contains('hidden'), 'набор при этом скрыт');
+
+    // Экран не должен оставаться пустым ни при каких обстоятельствах: раньше
+    // он рисовался только внутри успешного запроса за играми, и не дошедший
+    // запрос оставлял человека перед пустотой.
+    betGames = [];
+    renderGamesScreen();
+    ok(document.getElementById('gamesCards').children.length >= 1,
+       'без данных экран всё равно даёт карточку, а не пустоту');
   } catch (e) { console.log('  FAIL исключение: ' + e.message); bad++; }
   console.log(bad ? ('НЕ ПРОШЛО: ' + bad) : 'ЭКРАНЫ: ВСЁ ЗЕЛЁНОЕ');
   process.exit(bad ? 1 : 0);
