@@ -237,9 +237,12 @@
      крупно, до фильтров. */
   .budgetcard { margin: 4px 16px 10px; padding: 13px 14px; border-radius: 12px;
                 background: var(--secondary-bg); font-size: 15px; font-weight: 600; }
-  /* Сортировка на всю ширину: мелкий inline-select рядом со счётчиком терялся. */
-  .sortwide { flex: 1; width: 100%; padding: 11px 12px; font-size: 15px;
-              border-radius: 12px; }
+  /* Сортировка компактной кнопкой: иконка + сам список без подписи. */
+  .sortchip { display: inline-flex; align-items: center; gap: 4px;
+              background: var(--secondary-bg); border-radius: 10px; padding: 0 8px; }
+  .sortchip select { background: transparent; padding: 8px 2px; font-size: 13px;
+                     border-radius: 0; max-width: 132px; }
+  .sorticon { opacity: .55; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -280,24 +283,26 @@
          а внизу мелкой строкой его приходилось искать. -->
     <div class="budgetcard" id="counter"></div>
     <div class="bar hidden" id="filterBar"></div>
+    <div class="note hidden" id="carryNote"></div>
     <div class="bar" id="searchBar">
       <button class="chip" id="searchBtn" onclick="toggleSearch()">🔍 поиск</button>
+      <!-- Сортировка — рядом с поиском и иконкой вместо подписи: полоса на всю
+           ширину съедала целую строку ради одного слова. -->
+      <span class="sortchip"><span class="sorticon">⇅</span>
+        <select id="sort" aria-label="Сортировка">
+          <option value="fp">Фэнтези-очки</option>
+          <option value="fp_avg">Очки за игру</option>
+          <option value="games">Игры</option>
+          <option value="price">Стоимость</option>
+          <option value="pts">Очки</option>
+          <option value="reb">Подборы</option>
+          <option value="ast">Передачи</option>
+          <option value="stl">Перехваты</option>
+          <option value="blk">Блоки</option>
+          <option value="name">Имя</option>
+        </select>
+      </span>
       <input id="search" class="hidden" type="search" placeholder="Фамилия" autocomplete="off">
-    </div>
-    <div class="note hidden" id="carryNote"></div>
-    <div class="bar">
-      <select id="sort" class="sortwide" aria-label="Сортировка">
-        <option value="fp">Фэнтези-очки</option>
-        <option value="fp_avg">Очки за игру</option>
-        <option value="games">Игры</option>
-        <option value="price">Стоимость</option>
-        <option value="pts">Очки</option>
-        <option value="reb">Подборы</option>
-        <option value="ast">Передачи</option>
-        <option value="stl">Перехваты</option>
-        <option value="blk">Блоки</option>
-        <option value="name">Имя</option>
-      </select>
     </div>
     <div id="lockBanner" class="banner hidden">🔒 Идёт игра — состав заморожен. Менять можно будет сразу после результата.</div>
     <div class="list" id="pool"></div>
@@ -439,7 +444,7 @@
   // tables — по таблице на режим (живой вход). Запасной отдаёт одну: класть в
   // кнопку три таблицы — снова упереться в лимит длины клавиатуры.
   let tables = {}, myMode = '';
-  let search = '', playedOnly = false, isAdmin = false;
+  let search = '', isAdmin = false;
   let seasonId = null, seasons = [];
 
   const $ = id => document.getElementById(id);
@@ -754,7 +759,6 @@
     // Выбранных всегда показываем, чтобы не терять свой состав из виду.
     if (counts[p.ref]) return true;
     if (search && norm(p.name).indexOf(search) < 0) return false;
-    if (playedOnly && !(p.st && p.st.games)) return false;
     if (tierFilter.size && !tierFilter.has(p.tier)) return false;
     if (affordable && (p.price || 0) > budget() - spent()) return false;
     return true;
@@ -791,11 +795,12 @@
     const bar = $('filterBar');
     bar.classList.remove('hidden');
     const money = mode === 'budget';
+    // Показываем ЛИМИТ: сколько денег ещё есть. Никого не выбрал — весь
+    // бюджет, дальше он тает на стоимость каждого взятого. Числом игроков
+    // это было менее понятно: человек считает деньги, а не головы.
     const left = money ? budget() - spent() : 0;
-    const fits = p => !p.excluded && (!money || (p.price || 0) <= left);
     const all = pool.filter(p => !p.excluded).length;
-    const affordableCount = pool.filter(fits).length;
-    const clean = !tierFilter.size && !affordable && !playedOnly;
+    const clean = !tierFilter.size && !affordable;
 
     let html = `<button class="chip${clean ? ' on' : ''}" onclick="resetFilters()">` +
                `Все ${all}</button>`;
@@ -806,17 +811,15 @@
           `onclick="toggleTier(${jattr(b.rank)})">${TIER_ICON[b.rank] || ''}${band}</button>`;
       }).join('') +
         `<button class="chip${affordable ? ' on' : ''}" onclick="toggleAffordable()">` +
-        `💰 ${affordableCount}</button>`;
+        `💰 ${left}</button>`;
     }
-    html += `<button class="chip${playedOnly ? ' on' : ''}" onclick="togglePlayed()">` +
-            `Только с играми</button>`;
     bar.innerHTML = html;
     if (!money) { tierFilter.clear(); affordable = false; }
   }
 
   function resetFilters() {
     haptic('light');
-    tierFilter.clear(); affordable = false; playedOnly = false;
+    tierFilter.clear(); affordable = false;
     renderFilterBar(); renderPool();
   }
   window.resetFilters = resetFilters;
@@ -2454,12 +2457,6 @@
       el.appendChild(det);
     });
   }
-
-  function togglePlayed() {
-    playedOnly = !playedOnly;
-    renderFilterBar(); renderPool();
-  }
-  window.togglePlayed = togglePlayed;
 
   function renderLeaguePicker() {
     const bar = $('leagueBar'), sel = $('league');
