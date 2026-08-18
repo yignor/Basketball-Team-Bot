@@ -208,6 +208,23 @@
          vertical-align: middle; }
   .tag-two { background: rgba(46,166,255,.18); color: var(--accent, #2ea6ff); }
   .tag-off { background: rgba(255,159,10,.18); color: #ff9f0a; }
+  .pgames { font-size: 11px; opacity: .55; margin-top: 3px; }
+  #gamesScreen { padding: 4px 0 12px; }
+  .gs-title { font-size: 13px; opacity: .65; margin: 6px 0 10px; }
+  .gs-card { display: flex; align-items: center; gap: 10px; padding: 13px 14px;
+             border-radius: 14px; background: var(--card, #1c1c1e); margin-bottom: 8px; }
+  .gs-card:active { opacity: .7; }
+  .gs-when { flex: 0 0 auto; text-align: center; min-width: 46px; }
+  .gs-day { font-size: 17px; font-weight: 600; line-height: 1.1; }
+  .gs-time { font-size: 11px; opacity: .6; }
+  .gs-mid { flex: 1 1 auto; min-width: 0; }
+  .gs-opp { font-size: 15px; font-weight: 600; }
+  .gs-sub { font-size: 12px; opacity: .6; margin-top: 2px; }
+  .gs-go { flex: 0 0 auto; opacity: .4; font-size: 20px; }
+  .gs-all { border: 1px dashed var(--sep, #333); background: transparent; }
+  .gs-current { font-size: 15px; font-weight: 600; margin: 2px 0 10px; }
+  .backbtn { background: none; border: 0; color: var(--accent, #2ea6ff);
+             font-size: 15px; padding: 6px 0; margin-bottom: 2px; }
   </style>
 </head>
 <body>
@@ -224,13 +241,24 @@
     <button class="tab" id="tab-rules" onclick="showTab('rules')" title="Правила">📖</button>
     <button class="tab hidden" id="tab-admin" onclick="showTab('admin')" title="Настройки">⚙️</button>
   </div>
-  <div id="draft">
+  <!-- Вход в фэнтези — список матчей, а не сразу пул. Ставят на игру, значит
+       первый вопрос «на какую», а не «кого берём». -->
+  <div id="gamesScreen">
+    <div class="gs-title">Ближайшие игры</div>
+    <div id="gamesCards"></div>
+    <div id="gamesEmpty" class="banner hidden">Пока нет игр с объявленным составом.
+      Как только тренер разошлёт состав, здесь появится матч.</div>
+  </div>
+  <div id="draft" class="hidden">
+    <button class="backbtn" id="backToGames" onclick="showGames()">‹ К играм</button>
+    <div class="gs-current" id="currentGame"></div>
     <div class="bar hidden" id="modeBar"></div>
     <div class="note hidden" id="modeNote"></div>
     <div class="bar hidden" id="catBar"></div>
     <div class="bar hidden" id="filterBar"></div>
-    <div class="bar">
-      <input id="search" type="search" placeholder="🔎 Поиск по фамилии" autocomplete="off">
+    <div class="bar" id="searchBar">
+      <button class="chip" id="searchBtn" onclick="toggleSearch()">🔍 поиск</button>
+      <input id="search" class="hidden" type="search" placeholder="Фамилия" autocomplete="off">
     </div>
     <div class="note hidden" id="carryNote"></div>
     <div class="bar">
@@ -250,13 +278,6 @@
       </select>
     </div>
     <div id="lockBanner" class="banner hidden">🔒 Идёт игра — состав заморожен. Менять можно будет сразу после результата.</div>
-    <!-- Ставка делается НА ИГРУ: список игроков в ней — те, кого тренер на эту
-         игру заявил, а не вся лига. Полоса появляется, только когда открытых
-         игр больше нуля. -->
-    <div id="gameBar" class="gamebar hidden">
-      <div class="gamebar-title">На какую игру ставишь</div>
-      <div id="gameList" class="gamebar-list"></div>
-    </div>
     <div class="list" id="pool"></div>
     <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
     <div id="poolNote" class="banner hidden"></div>
@@ -650,7 +671,8 @@
       last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
       excluded: !!x.excluded,
     }));
-    for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
+    weekRefs = r.roster || [];
+    for (const ref of weekRefs) counts[ref] = (counts[ref] || 0) + 1;
     inherited = !!r.inherited;
     setModes(p.season.modes, r.mode, r.cats);
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
@@ -739,7 +761,9 @@
 
   function renderFilterBar() {
     const bar = $('filterBar');
-    const on = mode === 'budget';
+    // Внутри матча полосы тиров нет: она делит длинный список по стоимости, а
+    // в заявке на игру человек десять — делить нечего.
+    const on = mode === 'budget' && !minimalChrome;
     bar.classList.toggle('hidden', !on);
     if (!on) { tierFilter.clear(); affordable = false; return; }
     const left = budget() - spent();
@@ -773,64 +797,147 @@
   // Игры и пул под них считает сервер: сколько у кого матчей и кто с лигой не
   // сведён — знание базы, приложение получает готовое.
   let betGames = [], gameKey = '', gamePool = null;
+  // Состав недельный — он же «на все игры». Держим отдельно от counts: counts
+  // перетирается при каждом входе в матч, а этот нужен, чтобы вернуть человеку
+  // его же выбор на экране «Все игры».
+  let weekRefs = [];
 
   const keyOf = g => g ? g.source + ':' + g.game_id : '';
 
-  function renderGameBar() {
-    const bar = $('gameBar'), list = $('gameList');
-    bar.classList.toggle('hidden', betGames.length === 0);
-    if (!betGames.length) return;
-    list.innerHTML = '';
+  // Экран матчей — вход в фэнтези. Карточка «Все игры» ведёт к прежнему
+  // недельному составу: он и был «один состав на все матчи», отдельного
+  // хранения ему не нужно.
+  const ALL = 'all';
+  // Экран матча урезан: полоса тиров, «Только с играми» и сортировка нужны
+  // длинному списку, а в заявке на игру человек десять.
+  let minimalChrome = false;
+
+  function showGames() {
+    haptic('light');
+    $('gamesScreen').classList.remove('hidden');
+    $('draft').classList.add('hidden');
+    renderGamesScreen();
+  }
+  window.showGames = showGames;
+
+  function renderGamesScreen() {
+    const box = $('gamesCards');
+    box.innerHTML = '';
     for (const g of betGames) {
-      const b = document.createElement('button');
-      b.className = 'gamebtn' + (keyOf(g) === gameKey ? ' on' : '');
-      b.textContent = g.label || (g.opponent + ' · ' + g.date);
-      b.onclick = () => { if (keyOf(g) !== gameKey) loadGame(keyOf(g)); };
-      list.appendChild(b);
+      const [dd, mm] = (g.date || '').split('-').reverse();
+      const card = document.createElement('div');
+      card.className = 'gs-card';
+      card.innerHTML =
+        `<div class="gs-when"><div class="gs-day">${esc(dd || '')}.${esc(mm || '')}</div>` +
+        `<div class="gs-time">${esc(g.time || '')}</div></div>` +
+        `<div class="gs-mid"><div class="gs-opp">${esc(g.opponent || 'соперник')}</div>` +
+        `<div class="gs-sub">состав объявлен — ставка на этот матч</div></div>` +
+        `<div class="gs-go">›</div>`;
+      card.onclick = () => openGame(keyOf(g));
+      box.appendChild(card);
     }
+    // «Все игры» показываем всегда: даже когда объявленных матчей нет, человек
+    // должен иметь возможность собрать состав, как раньше.
+    const all = document.createElement('div');
+    all.className = 'gs-card gs-all';
+    all.innerHTML =
+      '<div class="gs-when"><div class="gs-day">∞</div></div>' +
+      '<div class="gs-mid"><div class="gs-opp">Все игры</div>' +
+      '<div class="gs-sub">один состав на все известные матчи</div></div>' +
+      '<div class="gs-go">›</div>';
+    all.onclick = () => openGame(ALL);
+    box.appendChild(all);
+    $('gamesEmpty').classList.toggle('hidden', betGames.length > 0);
+  }
+
+  async function openGame(key) {
+    haptic('light');
+    $('gamesScreen').classList.add('hidden');
+    $('draft').classList.remove('hidden');
+    await loadGames(key);
   }
 
   async function loadGames(preferKey) {
-    if (!live) return;                       // без живого API игр не спросить
+    if (!live) { betGames = []; return; }
     try {
-      const q = preferKey ? ('?source=' + encodeURIComponent(preferKey.split(':')[0])
-                             + '&game_id=' + encodeURIComponent(preferKey.split(':').slice(1).join(':')))
-                          : '';
+      let q = '';
+      if (preferKey === ALL) q = '?game_id=all';
+      else if (preferKey) {
+        const [src, ...rest] = preferKey.split(':');
+        q = '?source=' + encodeURIComponent(src) +
+            '&game_id=' + encodeURIComponent(rest.join(':'));
+      }
       const r = await api('/fantasy/games' + q);
       betGames = r.games || [];
-      if (!betGames.length) { renderGameBar(); return; }
-      gameKey = keyOf(r.game);
-      applyGamePool(r);
+      if (preferKey) applyGamePool(r, preferKey);
+      else renderGamesScreen();
     } catch (e) {
-      betGames = []; renderGameBar();        // не сложилось — остаётся недельный набор
+      betGames = [];
+      if (preferKey) renderPool(); else renderGamesScreen();
     }
   }
 
-  const loadGame = key => loadGames(key);
-
-  function applyGamePool(r) {
-    // Пул под игру заменяет общий: ставить можно только на заявленных.
+  function applyGamePool(r, key) {
+    gameKey = key;
+    const isAll = key === ALL;
     gamePool = (r.pool || []).map(x => ({
-      ref: (x.refs || [])[0] || '',
-      refs: x.refs || [],
+      ref: x.ref || (x.refs || [])[0] || '',
+      refs: x.refs || (x.ref ? [x.ref] : []),
       name: x.name || '', number: x.number || '', team: x.team || '',
       price: x.price || 0, tier: x.tier || '',
       st: Object.assign({}, ZERO, x.stats || {}),
       last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
-      games: x.games || 1, unlinked: !!x.unlinked,
+      games: x.games || 0, inGames: x.in_games || [],
+      unlinked: !!x.unlinked, notDeclared: !!x.not_declared,
     }));
     pool = gamePool;
     counts = {};
-    for (const ref of (r.pick || [])) counts[ref] = (counts[ref] || 0) + 1;
-    const lost = gamePool.filter(p => p.unlinked).length;
+    const restore = (r.pick && r.pick.length) ? r.pick : (isAll ? weekRefs : []);
+    for (const ref of restore) counts[ref] = (counts[ref] || 0) + 1;
+
+    // Внутри одного матча список короткий — фильтры и сортировка там лишние.
+    // На «всех играх» список полный, и они нужны.
+    trimChrome(!isAll);
+    $('currentGame').textContent = isAll ? '∞ Все игры'
+      : ((r.game && r.game.label) || 'Игра');
+
     const note = $('poolNote');
-    note.classList.toggle('hidden', lost === 0);
-    if (lost) note.textContent = '⚠️ ' + lost + ' из состава не нашлись в заявке лиги — '
-      + 'поставить на них нельзя. Скажи тренеру, он поправит написание.';
-    renderGameBar();
+    const lost = gamePool.filter(p => p.unlinked).length;
+    if (isAll && r.differ) {
+      note.classList.remove('hidden');
+      note.textContent = '⚠️ Составы на матчи разные — под каждым игроком '
+        + 'написано, в каких он заявлен. Тот, кого нет в матче, очков за него не принесёт.';
+    } else if (lost) {
+      note.classList.remove('hidden');
+      note.textContent = '⚠️ ' + lost + ' из состава не нашлись в заявке лиги — '
+        + 'поставить на них нельзя. Скажи тренеру, он поправит написание.';
+    } else {
+      note.classList.add('hidden');
+    }
     renderPool();
     updateCounter();
   }
+
+  // Экран матча — только про выбор состава. Полоса тиров, «Только с играми» и
+  // сортировка относятся к длинному списку, а в заявке на игру человек десять.
+  function trimChrome(minimal) {
+    minimalChrome = minimal;
+    for (const id of ['playedChip', 'sort']) {
+      const el = $(id); if (el) el.classList.toggle('hidden', minimal);
+    }
+    if (minimal) { tierFilter.clear(); affordable = false; }
+    renderFilterBar();
+  }
+
+  function toggleSearch() {
+    haptic('light');
+    const inp = $('search'), btn = $('searchBtn');
+    const show = inp.classList.contains('hidden');
+    inp.classList.toggle('hidden', !show);
+    btn.classList.toggle('on', show);
+    if (show) inp.focus(); else { inp.value = ''; inp.dispatchEvent(new Event('input')); }
+  }
+  window.toggleSearch = toggleSearch;
 
   function renderPool() {
     sortPool();
@@ -859,13 +966,19 @@
       // «×2» — человек заявлен ещё на одну игру и наберёт очки и там; «нет в
       // лиге» — состав его знает, а заявка лиги нет, ставить не на кого.
       const tags = (p.games > 1 ? `<span class="tag tag-two">×${p.games}</span>` : '')
-        + (p.unlinked ? '<span class="tag tag-off">нет в лиге</span>' : '');
+        + (p.unlinked ? '<span class="tag tag-off">нет в лиге</span>' : '')
+        + (p.notDeclared ? '<span class="tag tag-off">не заявлен</span>' : '');
+      // На «всех играх» под фамилией — в каких матчах человек заявлен. Без
+      // этого собранный состав может наполовину не выйти на площадку, и
+      // человек не поймёт, почему очков мало.
+      const games = (minimalChrome || !(p.inGames || []).length) ? ''
+        : `<div class="pgames">🏀 ${esc(p.inGames.join(' · '))}</div>`;
       c.innerHTML = badge +
         `<div class="info"><div class="pname">${tierBadge(p)}` +
         `<span class="nm">${esc(p.name)}</span>${tags}` +
         (live ? '<span class="chev">›</span>' : '') + `</div>` +
         `<div class="pstat">${jersey}${costMode ? '' : priceLabel(p)}` +
-        `${esc(statLine(p))}</div></div>` +
+        `${esc(statLine(p))}</div>${games}</div>` +
         `<div class="ctrl">${ctrl}</div>`;
       const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
       const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
@@ -1094,7 +1207,9 @@
     const btn = $('saveBtn');
     btn.disabled = true; btn.textContent = 'Сохраняю…';
     try {
-      if (gameKey) {
+      // «Все игры» — это и есть недельный состав, он и раньше играл во всех
+      // матчах. Отдельного хранения ему не нужно, поэтому сохраняем по-старому.
+      if (gameKey && gameKey !== ALL) {
         const [src, ...rest] = gameKey.split(':');
         await api('/fantasy/games', { method: 'POST',
           body: JSON.stringify({ source: src, game_id: rest.join(':'), refs, mode }) });
