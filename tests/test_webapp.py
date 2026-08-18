@@ -123,6 +123,29 @@ CHECKS = """
     ok(document.getElementById('gameName').textContent.length > 0, 'соперник в шапке назван');
     ok(document.getElementById('gameEmblem').textContent.length > 0, 'эмблема на месте');
 
+    // Название команды без уточнения турнира в скобках.
+    applyGamePool({ game:{label:'x', date:'2026-08-24', time:'21:00',
+                          opponent:'Резалит (Летний Кубок Дивизион C)'},
+      declared:true, pool:[{refs:['ib:1:p1'], name:'Иванов Иван'}], pick:[] },
+      'slpro:4600');
+    ok(document.getElementById('gameName').textContent === 'Резалит',
+       'в шапке только команда: ' + document.getElementById('gameName').textContent);
+    ok(document.getElementById('gameWhen').textContent.indexOf('(') < 0,
+       'и в строке даты скобок нет: ' + document.getElementById('gameWhen').textContent);
+
+    // Плашка про перенесённый состав — только для недельного набора.
+    inherited = true;
+    applyGamePool({ game:{label:'x', date:'2026-08-24', opponent:'Резалит'},
+      declared:true, pool:[{refs:['ib:1:p1'], name:'Иванов Иван'}], pick:[] },
+      'slpro:4600');
+    ok(inherited === false, 'внутри матча состав не считается перенесённым');
+
+    // Вкладки должны исчезать ДО ответа сервера, а не после.
+    document.querySelector('.tabs').classList.remove('hidden');
+    trimChrome(true);
+    ok(document.querySelector('.tabs').classList.contains('hidden'),
+       'вкладки убираются сразу, не дожидаясь данных');
+
     weekRefs = ['ib:1:p1'];
     applyGamePool({ game:{label:'Все игры'}, all:true, differ:true,
       pool:[{ref:'ib:1:p1', name:'Иванов Иван', in_games:['22.08'], games:1},

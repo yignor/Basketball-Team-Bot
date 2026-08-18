@@ -823,12 +823,16 @@
   const MONTHS = ['января','февраля','марта','апреля','мая','июня',
                   'июля','августа','сентября','октября','ноября','декабря'];
 
+  // «Резалит (Летний Кубок Дивизион C)» — в шапке нужна только команда.
+  // Турнир там не помогает: человек и так внутри конкретного матча.
+  const teamOnly = n => String(n || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+
   function whenLine(g) {
     const [y, m, d] = String(g.date || '').split('-');
     const when = (d && m) ? (Number(d) + ' ' + (MONTHS[Number(m) - 1] || '')) : '';
     const at = g.time ? (', ' + g.time) : '';
-    return [when + at, g.opponent ? ('PullUp — ' + g.opponent) : '']
-      .filter(Boolean).join(' · ');
+    const opp = teamOnly(g.opponent);
+    return [when + at, opp ? ('PullUp — ' + opp) : ''].filter(Boolean).join(' · ');
   }
 
   // Экран матчей — вход в фэнтези. Карточка «Все игры» ведёт к прежнему
@@ -893,6 +897,9 @@
     haptic('light');
     $('gamesScreen').classList.add('hidden');
     $('draft').classList.remove('hidden');
+    // Вкладки убираем ДО запроса. Раньше это делал applyGamePool, то есть
+    // только после ответа сервера, и секунду они висели на экране матча.
+    trimChrome(true);
     await loadGame(key);
   }
 
@@ -936,13 +943,18 @@
     counts = {};
     const restore = (r.pick && r.pick.length) ? r.pick : (isAll ? weekRefs : []);
     for (const ref of restore) counts[ref] = (counts[ref] || 0) + 1;
+    // «Состав перенесён с прошлой игры» — про недельный состав. На матче со
+    // своей ставкой переносить нечего, а на пустом — тем более: надпись
+    // висела над несобранным составом и сбивала с толку.
+    if (!isAll) inherited = false;
 
     // Внутри одного матча список короткий — фильтры и сортировка там лишние.
     // На «всех играх» список полный, и они нужны.
     trimChrome(true);
     // Эмблемы команд у нас нет — ни лига, ни лист её не дают. Ставим первую
     // букву соперника: честнее, чем чужая картинка или пустой квадрат.
-    const opp = isAll ? 'Все игры' : ((r.game && r.game.opponent) || 'Соперник');
+    const opp = isAll ? 'Все игры'
+                      : (teamOnly((r.game || {}).opponent) || 'Соперник');
     $('gameEmblem').textContent = isAll ? '∞' : (opp.trim()[0] || '?').toUpperCase();
     $('gameName').textContent = opp;
     $('gameWhen').textContent = isAll
