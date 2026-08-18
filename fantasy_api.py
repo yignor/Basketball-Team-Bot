@@ -631,9 +631,11 @@ async def game_pool(source: str, game_id: str,
     Возвращает карточки пула с полем `declared`, плюс тех из состава, кого в
     пуле не нашли, — с `unlinked` и без ссылок: поставить на них нельзя."""
     declared = _declared_names(source, str(game_id))
-    if not declared:
-        return []
     pool = await build_pool(season=season)
+    # Состава ещё нет — ставят из полного ростера лиги. Пустой список тут
+    # означал бы «игры нет», а игра есть: тренер её объявил.
+    if not declared:
+        return [dict(e) for e in pool]
     out: List[Dict[str, Any]] = []
     taken: set = set()
     for person in declared:
@@ -650,23 +652,26 @@ async def game_pool(source: str, game_id: str,
     return out
 
 
-def declared_games(limit: int = 6) -> List[Dict[str, Any]]:
-    """Игры, на которые можно ставить: состав собран и разослан в чат.
+def upcoming_games(limit: int = 6) -> List[Dict[str, Any]]:
+    """Все ближайшие игры, известные боту, — ставить можно на любую.
 
-    Пока состав не опубликован, ставить не на что: черновик тренера меняется, и
-    пул под ним ездил бы туда-сюда. Даты берём из расписания, а не из даты
-    публикации — ставят на будущее."""
+    Раньше сюда попадали только матчи с РАЗОСЛАННЫМ составом, и список у
+    тренера, объявившего три игры, оставался пустым: состав он к тому моменту
+    ещё не собрал. Заявка нужна, чтобы сузить пул, а не чтобы решать, есть
+    игра или нет: пока состава нет, ставят из полного ростера лиги.
+
+    `declared` — собран ли состав. По нему приложение объясняет человеку,
+    почему список игроков полный."""
     import game_roster
     from datetime_utils import get_moscow_time
     today = get_moscow_time().date()
     out = []
     for g in game_roster.games(from_day=today):
-        if not game_roster.is_posted(g["source"], g["game_id"]):
-            continue
         out.append({"source": g["source"], "game_id": g["game_id"],
                     "date": g["date"].isoformat(), "time": g.get("time") or "",
                     "opponent": g.get("opponent") or "",
-                    "label": game_roster.game_label(g)})
+                    "label": game_roster.game_label(g),
+                    "declared": bool(_declared_names(g["source"], g["game_id"]))})
         if len(out) >= limit:
             break
     return out
@@ -1745,7 +1750,7 @@ async def handle_games(request: web.Request) -> web.Response:
     if not _can_view(user):
         return web.json_response({"error": "not_a_member"}, status=403)
     season = _season(request)
-    games = await asyncio.to_thread(declared_games)
+    games = await asyncio.to_thread(upcoming_games)
     counts = await asyncio.to_thread(declared_counts, games)
 
     want = request.query.get("game_id") or ""
@@ -1776,10 +1781,11 @@ async def handle_games(request: web.Request) -> web.Response:
     pick: List[str] = []
     if chosen:
         raw = await game_pool(chosen["source"], chosen["game_id"], season)
-        # Значок ставим здесь, а не в приложении: сколько игр у человека —
-        # знание сервера, приложение получает готовое число.
-        for entry in raw:
-            entry["games"] = counts.get(int(entry.get("row") or 0), 1)
+        # Значок «играет ещё и там» — только когда состав объявлен: без заявки
+        # считать не по чему, и число было бы выдумано.
+        if chosen.get("declared"):
+            for entry in raw:
+                entry["games"] = counts.get(int(entry.get("row") or 0), 1)
         pool = await asyncio.to_thread(pool_with_stats_cached, raw, season)
         if season:
             saved = await asyncio.to_thread(
@@ -1792,6 +1798,9 @@ async def handle_games(request: web.Request) -> web.Response:
         "game": chosen,
         "pool": pool,
         "pick": pick,
+        # Состав тренер ещё не объявил — приложение объяснит, почему список
+        # игроков полный.
+        "declared": bool(chosen and chosen.get("declared")),
         "season": season and {"id": season["id"], "name": season["name"],
                               "roster_size": fantasy.roster_size(season),
                               "max_per_player": fantasy.max_per_player(season)},

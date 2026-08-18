@@ -25,13 +25,17 @@ APP = ROOT / "docs" / "fantasy" / "index.html"
 
 HARNESS = """
 const INITIAL = %s;
-function mkEl(id){ return { id, className:'', innerHTML:'', textContent:'', value:'',
-  style:{}, children:[], onclick:null, disabled:false,
+function mkEl(id){ const o = { id, className:'', textContent:'', value:'',
+  style:{}, children:[], onclick:null, disabled:false, _html:'',
+  // innerHTML = '' в браузере выносит и детей. Без этого счётчик карточек
+  // копится между отрисовками, и проверка врёт про число игр.
+  get innerHTML(){ return this._html; },
+  set innerHTML(v){ this._html = v; if (!v) this.children = []; },
   classList:{ _s:new Set(INITIAL[id] || []), add(c){this._s.add(c)}, remove(c){this._s.delete(c)},
     toggle(c,f){ f===undefined? (this._s.has(c)?this._s.delete(c):this._s.add(c)) : (f?this._s.add(c):this._s.delete(c)) },
     contains(c){return this._s.has(c)} },
   appendChild(x){ this.children.push(x) }, querySelector(){ return mkEl('q') },
-  addEventListener(){}, focus(){}, dispatchEvent(){}, remove(){} }; }
+  addEventListener(){}, focus(){}, dispatchEvent(){}, remove(){} }; return o; }
 const _store = {};
 global.document = { getElementById:(id)=> _store[id] || (_store[id]=mkEl(id)),
   createElement:(t)=> mkEl(t), querySelectorAll:()=>[], querySelector:()=>mkEl('q'),
@@ -63,7 +67,41 @@ CHECKS = """
     ];
     renderGamesScreen();
     ok(document.getElementById('gamesCards').children.length === 3,
-       'вход в фэнтези — список игр плюс карточка «Все игры»');
+       'две игры плюс карточка «На все игры»');
+
+    // Правила карточки «на всё» зависят от числа игр.
+    betGames = [];
+    renderGamesScreen();
+    ok(document.getElementById('gamesCards').children.length === 1,
+       'игр нет — одна карточка «На ближайшую игру»');
+    ok(document.getElementById('gamesEmpty').classList.contains('hidden'),
+       'и никакой пустой отговорки рядом');
+
+    betGames = [{source:'infobasket', game_id:'777', date:'2026-08-22', time:'14:00',
+                 opponent:'Кирпичный Завод', label:'x', declared:false}];
+    renderGamesScreen();
+    ok(document.getElementById('gamesCards').children.length === 1,
+       'игра одна — лишней карточки нет');
+
+    betGames = [
+      {source:'infobasket', game_id:'777', date:'2026-08-22', time:'14:00',
+       opponent:'Кирпичный Завод', label:'Кирпичный Завод · 22.08, 14:00', declared:true},
+      {source:'slpro', game_id:'4600', date:'2026-08-24', time:'21:00',
+       opponent:'Резалит', label:'Резалит · 24.08, 21:00', declared:false},
+      {source:'slpro', game_id:'4601', date:'2026-08-29', time:'15:00',
+       opponent:'BCC', label:'BCC · 29.08, 15:00', declared:false},
+    ];
+    renderGamesScreen();
+    ok(document.getElementById('gamesCards').children.length === 4,
+       'три объявленные игры видны, плюс «На все игры»');
+
+    // Состава ещё нет — выбор из полного ростера, и это объяснено.
+    applyGamePool({ game:{label:'Резалит · 24.08'}, declared:false,
+      pool:[{ref:'ib:1:p1', name:'Иванов Иван'}, {ref:'ib:1:p2', name:'Петров Пётр'}],
+      pick:[] }, 'slpro:4600');
+    ok(pool.length === 2, 'без заявки показан весь ростер');
+    ok(!document.getElementById('poolNote').classList.contains('hidden'),
+       'и человеку сказано, почему список полный');
 
     applyGamePool({ game:{label:'Кирпичный Завод · 22.08'},
       pool:[{refs:['ib:1:p1'], name:'Иванов Иван', games:2, in_games:['a','b']},
