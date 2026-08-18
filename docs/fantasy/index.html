@@ -831,23 +831,33 @@
         `<div class="gs-when"><div class="gs-day">${esc(dd || '')}.${esc(mm || '')}</div>` +
         `<div class="gs-time">${esc(g.time || '')}</div></div>` +
         `<div class="gs-mid"><div class="gs-opp">${esc(g.opponent || 'соперник')}</div>` +
-        `<div class="gs-sub">состав объявлен — ставка на этот матч</div></div>` +
+        `<div class="gs-sub">${g.declared ? 'состав объявлен — выбор из заявки'
+                                          : 'состава пока нет — выбор из всего ростера'}</div></div>` +
         `<div class="gs-go">›</div>`;
       card.onclick = () => openGame(keyOf(g));
       box.appendChild(card);
     }
-    // «Все игры» показываем всегда: даже когда объявленных матчей нет, человек
-    // должен иметь возможность собрать состав, как раньше.
-    const all = document.createElement('div');
-    all.className = 'gs-card gs-all';
-    all.innerHTML =
-      '<div class="gs-when"><div class="gs-day">∞</div></div>' +
-      '<div class="gs-mid"><div class="gs-opp">Все игры</div>' +
-      '<div class="gs-sub">один состав на все известные матчи</div></div>' +
-      '<div class="gs-go">›</div>';
-    all.onclick = () => openGame(ALL);
-    box.appendChild(all);
-    $('gamesEmpty').classList.toggle('hidden', betGames.length > 0);
+    // Карточка «на всё» появляется по числу игр:
+    //   игр нет   — «На ближайшую игру»: расписания ещё нет, но собрать состав
+    //               человек должен уметь, он сыграет, когда игра появится;
+    //   игра одна — лишней карточки нет, выбирать не из чего;
+    //   игр две+  — «На все игры», один состав на все матчи.
+    if (betGames.length !== 1) {
+      const all = document.createElement('div');
+      const many = betGames.length > 1;
+      all.className = 'gs-card gs-all';
+      all.innerHTML =
+        `<div class="gs-when"><div class="gs-day">${many ? '∞' : '🏀'}</div></div>` +
+        `<div class="gs-mid"><div class="gs-opp">${many ? 'На все игры' : 'На ближайшую игру'}</div>` +
+        `<div class="gs-sub">${many ? 'один состав на все известные матчи'
+                                    : 'состав сыграет, как только появится матч'}</div></div>` +
+        '<div class="gs-go">›</div>';
+      all.onclick = () => openGame(ALL);
+      box.appendChild(all);
+    }
+    // Пустой список — не пустой экран: карточка «На ближайшую игру» выше уже
+    // даёт человеку что делать, а объяснение только мешало бы.
+    $('gamesEmpty').classList.add('hidden');
   }
 
   async function openGame(key) {
@@ -903,7 +913,11 @@
 
     const note = $('poolNote');
     const lost = gamePool.filter(p => p.unlinked).length;
-    if (isAll && r.differ) {
+    if (!isAll && r.declared === false) {
+      note.classList.remove('hidden');
+      note.textContent = 'ℹ️ Тренер ещё не объявил состав на этот матч — '
+        + 'выбирай из всего ростера. Когда состав появится, список сузится.';
+    } else if (isAll && r.differ) {
       note.classList.remove('hidden');
       note.textContent = '⚠️ Составы на матчи разные — под каждым игроком '
         + 'написано, в каких он заявлен. Тот, кого нет в матче, очков за него не принесёт.';
