@@ -1871,7 +1871,16 @@ async def handle_pool(request: web.Request) -> web.Response:
     # Список активных лиг — для переключателя в Mini App (когда их несколько).
     seasons = [{"id": s["id"], "name": s["name"], "format": s["format"]}
                for s in fantasy.active_seasons()]
+    # Список игр — тем же ответом, а не вторым запросом. Он собирается из
+    # локального зеркала расписания (никаких походов в лиги), стоит копейки, а
+    # отдельный запрос мог не дойти — и экран матчей оставался пустым.
+    try:
+        upcoming = await asyncio.to_thread(upcoming_games)
+    except Exception as exc:
+        log.warning("список игр для приложения не собрался: %s", exc)
+        upcoming = []
     resp = web.json_response({
+        "games": upcoming,
         "season": season and {"id": season["id"], "name": season["name"], "format": season["format"],
                               "roster_size": fantasy.roster_size(season),
                               "max_per_player": fantasy.max_per_player(season),

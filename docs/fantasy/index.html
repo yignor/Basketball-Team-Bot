@@ -678,9 +678,11 @@
     $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
     // Кабинет — только тем, кого бот опознал как игрока команды (или админу).
     $('tab-me').classList.toggle('hidden', !(p.player || p.admin));
-    // Игры — после пула: если открытая игра есть, её заявка заменит общий
-    // список, а недельный набор останется запасным путём.
-    loadGames();
+    // Игры приходят тем же ответом: экран матчей рисуется сразу и не зависит
+    // от того, дойдёт ли второй запрос. Раньше он мог не дойти — и человек
+    // видел пустой экран вместо списка.
+    betGames = p.games || [];
+    renderGamesScreen();
     return true;
   }
 
@@ -864,26 +866,29 @@
     haptic('light');
     $('gamesScreen').classList.add('hidden');
     $('draft').classList.remove('hidden');
-    await loadGames(key);
+    await loadGame(key);
   }
 
-  async function loadGames(preferKey) {
-    if (!live) { betGames = []; return; }
+  // Заход внутрь матча: за пулом идём отдельно, потому что он зависит от
+  // выбранной игры. Список матчей при этом уже нарисован — его принесли
+  // вместе с пулом при запуске.
+  async function loadGame(preferKey) {
+    if (!live) { showGames(); return; }
     try {
-      let q = '';
+      let q;
       if (preferKey === ALL) q = '?game_id=all';
-      else if (preferKey) {
+      else {
         const [src, ...rest] = preferKey.split(':');
         q = '?source=' + encodeURIComponent(src) +
             '&game_id=' + encodeURIComponent(rest.join(':'));
       }
       const r = await api('/fantasy/games' + q);
-      betGames = r.games || [];
-      if (preferKey) applyGamePool(r, preferKey);
-      else renderGamesScreen();
+      if (r.games && r.games.length) betGames = r.games;
+      applyGamePool(r, preferKey);
     } catch (e) {
-      betGames = [];
-      if (preferKey) renderPool(); else renderGamesScreen();
+      // Не дошло — возвращаем человека к списку, а не оставляем в пустоте.
+      msg('Не получилось открыть матч. Попробуй ещё раз.');
+      showGames();
     }
   }
 
@@ -2488,6 +2493,11 @@
     $('sort').onchange = renderPool;
     $('search').oninput = e => { search = norm(e.target.value); renderPool(); };
     renderPool(); renderStandings();
+    // Экран матчей рисуем в конце запуска и БЕЗУСЛОВНО: он одинаково нужен и
+    // живому режиму, и запасному входу через #d=. Раньше он рисовался только
+    // внутри успешного запроса за играми — не дошёл запрос, и человек видел
+    // пустой экран вместо списка.
+    renderGamesScreen();
     syncButton();
   }
   init();
