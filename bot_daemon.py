@@ -68,7 +68,25 @@ FANTASY_FALLBACK_BUTTON = os.getenv("FANTASY_FALLBACK_BUTTON", "").strip().lower
     in ("1", "true", "yes", "on")
 
 
-_WEBAPP_VERSION = str(int(time.time()))
+# Версия в адресе Mini App — чтобы после выката человек получил свежий фронт, а
+# не старый JS из кеша. Считаем её ПО САМОМУ ФАЙЛУ приложения, а не по времени
+# запуска демона: фронт лежит в этом же репозитории, и выкат его правок — это
+# `git pull` без рестарта. С прежней отметкой времени такой выкат до людей не
+# доезжал вовсе: адрес не менялся, Telegram отдавал страницу из кеша, и правки
+# «не работали», хотя лежали на сервере.
+_WEBAPP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "docs", "fantasy", "index.html")
+
+
+def _webapp_version() -> str:
+    """Метка версии фронта: время правки файла. Файла нет — время старта."""
+    try:
+        return str(int(os.path.getmtime(_WEBAPP_FILE)))
+    except OSError:
+        return _WEBAPP_FALLBACK_VERSION
+
+
+_WEBAPP_FALLBACK_VERSION = str(int(time.time()))
 
 
 def _webapp_url() -> str:
@@ -79,7 +97,7 @@ def _webapp_url() -> str:
     if not FANTASY_WEBAPP_URL:
         return ""
     sep = "&" if "?" in FANTASY_WEBAPP_URL else "?"
-    url = f"{FANTASY_WEBAPP_URL}{sep}v={_WEBAPP_VERSION}"
+    url = f"{FANTASY_WEBAPP_URL}{sep}v={_webapp_version()}"
     api = fantasy_api.public_api_url()
     if api:
         from urllib.parse import quote
