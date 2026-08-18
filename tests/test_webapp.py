@@ -116,8 +116,6 @@ CHECKS = """
     // Инструменты выбора внутри матча ОСТАЮТСЯ: без фильтра по стоимости в
     // бюджетном режиме состав не собрать. Я их было убрал — стало хуже.
     ok(!document.getElementById('sort').classList.contains('hidden'), 'сортировка на месте');
-    ok(document.getElementById('filterBar').innerHTML.indexOf('Только с играми') >= 0,
-       '«только с играми» переехал в полосу фильтров');
     ok(document.getElementById('filterBar').innerHTML.indexOf('Все ') >= 0,
        'есть кнопка «Все N» — сброс фильтров');
     ok(document.getElementById('counter').textContent.indexOf('осталось выбрать') >= 0,
@@ -181,23 +179,24 @@ CHECKS = """
     counts = {}; renderFilterBar(); updateCounter();
     ok(/Все 3/.test(document.getElementById('filterBar').innerHTML),
        '«Все N» считает пул');
-    ok(/💰 3/.test(document.getElementById('filterBar').innerHTML),
-       'деньги — ЧИСЛОМ игроков по карману, а не остатком бюджета');
+    ok(/💰 100/.test(document.getElementById('filterBar').innerHTML),
+       'никого не выбрал — в кнопке весь лимит');
     ok(document.getElementById('counter').textContent === 'Бюджет 0 из 100 · осталось выбрать 3',
        'счётчик как в образце: ' + document.getElementById('counter').textContent);
     // Взяли за 80 — остаток 20, влезает только «Дешёвый» за 10.
     counts = {a:1}; renderFilterBar(); updateCounter();
-    ok(/💰 1/.test(document.getElementById('filterBar').innerHTML),
-       '«по карману» пересчитывается на остаток');
+    ok(/💰 20/.test(document.getElementById('filterBar').innerHTML),
+       'после игрока за 80 в кнопке остаток лимита');
     ok(document.getElementById('counter').textContent === 'Бюджет 80 из 100 · осталось выбрать 2',
        'бюджет и остаток мест: ' + document.getElementById('counter').textContent);
     mode = 'free'; renderFilterBar();
     ok(!/💰/.test(document.getElementById('filterBar').innerHTML),
        'в свободном режиме денег и полос стоимости нет');
-    ok(/Только с играми/.test(document.getElementById('filterBar').innerHTML),
-       'а «только с играми» остаётся');
+    ok(!/Только с играми/.test(document.getElementById('filterBar').innerHTML),
+       'кнопки «только с играми» больше нет нигде');
     resetFilters();
-    ok(tierFilter.size === 0 && !affordable && !playedOnly, '«Все N» сбрасывает всё');
+    ok(tierFilter.size === 0 && !affordable, '«Все N» сбрасывает фильтры');
+    ok(document.getElementById('sort') !== null, 'сортировка на месте, компактной кнопкой');
 
     showGames();
     ok(!document.getElementById('gamesScreen').classList.contains('hidden'), 'возврат к списку игр');
