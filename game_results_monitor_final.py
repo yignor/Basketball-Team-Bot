@@ -47,7 +47,8 @@ class GameResultsMonitorFinal:
     def __init__(self):
         self.bot = None
         if BOT_TOKEN:
-            self.bot = Bot(token=BOT_TOKEN)
+            import bot_factory
+            self.bot = bot_factory.make_bot(BOT_TOKEN)
         
         # Создаем экземпляр менеджера игр
         self.game_manager = GameSystemManager()
@@ -335,6 +336,28 @@ class GameResultsMonitorFinal:
                 if not player_stats:
                     return None
 
+                # Игра доиграна и box-score уже у нас — кладём в локальную копию.
+                # Бэкфилл её больше не запросит, аналитика возьмёт из своей базы.
+                try:
+                    import fantasy_stats
+                    parsed = await parser.parse_game_info(api_data)
+                    if parsed and parsed.get('is_finished'):
+                        parsed['player_stats'] = player_stats
+                        # parse_game_info кладёт game_id=None, если его нет в
+                        # ответе, — setdefault не перезапишет, присваиваем явно.
+                        parsed['game_id'] = parsed.get('game_id') or game_id
+                        comp_id = (api_data.get('game') or {}).get('CompID') or ''
+                        fantasy_stats.store_infobasket_game(parsed, str(comp_id))
+                        # Пересчёт фэнтези по этой игре: сверка составов + очки.
+                        import fantasy
+                        gdate = fantasy_stats._to_iso_date(parsed.get('date') or '')
+                        summary = fantasy.apply_game_result("infobasket", parsed['game_id'], gdate)
+                        affected = sum(len(s["affected"]) for s in summary["seasons"])
+                        print(f"🏆 Фэнтези обновлено по игре {parsed['game_id']} "
+                              f"(затронуто участников {affected})")
+                except Exception as e:
+                    print(f"⚠️ Статистика игры {game_id} не сохранена/не пересчитана: {e}")
+
                 candidate_names: Set[str] = set()
 
                 for key in ['our_team', 'our_team_name']:
@@ -488,7 +511,17 @@ class GameResultsMonitorFinal:
                 game_link=game_link,
                 our_team_leaders=our_team_leaders
             )
-            
+
+            # Напоминание про блокировку состава фэнтези (не чаще раза в неделю).
+            try:
+                import fantasy
+                hint = fantasy.result_hint()
+                if hint:
+                    message = f"{message}\n\n{hint}"
+            except Exception as e:
+                print(f"⚠️ Не удалось добавить напоминание фэнтези: {e}")
+
+
             if game_link:
                 print(f"🔗 Используется ссылка: {game_link}")
             else:

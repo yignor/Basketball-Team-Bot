@@ -27,8 +27,13 @@ from typing import Dict, List, Optional, Tuple
 
 import gspread
 
+from datetime_utils import get_moscow_time
+
+import attendance_summary
 from report_common import (
     MONTHS_RU, MONTHS_RU_GEN, DAYS_RU, DAYS_FULL_RU, STATUS_EMOJI,
+    load_roster, make_resolver, roster_size, apply_percent_gradient,
+    fill_sparklines, sheet_locale,
     init_sheets as _init_sheets,
     get_or_create as _get_or_create,
     load_players,
@@ -39,7 +44,7 @@ from report_common import (
     apply_formatting,
 )
 
-ATTEND_SHEET  = "Посещаемость"
+ATTEND_SHEET  = "Логи посещаемости"   # см. sheets_cache.SHEET_RENAMES
 REPORT_SHEET  = "Тренировки"
 PLAYERS_SHEET = "Игроки"
 
@@ -50,7 +55,7 @@ PLAYERS_SHEET = "Игроки"
 # ─────────────────────────── Data loading ────────────────────────────────────
 
 def load_votes(spreadsheet) -> List[Dict]:
-    """Загружает все голоса из листа Посещаемость."""
+    """Загружает все голоса из листа «Логи посещаемости»."""
     try:
         ws = spreadsheet.worksheet(ATTEND_SHEET)
     except gspread.WorksheetNotFound:
@@ -78,31 +83,6 @@ def load_votes(spreadsheet) -> List[Dict]:
             "revotes":       int(row[10]) if len(row) > 10 and row[10].isdigit() else 0,
         })
     return votes
-
-
-def load_poll_registry(spreadsheet) -> Dict[str, Dict]:
-    """Возвращает {training_date: {config_poll_id, options, ...}}."""
-    try:
-        ws = spreadsheet.worksheet("Сервисный")
-    except gspread.WorksheetNotFound:
-        return {}
-
-    rows = ws.get_all_values()
-    registry: Dict[str, Dict] = {}
-    for row in rows:
-        if len(row) >= 1 and row[0].upper() == "TRAINING_POLL_REG":
-            try:
-                meta = json.loads(row[4]) if len(row) > 4 else {}
-                dt_str = row[11] if len(row) > 11 else ""
-                if dt_str:
-                    registry[dt_str] = {
-                        "config_poll_id": row[8] if len(row) > 8 else "",
-                        "options": meta.get("options", []),
-                        "tg_poll_id": str(meta.get("tg_poll_id", "")),
-                    }
-            except (json.JSONDecodeError, IndexError):
-                pass
-    return registry
 
 
 # ─────────────────────────── Data grouping ───────────────────────────────────
@@ -137,12 +117,36 @@ class SheetBuilder:
         self.rows.append([f"Сводка за месяц · {total_trainings} тренировок"])
 
     def summary_table_header(self):
-        self.rows.append(["Фамилия / Имя", "Ник", "Посетил", "Пропустил", "Всего", "% посещений"])
+        self.rows.append(["Фамилия / Имя", "Ник", "Пришёл", "Пропустил", "Без ответа",
+                          "% посещений", "Менял мнение", "Ходит по дням", "Последняя"])
 
-    def summary_row(self, full_name: str, nick: str, present: int, absent: int):
-        total = present + absent
-        pct   = f"{round(present / total * 100)}%" if total else "—"
-        self.rows.append([full_name, f"@{nick}" if nick else "", str(present), str(absent), str(total), pct])
+    def summary_row(self, full_name: str, nick: str, present: int, absent: int,
+                    no_answer: int, revotes: int, weekdays: str, last_seen: str):
+        # Процент считаем от ВСЕХ тренировок месяца, а не от числа ответов:
+        # промолчать и не прийти — для тренера то же самое, что прийти не смог.
+        total = present + absent + no_answer
+        pct = f"{round(present / total * 100)}%" if total else "—"
+        self.rows.append([full_name, f"@{nick}" if nick else "",
+                          str(present), str(absent), str(no_answer) if no_answer else "",
+                          pct, str(revotes) if revotes else "",
+                          weekdays, last_seen])
+
+    def totals_line(self, trainings: int, avg_present: float,
+                    best: Optional[Tuple[date, int]], worst: Optional[Tuple[date, int]],
+                    revotes: int, silent: int):
+        """Строка «итого по команде» — то, ради чего тренер открывает лист."""
+        parts = [f"Тренировок: {trainings}", f"средняя явка: {avg_present:g} чел."]
+        if best:
+            d, n = best
+            parts.append(f"лучшая: {DAYS_RU[d.weekday()]} {d.day} {MONTHS_RU_GEN.get(d.month, '')} — {n}")
+        if worst and worst[0] != (best or (None,))[0]:
+            d, n = worst
+            parts.append(f"слабее всех: {DAYS_RU[d.weekday()]} {d.day} {MONTHS_RU_GEN.get(d.month, '')} — {n}")
+        if revotes:
+            parts.append(f"смен мнения: {revotes}")
+        if silent:
+            parts.append(f"ни разу не ответили: {silent}")
+        self.rows.append([" · ".join(parts)])
 
     def training_days_line(self, trainings_with_counts: List[Tuple[date, int, int]]):
         """Строка вида 'По дням: вт 10 июня – 8 · пт 13 июня – 6 · ...'"""
@@ -191,6 +195,7 @@ class SheetBuilder:
 
 # ─────────────────────────── Report generation ───────────────────────────────
 
+
 def build_report(
     votes: List[Dict],
     players: Dict[str, Dict],
@@ -201,6 +206,10 @@ def build_report(
     Строит список строк для листа Тренировки.
     Структура: месячная сводка (новые вверху), затем детали по неделям.
     """
+    # ФИО берём из состава: ник в Telegram меняется, а тренер должен видеть
+    # человека. Голоса тех, кого в составе нет, помечаются отдельно.
+    roster = load_roster()
+    resolve = make_resolver(roster)
     by_training = group_by_training(votes)
 
     # Parse dates and sort descending (newest first)
@@ -225,8 +234,26 @@ def build_report(
             if week_start <= d <= week_end
         ]
 
+    # ВАЖНО: пустой период НЕ должен обнулять лист. Сводки строятся по всей
+    # истории и не зависят от фильтра; пусто может быть только в деталях —
+    # например, в понедельник, когда на новой неделе тренировок ещё не было.
+    # Событие — недельный опрос (он один на дату). Дни внутри него берутся из
+    # вариантов ответа, поэтому дробить по опросам не нужно; а вот пересозданный
+    # опрос на ту же дату так не удвоит знаменатель.
+    all_events: List[Tuple[date, List[Dict]]] = []
+    for _dt_str, _vlist in by_training.items():
+        _d = iso_to_date(_dt_str)
+        if _d:
+            all_events.append((_d, _vlist))
+    summary_rows_all = attendance_summary.build_sections(
+        all_events, resolve, unit="тренировок", roster_total=roster_size(roster))
+
     if not training_dates_all:
-        return [["Нет данных о тренировках."]]
+        now = get_moscow_time().strftime("%d.%m.%Y %H:%M")
+        return ([[f"ПОСЕЩАЕМОСТЬ ТРЕНИРОВОК · Обновлено: {now} МСК"], ["═" * 60], [""]]
+                + summary_rows_all
+                + [[""], ["За выбранный период событий не было — показаны сводки."]])
+
 
     # Group by (year, month)
     months_seen: Dict[Tuple[int, int], List[Tuple[str, date]]] = defaultdict(list)
@@ -240,44 +267,6 @@ def build_report(
 
     for (year, month) in sorted(months_seen.keys(), reverse=True):
         month_trainings = months_seen[(year, month)]
-
-        # ─ Monthly summary ─
-        sb = SheetBuilder()
-        sb.header_month(year, month, len(month_trainings))
-        sb.blank()
-
-        # Collect all unique players for this month
-        month_votes_all: List[Dict] = []
-        for dt_str, _ in month_trainings:
-            month_votes_all.extend(by_training[dt_str])
-
-        player_month: Dict[str, Dict] = defaultdict(lambda: {"present": 0, "absent": 0, "nick": ""})
-        for v in month_votes_all:
-            full_name, nick = resolve_player(v, players)
-            key = full_name
-            player_month[key]["nick"] = nick
-            if v["vote_type"] == "PRESENT":
-                player_month[key]["present"] += 1
-            elif v["vote_type"] == "ABSENT":
-                player_month[key]["absent"] += 1
-
-        # Per-training day counts for this month (sorted oldest→newest for readability)
-        month_day_counts: List[Tuple[date, int, int]] = []
-        for dt_str, d in sorted(month_trainings, key=lambda x: x[1]):
-            tvotes = by_training[dt_str]
-            p_cnt  = sum(1 for v in tvotes if v["vote_type"] == "PRESENT")
-            a_cnt  = sum(1 for v in tvotes if v["vote_type"] == "ABSENT")
-            month_day_counts.append((d, p_cnt, a_cnt))
-
-        sb.training_days_line(month_day_counts)
-        sb.blank()
-        sb.summary_table_header()
-        # Sort by attendance desc
-        for pname, pdata in sorted(player_month.items(), key=lambda x: -x[1]["present"]):
-            sb.summary_row(pname, pdata["nick"], pdata["present"], pdata["absent"])
-
-        sb.blank(2)
-        summary_sections.append(sb.rows)
 
         # ─ Detail section: weekly blocks ─
         db = SheetBuilder()
@@ -313,7 +302,7 @@ def build_report(
                 # Sort: present first, then absent
                 ordered = sorted(training_votes, key=lambda v: (0 if v["vote_type"] == "PRESENT" else 1))
                 for v in ordered:
-                    full_name, nick = resolve_player(v, players)
+                    full_name, nick, _key = resolve(v)
                     db.training_person_row(full_name, nick, v["vote_text"], v["vote_type"], v["revotes"])
 
                 db.blank()
@@ -324,12 +313,11 @@ def build_report(
 
     # ── Assemble final output ──
     # Order: all monthly summaries (newest first), then all details (newest first)
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # Сервер живёт по UTC, а подпись обещала МСК — время в шапке врало на 3 часа.
+    now = get_moscow_time().strftime("%d.%m.%Y %H:%M")
     header = [
         [f"ПОСЕЩАЕМОСТЬ ТРЕНИРОВОК · Обновлено: {now} МСК"],
         ["═" * 60],
-        [""],
-        ["СВОДКИ ПО МЕСЯЦАМ"],
         [""],
     ]
 
@@ -340,10 +328,14 @@ def build_report(
         [""],
     ]
 
+    # Сводки строим по ВСЕЙ истории, а не по выбранному периоду: лист
+    # перезаписывается целиком, и фильтр стирал бы прошлые месяцы. Фильтр
+    # оставлен для детальных секций — иначе лист разрастается без предела.
+
+
     all_rows: List[List[str]] = []
     all_rows.extend(header)
-    for sec in summary_sections:
-        all_rows.extend(sec)
+    all_rows.extend(summary_rows_all)
     all_rows.extend(detail_header)
     for sec in detail_sections:
         all_rows.extend(sec)
@@ -386,6 +378,11 @@ def main(
     # Clear sheet and write
     report_ws.clear()
 
+    # Шкала SPARKLINE: формула зависит от номера строки, поэтому метки
+    # подменяем уже после того, как все строки собраны.
+    fill_sparklines(all_rows, attendance_summary.SPARK_TOKEN,
+                    attendance_summary.PCT_COLUMN_INDEX, sheet_locale(spreadsheet))
+
     # Pad rows to equal column count for batch update
     max_cols = max(len(r) for r in all_rows) if all_rows else 1
     padded = [r + [""] * (max_cols - len(r)) for r in all_rows]
@@ -421,6 +418,9 @@ def main(
         pass
 
     apply_formatting(report_ws, all_rows, extra_bold_patterns=["🏀 Тренировка"])
+    # Цветовая шкала на колонку «% посещений»: 0% красный → 100% зелёный.
+    apply_percent_gradient(report_ws, attendance_summary.PCT_COLUMN_INDEX,
+                           len(all_rows), sheet_locale(spreadsheet))
     print(f"\n✅  Отчёт записан: {len(all_rows)} строк → лист '{REPORT_SHEET}'")
 
 

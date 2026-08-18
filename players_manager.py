@@ -238,6 +238,7 @@ class PlayersManager:
                         'telegram_id': record.get('Telegram ID', ''),
                         'birthday': record.get('Дата рождения', ''),
                         'status': record.get('Статус', 'Активный'),
+                        'active_mark': str(record.get('Активность', '')).strip(),
                         'team': record.get('Команда', ''),
                         'added_date': record.get('Дата добавления', ''),
                         'notes': record.get('Примечания', '')
@@ -257,14 +258,19 @@ class PlayersManager:
         return [p for p in all_players if p.get('status', '').lower() == 'активный']
     
     def get_players_with_birthdays_today(self) -> List[Dict[str, Any]]:
-        """Получает игроков с днями рождения сегодня"""
+        """Именинники на сегодня — из ВСЕГО листа «Игроки».
+
+        Поздравляем каждого, кто в листе, независимо от «Активности»: отметка
+        там про оплату тренировок, а не про то, человек с нами или нет.
+        Временно выпавший из состава на день рождения не перестаёт быть
+        своим."""
         try:
-            active_players = self.get_active_players()
+            active_players = self.get_all_players()
             today = datetime.datetime.now()
             today_str = today.strftime("%m-%d")
             
             print(f"📅 Проверяем дни рождения на {today_str}")
-            print(f"👥 Активных игроков: {len(active_players)}")
+            print(f"👥 Игроков в листе: {len(active_players)}")
             
             birthday_players = []
             for player in active_players:

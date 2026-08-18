@@ -1,0 +1,24 @@
+[Unit]
+Description=Cloudflare Tunnel to fantasy API (named)
+After=network-online.target basketball-bot.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Туннель pullup-api — ЛОКАЛЬНО УПРАВЛЯЕМЫЙ: маршруты живут в
+# /etc/cloudflared/config.yml, панель их только показывает («This tunnel is
+# locally managed»). Поэтому --config обязателен: без него коннектор
+# подключается, но правил маршрутизации у него нет, и домен отдаёт 1033
+# «Cloudflare Tunnel error». На токен такой туннель переводить нельзя — токен
+# для тех, что заведены в панели (проверено 03.08.2026, потеряли на этом день).
+#
+# В самом config.yml стоит protocol: http2 — QUIC (UDP/7844) у провайдера не
+# живёт: туннель регистрируется и тут же отваливается с «no recent network
+# activity».
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

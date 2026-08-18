@@ -36,21 +36,14 @@ NOPASSWD sudo (git/chown/systemctl/journalctl); **[ты]** — нужен пар
 
 ## D. Фэнтези Mini App (живой бэкенд, бесплатно, без белого IP)
 
-Фронт и API отдаёт сам бот за Cloudflare Tunnel (GitHub Pages не нужен).
+Фронт — статика на GitHub Pages, API отдаёт сам бот наружу через **Tailscale
+Funnel** (`https://botpc.tail5ed4ef.ts.net` → `127.0.0.1:8081`). Адрес постоянный
+и зашит во фронте, поэтому шага «узнать сегодняшний URL» больше нет.
 
-5. **[ты]** Установить cloudflared (разово):
-   ```
-   sudo curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-   sudo chmod +x /usr/local/bin/cloudflared
-   ```
-6. **[ты]** Включить туннель как сервис:
-   ```
-   sudo cp /opt/basketball-bot/deploy/cloudflared-fantasy.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now cloudflared-fantasy
-   ```
-   Проверить, что появился URL: `cat /opt/basketball-bot/data/fantasy_api_url.txt`
-   (вида `https://xxxx.trycloudflare.com`).
+Cloudflare quick-tunnel убран 30.07.2026: он выдавал новый адрес при каждом
+рестарте, бот запекал его в кнопку, а кнопка живёт до следующего `/start` — и
+регулярно указывала на туннель, которого уже нет. Funnel справляется один.
+
 7. **[ты]** В `/opt/basketball-bot/.env` добавить строку и сохранить:
    ```
    FANTASY_API_ENABLED=true

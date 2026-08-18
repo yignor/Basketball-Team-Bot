@@ -563,7 +563,8 @@ async def main(team_ids: List[int], out_file: str, send_tg: bool) -> None:
 
     if send_tg and BOT_TOKEN and CHAT_ID:
         from telegram import Bot
-        bot = Bot(token=BOT_TOKEN)
+        import bot_factory
+        bot = bot_factory.make_bot(BOT_TOKEN)
         for raw in CHAT_ID.replace(",", " ").split():
             cid: Any = int(raw) if raw.lstrip("-").isdigit() else raw
             try:

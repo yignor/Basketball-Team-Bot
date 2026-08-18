@@ -1,6 +1,10 @@
 aiohttp>=3.8.0
 beautifulsoup4>=4.9.0
 python-telegram-bot>=20.0
+# Ограничитель скорости отправки (telegram.ext.AIORateLimiter). Ставится
+# отдельным пакетом: в python-telegram-bot это дополнение [rate-limiter].
+# Без него бот работает, но при 429 теряет сообщения — см. bot_factory.py.
+aiolimiter>=1.1.0
 lxml>=4.6.0
 python-dotenv>=1.0.0
 telethon>=1.28.0

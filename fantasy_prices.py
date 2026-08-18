@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+"""
+Ранги игроков и движение цены по форме.
+
+Цена нужна режиму «Бюджет»: за 100 очков собираешь пятёрку. Чтобы цена не
+была разовым снимком, ранг игрока меняется по последним играм — но не от
+одного удачного матча:
+
+- у каждого ранга своя полоса цен (бронза 5–14, серебро 15–29, золото 30–49,
+  платина 50–69, элита 70–100);
+- **потолок** — сколько надо набирать за игру, чтобы подняться в следующий ранг;
+- **пол** — ниже какого уровня надо провалиться, чтобы выпасть в предыдущий;
+- пороги СМЕЩЕНЫ друг относительно друга (гистерезис): войти в серебро — 8
+  очков за игру, а выпасть из него — только ниже 6. Иначе игрок на границе
+  прыгал бы туда-обратно после каждой игры.
+
+Пороги посчитаны из той же кривой, которой считались стартовые цены: 8 / 14 /
+21 / 28 фэнтези-очков за игру — это ровно цены 15 / 30 / 50 / 70. То есть
+«потолок ранга» и «нижняя цена следующего» — одно и то же число, просто в
+разных единицах.
+
+Шкалу пересчитывали дважды, и оба раза по одному правилу: **поменял формулу —
+подвинь пороги на столько же**, иначе команда меняет ранги, не изменив игру.
+- 30.07.2026, промахи/фолы/дабл-даблы: новая ≈ 0.92·старой − 1.8, лестница
+  9/16/23/30 стала 7/13/19/26;
+- 30.07.2026, заработанные фолы (+1 за фол на игроке): новая ≈ 1.079·старой +
+  0.39 (в среднем +1.42 очка за игру), лестница 7/13/19/26 стала 8/14/21/28.
+Проверка одна и та же: прогнать последние 5 игр каждого по старой и новой
+шкале — ранг должен совпасть. Во второй раз совпал у всех 20 из 20.
+
+Окна (сколько последних игр смотреть) задаются в админке отдельно для подъёма
+и падения: подняться сложнее — окно длиннее.
+
+Двигается цена только у тех, кто в этой игре ИГРАЛ (см. recalc): форма берётся
+по последним сыгранным матчам, и без этого правила пропустивший месяц получал
+бы повышение в вечер, когда его даже не было в зале.
+"""
+
+import logging
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+BRONZE, SILVER, GOLD = "Бронза", "Серебро", "Золото"
+PLATINUM, ELITE = "Платина", "Элита"
+RANK_ORDER = (BRONZE, SILVER, GOLD, PLATINUM, ELITE)
+
+# (нижняя цена, верхняя цена, порог подъёма, порог падения) — пороги в
+# фэнтези-очках за игру. У бронзы падать некуда, у элиты расти некуда.
+# Лестница ровная: каждый следующий ранг — плюс ~7 очков за игру (8/14/21/28),
+# а порог падения на 2–3 ниже своего порога входа. Этот зазор и есть разница
+# между полом и потолком: на границе игрок не прыгает туда-обратно.
+RANKS: Dict[str, Dict[str, Any]] = {
+    BRONZE:   {"low": 5,  "high": 14,  "up": 8.0,  "down": None},
+    SILVER:   {"low": 15, "high": 29,  "up": 14.0, "down": 6.0},
+    GOLD:     {"low": 30, "high": 49,  "up": 21.0, "down": 11.0},
+    PLATINUM: {"low": 50, "high": 69,  "up": 28.0, "down": 18.0},
+    ELITE:    {"low": 70, "high": 100, "up": None, "down": 24.0},
+}
+
+DEFAULT_UP_GAMES = 5        # подняться — доказать на дистанции
+DEFAULT_DOWN_GAMES = 5      # упасть — тоже не с одного матча
+DEFAULT_STEP = 3            # насколько цена двигается внутри ранга за игру
+
+
+def settings(season: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Настройки движения цен (окна и шаг) — из настроек сезона."""
+    import fantasy
+    s = fantasy.season_settings(season or {})
+
+    def num(key: str, default: int, lo: int, hi: int) -> int:
+        try:
+            return max(lo, min(hi, int(s.get(key) or default)))
+        except (TypeError, ValueError):
+            return default
+
+    return {"up_games": num("rank_up_games", DEFAULT_UP_GAMES, 1, 20),
+            "down_games": num("rank_down_games", DEFAULT_DOWN_GAMES, 1, 20),
+            "step": num("price_step", DEFAULT_STEP, 1, 25),
+            # Дата, с которой считаем игры для движения цены. Пусто — считаем
+            # всю историю (как было). Ставится кнопкой в админке в тот момент,
+            # когда тренер закончил проставлять цены руками.
+            "since": str(s.get("price_since") or "")}
+
+
+def rank_of(price: Any) -> str:
+    """Ранг по цене. Цена вне полос (тренер поставил своё) — ближайший ранг."""
+    try:
+        value = int(price)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    for name in reversed(RANK_ORDER):
+        if value >= RANKS[name]["low"]:
+            return name
+    return BRONZE
+
+
+def neighbour(rank: str, up: bool) -> Optional[str]:
+    try:
+        i = RANK_ORDER.index(rank)
+    except ValueError:
+        return None
+    j = i + (1 if up else -1)
+    return RANK_ORDER[j] if 0 <= j < len(RANK_ORDER) else None
+
+
+def form_fp(refs: List[str], games: int, since: str = "") -> Tuple[float, int]:
+    """(среднее фэнтези-очков за игру по последним N играм, сколько игр нашли).
+
+    Игрок может числиться в двух лигах — берём его игры из обеих и сортируем
+    по дате: форма про человека, а не про турнир.
+
+    `since` — точка отсчёта: игры раньше неё не считаются вовсе. Нужна, когда
+    тренер выставил цены руками и хочет, чтобы они держались, пока человек не
+    отыграет полное окно ЗАНОВО. Без неё первый же пересчёт двинул бы игрока
+    по старым играм, которых цена и так уже учитывает."""
+    import fantasy_stats
+    import sheets_cache
+    sheets_cache.init_db()
+    rows: List[Dict[str, Any]] = []
+    where = "AND game_date >= ?" if since else ""
+    with sheets_cache.get_connection() as conn:
+        for one in fantasy_stats.expand_refs(refs):
+            src, pid = fantasy_stats.parse_ref(one)
+            args: List[Any] = [src, str(pid)]
+            if since:
+                args.append(since)
+            args.append(games)
+            rows.extend(dict(r) for r in conn.execute(
+                f"""SELECT * FROM game_player_stats
+                    WHERE source = ? AND player_id = ? AND game_date != '' {where}
+                    ORDER BY game_date DESC LIMIT ?""", args))
+    if not rows:
+        return 0.0, 0
+    rows.sort(key=lambda r: r.get("game_date") or "", reverse=True)
+    recent = rows[:games]
+    total = sum(fantasy_stats.fantasy_points(r) for r in recent)
+    return round(total / len(recent), 2), len(recent)
+
+
+def next_price(price: Any, refs: List[str],
+               season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Новая цена игрока после игры: {price, rank, moved, reason}.
+
+    Ранг меняется только по форме и только при полном окне: пока игр меньше,
+    чем окно, двигать человека не на чем — цена стоит. Внутри ранга цена
+    ползёт к уровню формы шагом, но не выходит за полосу ранга."""
+    cfg = settings(season)
+    rank = rank_of(price)
+    if not rank:
+        return {"price": 0, "rank": "", "moved": 0, "reason": "нет цены"}
+    try:
+        cur = int(price)
+    except (TypeError, ValueError):
+        return {"price": 0, "rank": "", "moved": 0, "reason": "нет цены"}
+
+    band = RANKS[rank]
+    up_fp, up_n = form_fp(refs, cfg["up_games"], cfg.get("since", ""))
+    down_fp, down_n = form_fp(refs, cfg["down_games"], cfg.get("since", ""))
+
+    # Подъём: форма держит потолок ранга на всём окне.
+    if band["up"] is not None and up_n >= cfg["up_games"] and up_fp >= band["up"]:
+        higher = neighbour(rank, up=True)
+        if higher:
+            new = RANKS[higher]["low"]
+            return {"price": new, "rank": higher, "moved": new - cur,
+                    "reason": f"форма {up_fp} за {up_n} игр — выше потолка {band['up']}"}
+
+    # Падение: форма ниже пола ранга на всём окне.
+    if band["down"] is not None and down_n >= cfg["down_games"] and down_fp < band["down"]:
+        lower = neighbour(rank, up=False)
+        if lower:
+            new = RANKS[lower]["high"]
+            return {"price": new, "rank": lower, "moved": new - cur,
+                    "reason": f"форма {down_fp} за {down_n} игр — ниже пола {band['down']}"}
+
+    # Игр в базе нет вообще (новичок, травма, ещё не выкачали box-score) —
+    # цена стоит. Иначе «форма 0» утащила бы человека на дно ранга за пару
+    # пересчётов просто потому, что о нём ничего не известно.
+    if not up_n and not down_n:
+        return {"price": cur, "rank": rank, "moved": 0, "reason": "нет игр"}
+
+    # Внутри ранга цена двигается с ПЕРВОЙ же игры: сыграл хуже — подешевел,
+    # сыграл лучше — подорожал. Точка отсчёта держит только смену ранга: для
+    # неё окно должно набраться заново (проверки выше), и ближайшая игра идёт
+    # первой из пяти, а не пятой.
+
+    # Ранг тот же: цена подтягивается к форме внутри полосы.
+    target = _price_for_fp(up_fp if up_n else down_fp)
+    target = max(band["low"], min(band["high"], target))
+    step = cfg["step"]
+    new = cur + max(-step, min(step, target - cur))
+    new = max(band["low"], min(band["high"], int(round(new))))
+    return {"price": new, "rank": rank, "moved": new - cur,
+            "reason": "движение внутри ранга" if new != cur else "без изменений"}
+
+
+def _price_for_fp(fp: float) -> int:
+    """Фэнтези-очки за игру -> цена по тем же порогам, что и ранги.
+
+    Между узлами (8→15, 14→30, 21→50, 28→70) считаем линейно: точнее кривой
+    здесь не нужно, цена всё равно двигается шагом."""
+    points = [(0.0, 5), (8.0, 15), (14.0, 30), (21.0, 50), (28.0, 70), (38.0, 100)]
+    if fp <= points[0][0]:
+        return points[0][1]
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        if fp <= x2:
+            k = (fp - x1) / (x2 - x1) if x2 > x1 else 0
+            return int(round(y1 + k * (y2 - y1)))
+    return points[-1][1]
+
+
+def describe(season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Пороги и окна для экрана правил и админки."""
+    cfg = settings(season)
+    return {
+        "up_games": cfg["up_games"], "down_games": cfg["down_games"],
+        "step": cfg["step"], "since": cfg.get("since", ""),
+        "ranks": [{"rank": r, "low": RANKS[r]["low"], "high": RANKS[r]["high"],
+                   "up": RANKS[r]["up"], "down": RANKS[r]["down"]} for r in reversed(RANK_ORDER)],
+    }
+
+
+# ── Пересчёт цен по итогам игры ───────────────────────────────────────────
+#
+# Правило владения столбцом: СТАРТОВАЯ ТОЧКА — то, что стоит в листе сейчас.
+# Бот не помнит «свою» цену и не спорит с тренером: поправил руками — со
+# следующей игры отсчёт пойдёт от новой цифры. Пишем только изменившиеся
+# строки и только столбец «Стоимость».
+
+def recalc(season: Optional[Dict[str, Any]] = None, spreadsheet: Any = None,
+           dry_run: bool = False, source: Optional[str] = None,
+           game_id: Any = None) -> Dict[str, Any]:
+    """Пересчёт цен. {updated, checked, changes: [{name, old, new, reason}]}.
+
+    source/game_id — двигаем ТОЛЬКО тех, кто есть в протоколе этой игры. Цена
+    меняется по итогам матча, в котором человек играл: иначе пропустивший месяц
+    получал повышение по старым играм в тот вечер, когда его даже не было в
+    зале. Без игры (ручной прогон из админки) пересчитываются все."""
+    import asyncio
+    import fantasy
+    import fantasy_api
+    import sheets_cache
+
+    season = season or fantasy.get_active_season()
+
+    if spreadsheet is None and not dry_run:
+        import report_common
+        spreadsheet = report_common.init_sheets()
+    if spreadsheet is not None:
+        # Читаем лист заново: правки тренера должны попасть в расчёт ДО того,
+        # как мы посчитаем от них новую цену.
+        sheets_cache.sync_players(spreadsheet)
+
+    prices = sheets_cache.get_player_prices()
+
+    # Кто играл в этой игре. Пустой протокол (статистика ещё не приехала) — не
+    # повод двигать всех: тогда лучше не двигать никого.
+    only: Optional[set] = None
+    if source and game_id:
+        sheets_cache.init_db()
+        with sheets_cache.get_connection() as conn:
+            only = {(source, str(r["player_id"])) for r in conn.execute(
+                "SELECT player_id FROM game_player_stats WHERE source = ? AND game_id = ?",
+                (source, str(game_id)))}
+        if not only:
+            return {"updated": 0, "checked": 0, "dry_run": dry_run, "changes": [],
+                    "skipped": "в протоколе игры нет игроков"}
+
+    try:
+        pool = asyncio.run(fantasy_api.build_pool(force=True, season=season))
+    except RuntimeError:                       # уже внутри event loop
+        loop = asyncio.new_event_loop()
+        try:
+            pool = loop.run_until_complete(fantasy_api.build_pool(force=True, season=season))
+        finally:
+            loop.close()
+
+    # Строка листа -> все ссылки этого человека: одна фамилия может прийти
+    # карточками из двух лиг, а цена у неё одна.
+    by_row: Dict[int, Dict[str, Any]] = {}
+    import fantasy_stats
+    for card in pool:
+        if only is not None and not any(
+                fantasy_stats.parse_ref(one) in only
+                for one in fantasy_stats.expand_refs([card["ref"]])):
+            continue                       # в этой игре не играл — цену не трогаем
+        pr = fantasy_api._lookup_price(card.get("name", ""), prices)
+        row = pr.get("row") or fantasy_api.price_row_of(card["ref"])
+        if not row:
+            continue
+        # Цену берём по строке листа: в процессе крона имён нет, и найти её
+        # по названию карточки («№88») невозможно — раньше на этом весь
+        # пересчёт молча заканчивался ничем.
+        price = int(pr.get("price") or 0)
+        if not price:
+            price = next((v["price"] for v in prices.values()
+                          if v.get("row") == row), 0)
+        if price <= 0:
+            continue
+        item = by_row.setdefault(int(row), {"price": price, "refs": [],
+                                            "name": card.get("name", "")})
+        item["refs"].append(card["ref"])
+
+    changes: List[Dict[str, Any]] = []
+    updates: Dict[int, int] = {}
+    for row, item in by_row.items():
+        res = next_price(item["price"], item["refs"], season)
+        if res["price"] and res["price"] != item["price"]:
+            updates[row] = res["price"]
+            changes.append({"name": item["name"], "old": item["price"],
+                            "new": res["price"], "rank": res["rank"],
+                            "old_rank": rank_of(item["price"]),
+                            "row": row, "ref": (item["refs"] or [""])[0],
+                            "reason": res["reason"]})
+
+    written = 0
+    if updates and not dry_run:
+        written = sheets_cache.write_player_prices(spreadsheet, updates)
+        fantasy_api.invalidate_pool()
+        # Историю пишем только когда цены реально уехали в лист: иначе экран
+        # «что изменилось после игры» показывал бы движения, которых не было.
+        # Ручной прогон (без игры) тоже записываем — иначе тренер жмёт кнопку,
+        # цены меняются, а экран истории остаётся пустым и выглядит сломанным.
+        if source and game_id:
+            _remember(source, str(game_id), changes)
+        else:
+            _remember(MANUAL_SOURCE, datetime.now().strftime("%Y%m%d%H%M"), changes)
+    changes.sort(key=lambda c: abs(c["new"] - c["old"]), reverse=True)
+    if not by_row and not (source and game_id):
+        # Молчаливое «ничего не сделал» — худший исход: цены стоят, а никто не
+        # знает. Раньше так и было: в кроне реестр имён пуст, связок не было.
+        # Для КОНКРЕТНОЙ игры пустота нормальна: это может быть матч чужих
+        # команд, и предупреждать о нём каждые полчаса незачем.
+        logging.getLogger(__name__).warning(
+            "Пересчёт цен: не нашёл ни одного игрока (карточек в пуле %s, "
+            "строк с ценой %s) — цены не двигались", len(pool), len(prices))
+    return {"updated": written, "checked": len(by_row), "dry_run": dry_run,
+            "changes": changes}
+
+
+def _remember(source: str, game_id: str, changes: List[Dict[str, Any]]) -> None:
+    """Кладёт движения цен в price_history — по строке на игрока и игру."""
+    import sheets_cache
+    if not changes:
+        return
+    # У ручного прогона игры нет — датой считаем сегодняшний день, иначе
+    # запись уедет в конец истории с пустой датой.
+    game_date = date.today().isoformat() if source == MANUAL_SOURCE else ""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = None if source == MANUAL_SOURCE else conn.execute(
+            "SELECT game_date FROM game_meta WHERE source = ? AND game_id = ?",
+            (source, game_id)).fetchone()
+        if row:
+            game_date = str(row["game_date"] or "")
+        if not game_date and source != MANUAL_SOURCE:
+            row = conn.execute(
+                "SELECT game_date FROM game_player_stats WHERE source = ? AND game_id = ? LIMIT 1",
+                (source, game_id)).fetchone()
+            game_date = str((row["game_date"] if row else "") or "")
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.executemany(
+            """INSERT OR REPLACE INTO price_history
+               (source, game_id, game_date, player_row, ref, old_price, new_price,
+                old_rank, new_rank, reason, changed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(source, game_id, game_date, int(c.get("row") or 0), c.get("ref", ""),
+              int(c["old"]), int(c["new"]), c.get("old_rank", ""), c.get("rank", ""),
+              c.get("reason", ""), now) for c in changes if c.get("row")])
+        conn.commit()
+
+
+# С этого дня пересчёт запоминает движения цен. Игры раньше него в истории
+# показываем, но честно говорим: изменения тогда не записывались. Восстановить
+# их нечем — старых цен у нас нигде не сохранилось.
+HISTORY_SINCE = "2026-08-03"
+
+# Ручной пересчёт из админки — не игра, но в истории ему место: иначе после
+# нажатия кнопки экран остаётся пустым, будто ничего не произошло.
+MANUAL_SOURCE = "manual"
+
+
+def history(teams: Optional[List[Tuple[str, str]]] = None,
+            limit_games: int = 15) -> List[Dict[str, Any]]:
+    """Игры наших команд и что после каждой стало с ценами, свежие первыми.
+
+    Показываем ИГРЫ, а не только записанные движения: «изменений нет» — это
+    ответ, а пустой экран со словами «игр не было» — неправда, игры были.
+
+    [{source, game_id, date, home, guest, score, recorded, changes: [...]}].
+    ФИО тут нет — его подставляет тот, кто показывает."""
+    import sheets_cache
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        if teams:
+            marks = " OR ".join(["(source = ? AND team_id = ?)"] * len(teams))
+            params: List[Any] = [x for pair in teams for x in pair]
+            rows = conn.execute(
+                f"""SELECT DISTINCT source, game_id, game_date FROM game_player_stats
+                    WHERE ({marks}) AND game_date != ''
+                    ORDER BY game_date DESC, game_id DESC LIMIT ?""",
+                params + [int(limit_games)]).fetchall()
+        else:
+            # Команды не передали — берём то, по чему хоть что-то записано.
+            rows = conn.execute(
+                """SELECT source, game_id, MAX(game_date) AS game_date
+                   FROM price_history GROUP BY source, game_id
+                   ORDER BY game_date DESC LIMIT ?""", (int(limit_games),)).fetchall()
+
+        seen = {(str(r["source"]), str(r["game_id"])) for r in rows}
+        extra = conn.execute(
+            """SELECT source, game_id, MAX(game_date) AS game_date
+               FROM price_history GROUP BY source, game_id
+               ORDER BY game_date DESC LIMIT ?""", (int(limit_games),)).fetchall()
+        rows = list(rows) + [r for r in extra
+                             if (str(r["source"]), str(r["game_id"])) not in seen]
+        rows.sort(key=lambda r: str(r["game_date"] or ""), reverse=True)
+
+        out = []
+        for g in rows[:limit_games]:
+            src, gid = str(g["source"]), str(g["game_id"])
+            changes = conn.execute(
+                """SELECT * FROM price_history WHERE source = ? AND game_id = ?
+                   ORDER BY ABS(new_price - old_price) DESC""", (src, gid)).fetchall()
+            meta = conn.execute(
+                """SELECT home_name, guest_name, home_score, guest_score
+                   FROM game_meta WHERE source = ? AND game_id = ?""",
+                (src, gid)).fetchone()
+            date_str = str(g["game_date"] or "")
+            out.append({
+                "source": src, "game_id": gid, "date": date_str,
+                "home": str((meta["home_name"] if meta else "") or ""),
+                "guest": str((meta["guest_name"] if meta else "") or ""),
+                "score": (f"{meta['home_score']}:{meta['guest_score']}"
+                          if meta and (meta["home_score"] or meta["guest_score"]) else ""),
+                # Записывали ли мы движения на момент этой игры.
+                "recorded": bool(changes) or date_str >= HISTORY_SINCE,
+                "changes": [{"row": int(r["player_row"]), "ref": str(r["ref"] or ""),
+                             "old": int(r["old_price"]), "new": int(r["new_price"]),
+                             "old_rank": str(r["old_rank"] or ""),
+                             "new_rank": str(r["new_rank"] or ""),
+                             "reason": str(r["reason"] or "")} for r in changes],
+            })
+    return out
+
+
+# ── Личный кабинет игрока ─────────────────────────────────────────────────
+#
+# Игрок должен видеть не «цену 63», а понятную дорогу: где он, что держит его
+# здесь и что нужно сделать. Все числа берутся из того же движка, которым бот
+# двигает цену, — иначе кабинет обещал бы одно, а пересчёт делал другое.
+
+def _attach_opponents(games: List[Dict[str, Any]]) -> None:
+    """Дописывает к играм соперника и счёт — из локальной копии протоколов."""
+    import sheets_cache
+    if not games:
+        return
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        for g in games:
+            row = conn.execute(
+                """SELECT home_name, guest_name, home_score, guest_score
+                   FROM game_meta WHERE source = ? AND game_id = ?""",
+                (g.get("source", ""), g.get("game_id", ""))).fetchone()
+            g["title"] = "SLPRO" if g.get("source") == "slpro" else "Инфобаскет"
+            if not row:
+                g["vs"] = ""
+                continue
+            g["vs"] = " — ".join(x for x in (str(row["home_name"] or ""),
+                                             str(row["guest_name"] or "")) if x)
+            if row["home_score"] or row["guest_score"]:
+                g["score"] = f"{row['home_score']}:{row['guest_score']}"
+
+
+def progress(price: Any, refs: List[str],
+             season: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Где игрок и что ему нужно: ранг, форма, сколько до подъёма и падения."""
+    import fantasy_stats
+    import sheets_cache
+
+    # Одиночную ссылку принимаем как есть: строка развернулась бы посимвольно.
+    if isinstance(refs, str):
+        refs = [refs]
+    cfg = settings(season)
+    rank = rank_of(price)
+    try:
+        cur = int(price)
+    except (TypeError, ValueError):
+        cur = 0
+    if not rank:
+        return {"found": False, "reason": "нет цены"}
+    band = RANKS[rank]
+
+    # Последние игры человека — по ним считается всё остальное.
+    sheets_cache.init_db()
+    rows: List[Dict[str, Any]] = []
+    window = max(cfg["up_games"], cfg["down_games"])
+    with sheets_cache.get_connection() as conn:
+        for one in fantasy_stats.expand_refs(refs):
+            src, pid = fantasy_stats.parse_ref(one)
+            rows.extend(dict(r) for r in conn.execute(
+                """SELECT * FROM game_player_stats
+                   WHERE source = ? AND player_id = ? AND game_date != ''
+                   ORDER BY game_date DESC LIMIT ?""", (src, str(pid), window)))
+    rows.sort(key=lambda r: r.get("game_date") or "", reverse=True)
+    weights = None
+    if season:
+        import fantasy
+        weights = fantasy.season_weights(season)
+    # Полная строка игрока, а не только очки: кабинет должен отвечать на
+    # «почему у меня столько», а для этого нужна сама игра, а не её итог.
+    games = []
+    for r in rows[:window]:
+        games.append({
+            "date": r.get("game_date", ""),
+            "fp": fantasy_stats.fantasy_points(r, weights),
+            "source": r.get("source", ""),
+            "game_id": str(r.get("game_id", "")),
+            "pts": int(r.get("pts") or 0), "reb": int(r.get("reb") or 0),
+            "ast": int(r.get("ast") or 0), "stl": int(r.get("stl") or 0),
+            "blk": int(r.get("blk") or 0), "tur": int(r.get("tur") or 0),
+            "mins": int(r.get("secs") or 0) // 60,
+            "fgm": int(r.get("fgm") or 0), "fga": int(r.get("fga") or 0),
+            "tpm": int(r.get("tpm") or 0), "tpa": int(r.get("tpa") or 0),
+            "ftm": int(r.get("ftm") or 0), "fta": int(r.get("fta") or 0),
+        })
+    _attach_opponents(games)
+
+    up_fp, up_n = form_fp(refs, cfg["up_games"], cfg.get("since", ""))
+    down_fp, down_n = form_fp(refs, cfg["down_games"], cfg.get("since", ""))
+    higher, lower = neighbour(rank, up=True), neighbour(rank, up=False)
+
+    def need_next(threshold: Optional[float], games_n: int) -> Optional[float]:
+        """Сколько набрать в СЛЕДУЮЩЕЙ игре, чтобы среднее окна вышло на порог.
+
+        Окно скользит: самая старая игра из него выпадает, поэтому считаем от
+        суммы последних (N-1), а не от текущего среднего."""
+        if threshold is None:
+            return None
+        kept = [g["fp"] for g in games[:games_n - 1]]
+        if len(kept) < games_n - 1:
+            return None                    # игр ещё не хватает — окно не полное
+        return round(threshold * games_n - sum(kept), 1)
+
+    return {
+        "found": True,
+        "price": cur, "rank": rank, "low": band["low"], "high": band["high"],
+        "up_rank": higher, "down_rank": lower,
+        "up_threshold": band["up"], "down_threshold": band["down"],
+        "up_games": cfg["up_games"], "down_games": cfg["down_games"], "step": cfg["step"],
+        "form_up": up_fp, "form_up_games": up_n,
+        "form_down": down_fp, "form_down_games": down_n,
+        "need_up_next": need_next(band["up"], cfg["up_games"]),
+        "keep_next": need_next(band["down"], cfg["down_games"]),
+        "games": games,
+        # Что бот сделает с ценой после ближайшей игры при нынешней форме —
+        # тот же самый вызов, никакой отдельной «витринной» математики.
+        "next": next_price(cur, refs, season),
+    }
+

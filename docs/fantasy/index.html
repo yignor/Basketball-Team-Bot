@@ -1,0 +1,2368 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Фэнтези</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #fff);
+      --text: var(--tg-theme-text-color, #000);
+      --hint: var(--tg-theme-hint-color, #999);
+      --button: var(--tg-theme-button-color, #2481cc);
+      --button-text: var(--tg-theme-button-text-color, #fff);
+      --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    /* Снизу оставляем место под плашку сохранения (#saveBar) и под «безопасную
+       зону» айфона (полоска home indicator). Иначе плашка налезает на
+       последние карточки и обрезает их. */
+    body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); font-size: 16px;
+      padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px)); }
+    header { padding: 14px 16px 6px; }
+    h1 { font-size: 18px; margin: 0 0 2px; }
+    .sub { color: var(--hint); font-size: 13px; }
+    .tabs { display: flex; gap: 8px; padding: 8px 16px; }
+    .tab { flex: 1; text-align: center; padding: 9px; border-radius: 10px;
+      background: var(--secondary-bg); color: var(--text); font-weight: 600;
+      cursor: pointer; border: none; font-size: 15px; }
+    .tab.active { background: var(--button); color: var(--button-text); }
+    .bar { display: flex; align-items: center; gap: 10px; padding: 4px 16px 8px;
+      flex-wrap: wrap; row-gap: 6px; }
+    /* В админке рядов кнопок много и подписи турниров длинные — без
+       переноса они уезжали за край экрана и были недоступны. */
+    #adminBody .bar { flex-wrap: wrap; }
+    /* Категорий пять, и в один ряд они не влезали — уезжали за край экрана.
+       Тот же перенос нужен ряду фильтров: рангов столько же. */
+    #catBar, #filterBar { flex-wrap: wrap; row-gap: 6px; }
+    #filterBar .chip.on { background: var(--button); color: var(--button-text); }
+    /* В бюджетном режиме в кружке слева стоит ЦЕНА (по ней и собирают состав),
+       а игровой номер уходит к фамилии — он там нужен для узнавания. */
+    .num.cost { font-variant-numeric: tabular-nums; }
+    .jersey { color: var(--hint); font-weight: 700; }
+    #adminBody .chip { white-space: normal; text-align: left; }
+    /* Список игроков в админке — свёрнутый, иначе карточка лиги разъезжается. */
+    .adm-players { margin: 6px 0; }
+    /* Редактор начислений: подпись слева, число справа. Инпуты узкие —
+       коэффициенты короткие, а на телефоне важнее видеть подписи целиком. */
+    .wrow { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+    .wrow span { flex: 1; font-size: 14px; }
+    .wrow input { width: 76px; text-align: center; padding: 6px; border-radius: 8px;
+      border: 1px solid var(--hint); background: var(--bg); color: var(--text); }
+    .wrow input.zero { opacity: .55; }
+    .wnote { color: var(--hint); font-size: 12px; padding: 4px 0 8px; }
+    .adm-players > summary { cursor: pointer; font-size: 13px; padding: 6px 0; color: var(--hint); }
+    .adm-players .card { padding: 6px 8px; }
+    .plinks a { color: var(--button); text-decoration: none; }
+    /* Значок карточки игрока рядом с именем + цена в строке статистики. */
+    .tier { margin-right: 4px; }
+    .price { color: var(--text); }
+    .tier-elite { filter: drop-shadow(0 0 3px #ff9d3d); }
+    .tier-plat  { filter: drop-shadow(0 0 2px #7fd3ff); }
+    .tier-gold  { filter: drop-shadow(0 0 2px #ffd76a); }
+    /* Карточка игрока. Цвет — от ранга; фон полупрозрачный поверх обычного,
+       чтобы карточка одинаково читалась и в светлой, и в тёмной теме
+       Telegram (её тему нам задают переменными, своих цветов фона нет). */
+    .c2 { --accent: #9aa0a6; border-radius: 14px; padding: 12px 14px; margin: 4px 0 12px;
+      background: var(--secondary-bg); border: 1px solid var(--secondary-bg); }
+    /* color-mix понимают не все вебвью. Он идёт ВТОРЫМ объявлением: старый
+       браузер молча отбросит эту строку и оставит фон выше, а не покажет
+       карточку без фона и границы вовсе. */
+    .c2 { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 26%, transparent),
+        color-mix(in srgb, var(--accent) 6%, transparent)), var(--secondary-bg);
+      border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+    .c2.t-elite { --accent: #ff9d3d; }
+    .c2.t-plat  { --accent: #7fd3ff; }
+    .c2.t-gold  { --accent: #ffd76a; }
+    .c2.t-silver{ --accent: #c8ccd0; }
+    .c2.t-bronze{ --accent: #cd7f32; }
+    .c2-top { display: flex; align-items: center; gap: 12px; }
+    .c2-rate { text-align: center; min-width: 62px; padding: 6px 8px; border-radius: 10px;
+      background: var(--bg); }
+    .c2-rate { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+    .c2-rate b { display: block; font-size: 30px; line-height: 1; }
+    .c2-rate span { font-size: 10px; color: var(--hint); text-transform: uppercase; }
+    .c2-name { font-size: 17px; font-weight: 600; }
+    .c2-sub { font-size: 12px; color: var(--hint); margin-top: 2px; }
+    .c2-bars { margin-top: 12px; display: grid; gap: 6px; }
+    .c2-bar { display: grid; grid-template-columns: 74px 1fr 34px; align-items: center; gap: 8px;
+      font-size: 12px; }
+    .c2-bar span { color: var(--hint); }
+    .c2-bar u { display: block; height: 6px; border-radius: 3px; text-decoration: none;
+      background: var(--bg); }
+    .c2-bar u { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+    .c2-bar u i { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+    .c2-bar b { text-align: right; }
+    .c2-note { font-size: 11px; color: var(--hint); margin-top: 8px; }
+    /* Строка участника раскрывается в состав, которым он играл. Маркер прячем:
+       с ним summary ломает flex-раскладку строки. */
+    .guess > summary { list-style: none; cursor: pointer; }
+    .guess > summary::-webkit-details-marker { display: none; }
+    .guess-body { margin: -2px 12px 8px; padding: 8px 12px; border-radius: 10px;
+      background: var(--secondary-bg); }
+    .guess-body .pstat + .pstat { margin-top: 8px; }
+    #newSeason { flex-wrap: wrap; }
+    #seasonName { flex: 1; min-width: 160px; background: var(--secondary-bg); color: var(--text);
+      border: none; border-radius: 10px; padding: 9px 12px; font-size: 15px;
+      font-family: inherit; -webkit-appearance: none; }
+    .note { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 13px;
+      line-height: 1.35; background: var(--secondary-bg); color: var(--hint); }
+    /* Счётчик с бюджетом длинный: без запрета переноса он сжимался в столбик
+       из одиночных слов, лишь бы уместиться рядом с кнопкой и сортировкой. */
+    .counter { color: var(--hint); font-size: 14px; flex: 1; white-space: nowrap; }
+    select { background: var(--secondary-bg); color: var(--text); border: none;
+      border-radius: 8px; padding: 7px 8px; font-size: 14px; font-family: inherit; }
+    #search { flex: 1; background: var(--secondary-bg); color: var(--text); border: none;
+      border-radius: 10px; padding: 10px 12px; font-size: 15px; font-family: inherit; -webkit-appearance: none; }
+    .chip { background: var(--secondary-bg); color: var(--hint); border: none;
+      border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap; }
+    .chip.on { background: var(--button); color: var(--button-text); }
+    /* Четыре периода в один ряд не влезают на узком экране — даём горизонтальную
+       прокрутку вместо переноса, чтобы ряд читался как переключатель. */
+    #topPeriods { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .list { padding: 0 12px; }
+    .card { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+      background: var(--secondary-bg); border-radius: 12px; margin: 8px 0;
+      cursor: pointer; border: 2px solid transparent; }
+    .card.sel { border-color: var(--button); }
+    .card.disabled { opacity: .45; }
+    .num { min-width: 34px; height: 34px; border-radius: 8px; background: var(--bg);
+      display: flex; align-items: center; justify-content: center; font-weight: 700;
+      color: var(--hint); flex-shrink: 0; }
+    .card.sel .num { background: var(--button); color: var(--button-text); }
+    .info { flex: 1; min-width: 0; }
+    /* Обрезаться должна ТОЛЬКО фамилия: номер и значок ранга — короткие и
+       нужны целиком, иначе «Шлепикас Роман (7)» превращался в «Шлепикас Р…». */
+    .pname { font-weight: 600; display: flex; align-items: baseline; gap: 4px;
+      min-width: 0; }
+    .pname .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pname .tier, .pname .jersey, .pname .chev { flex-shrink: 0; margin-right: 0; }
+    .pstat { color: var(--hint); font-size: 12px; margin-top: 2px; }
+    .ctrl { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .step { width: 30px; height: 30px; border-radius: 8px; border: none; font-size: 18px;
+      font-weight: 700; line-height: 1; background: var(--bg); color: var(--button);
+      cursor: pointer; padding: 0; }
+    .step:disabled { opacity: .3; cursor: default; }
+    .step.wide { width: auto; padding: 0 12px; font-size: 14px; }
+    .step.del { color: var(--hint); font-size: 15px; }
+    .price-edit { display: flex; align-items: center; gap: 8px; margin: -4px 0 8px;
+      padding: 8px 12px; background: var(--secondary-bg); border-radius: 12px;
+      font-size: 13px; color: var(--hint); }
+    .price-edit input { width: 72px; padding: 6px 8px; border-radius: 8px;
+      border: 1px solid var(--hint); background: var(--bg); color: var(--text);
+      font-size: 15px; }
+    .cnt { min-width: 22px; text-align: center; font-weight: 700; }
+    .cnt.zero { color: var(--hint); font-weight: 400; }
+    .banner { margin: 10px 16px; padding: 12px; border-radius: 10px;
+      background: var(--secondary-bg); color: var(--hint); font-size: 14px; text-align: center; }
+    .rank { display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+      background: var(--secondary-bg); border-radius: 12px; margin: 8px 0; }
+    .place { min-width: 30px; font-weight: 700; color: var(--hint); }
+    .pts { font-weight: 700; }
+    /* Кнопку сохранения рисуем сами, а не нативной MainButton телеграма: та
+       живёт в оболочке клиента и на айфоне уезжает за нижний край экрана.
+       Своя плашка — часть страницы, её видно всегда. Отступ снизу учитывает
+       «безопасную зону» (полоска home indicator). */
+    #saveBar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+      padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+      background: var(--bg); border-top: 1px solid var(--secondary-bg); }
+    #saveBtn { width: 100%; padding: 14px; border: none; border-radius: 12px;
+      background: var(--button); color: var(--button-text); font-size: 16px;
+      font-weight: 600; font-family: inherit; cursor: pointer; }
+    #saveBtn:disabled { opacity: .6; cursor: default; }
+    .hidden { display: none; }
+    /* pre-line — чтобы в сообщениях работали переносы строк. */
+    #msg { text-align: center; color: var(--hint); padding: 40px 16px; white-space: pre-line; }
+    .info { cursor: pointer; }
+    .chev { color: var(--hint); font-size: 12px; margin-left: 4px; }
+    /* Экран игрока */
+    /* Экран игрока перекрывает всё (inset: 0), поэтому свою «безопасную зону»
+       снизу закладывает сам — иначе журнал игр уползает под home indicator. */
+    #player { position: fixed; inset: 0; background: var(--bg); overflow-y: auto;
+      padding-bottom: calc(30px + env(safe-area-inset-bottom, 0px)); z-index: 10; }
+    .phead { display: flex; align-items: center; gap: 10px; padding: 14px 16px 4px; }
+    .back { background: none; border: none; color: var(--button); font-size: 16px;
+      cursor: pointer; padding: 4px 0; }
+    .ptitle { font-size: 19px; font-weight: 700; }
+    .warn { margin: 10px 16px; padding: 10px 12px; border-radius: 10px;
+      background: var(--secondary-bg); font-size: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 12px; }
+    .stat { background: var(--secondary-bg); border-radius: 12px; padding: 10px; text-align: center; }
+    .stat b { display: block; font-size: 19px; }
+    .stat span { color: var(--hint); font-size: 12px; }
+    .sect { padding: 14px 16px 6px; font-weight: 600; color: var(--hint); font-size: 13px;
+      text-transform: uppercase; letter-spacing: .3px; }
+    .row { display: flex; justify-content: space-between; padding: 9px 14px; margin: 6px 12px;
+      background: var(--secondary-bg); border-radius: 10px; font-size: 14px; }
+    .row .d { color: var(--hint); }
+  .gamebar { margin: 8px 0 10px; }
+  .gamebar-title { font-size: 12px; opacity: .65; margin-bottom: 6px; }
+  .gamebar-list { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  .gamebtn { flex: 0 0 auto; padding: 7px 11px; border-radius: 10px; font-size: 13px;
+             border: 1px solid var(--sep, #2a2a2a); background: transparent;
+             color: inherit; white-space: nowrap; }
+  .gamebtn.on { background: var(--accent, #2ea6ff); color: #fff; border-color: transparent; }
+  .tag { font-size: 11px; padding: 1px 5px; border-radius: 6px; margin-left: 5px;
+         vertical-align: middle; }
+  .tag-two { background: rgba(46,166,255,.18); color: var(--accent, #2ea6ff); }
+  .tag-off { background: rgba(255,159,10,.18); color: #ff9f0a; }
+  </style>
+</head>
+<body>
+  <header><h1 id="title">🏀 Фэнтези</h1><div class="sub" id="subtitle"></div></header>
+  <div class="bar hidden" id="leagueBar">
+    <label class="counter" for="league">Лига:</label>
+    <select id="league"></select>
+  </div>
+  <div class="tabs">
+    <button class="tab active" id="tab-draft" onclick="showTab('draft')">Состав</button>
+    <button class="tab" id="tab-table" onclick="showTab('table')">Таблица</button>
+    <button class="tab" id="tab-history" onclick="showTab('history')" title="История">📈</button>
+    <button class="tab hidden" id="tab-me" onclick="showTab('me')" title="Мой кабинет">👤</button>
+    <button class="tab" id="tab-rules" onclick="showTab('rules')" title="Правила">📖</button>
+    <button class="tab hidden" id="tab-admin" onclick="showTab('admin')" title="Настройки">⚙️</button>
+  </div>
+  <div id="draft">
+    <div class="bar hidden" id="modeBar"></div>
+    <div class="note hidden" id="modeNote"></div>
+    <div class="bar hidden" id="catBar"></div>
+    <div class="bar hidden" id="filterBar"></div>
+    <div class="bar">
+      <input id="search" type="search" placeholder="🔎 Поиск по фамилии" autocomplete="off">
+    </div>
+    <div class="note hidden" id="carryNote"></div>
+    <div class="bar">
+      <div class="counter" id="counter"></div>
+      <button class="chip" id="playedChip" onclick="togglePlayed()">Только с играми</button>
+      <select id="sort" aria-label="Сортировка">
+        <option value="fp">Фэнтези-очки</option>
+        <option value="fp_avg">Очки за игру</option>
+        <option value="games">Игры</option>
+        <option value="price">Стоимость</option>
+        <option value="pts">Очки</option>
+        <option value="reb">Подборы</option>
+        <option value="ast">Передачи</option>
+        <option value="stl">Перехваты</option>
+        <option value="blk">Блоки</option>
+        <option value="name">Имя</option>
+      </select>
+    </div>
+    <div id="lockBanner" class="banner hidden">🔒 Идёт игра — состав заморожен. Менять можно будет сразу после результата.</div>
+    <!-- Ставка делается НА ИГРУ: список игроков в ней — те, кого тренер на эту
+         игру заявил, а не вся лига. Полоса появляется, только когда открытых
+         игр больше нуля. -->
+    <div id="gameBar" class="gamebar hidden">
+      <div class="gamebar-title">На какую игру ставишь</div>
+      <div id="gameList" class="gamebar-list"></div>
+    </div>
+    <div class="list" id="pool"></div>
+    <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
+    <div id="poolNote" class="banner hidden"></div>
+  </div>
+  <div id="table" class="hidden">
+    <div class="tabs">
+      <button class="tab active" id="ttab-board" onclick="showTableTab('board')">🏆 Зачёт</button>
+      <button class="tab" id="ttab-players" onclick="showTableTab('players')">🏀 Игроки</button>
+      <button class="tab" id="ttab-guess" onclick="showTableTab('guess')">🎯 Угадали</button>
+    </div>
+    <div class="bar hidden" id="topPeriods">
+      <button class="chip on" data-period="last" onclick="showTop('last')">Последняя игра</button>
+      <button class="chip" data-period="week" onclick="showTop('week')">Неделя</button>
+      <button class="chip" data-period="month" onclick="showTop('month')">Месяц</button>
+      <button class="chip" data-period="all" onclick="showTop('all')">Всё время</button>
+    </div>
+    <div class="bar hidden" id="tableModes"></div>
+    <div class="bar hidden" id="guessModes"></div>
+    <div class="bar"><div class="counter" id="weekLabel"></div></div>
+    <div class="list" id="standings"></div>
+    <div class="list hidden" id="topList"></div>
+    <div class="list hidden" id="guessList"></div>
+  </div>
+  <div id="history" class="hidden">
+    <div class="bar"><div class="counter">Как двигались цены после каждой игры</div></div>
+    <div class="list" id="historyBody"></div>
+  </div>
+  <div id="me" class="hidden">
+    <div class="bar hidden" id="meWho"></div>
+    <div class="list" id="meBody"></div>
+  </div>
+  <div id="rules" class="hidden">
+    <div class="list" id="rulesBody"></div>
+  </div>
+  <div id="player" class="hidden">
+    <div class="phead">
+      <button class="back" onclick="closePlayer()">‹ Назад</button>
+      <div class="ptitle" id="pTitle"></div>
+    </div>
+    <div class="sub" style="padding: 0 16px 6px" id="pSub"></div>
+    <div class="tabs">
+      <button class="tab active" id="ptab-last" onclick="showSlice('last')">Последняя игра</button>
+      <button class="tab" id="ptab-season" onclick="showSlice('season')">Весь турнир</button>
+    </div>
+    <div id="pBody"></div>
+  </div>
+
+  <div id="admin" class="hidden">
+    <div class="bar"><div class="counter">Настройки лиг. Правки применяются сразу.</div></div>
+    <div id="adminBody"></div>
+  </div>
+
+  <div id="saveBar" class="hidden">
+    <button id="saveBtn" onclick="saveRoster()">Сохранить состав</button>
+  </div>
+
+  <div id="msg">Загрузка…</div>
+  <!-- Проверка связи. Показывается по кнопке бота (#diag) и сама — когда до
+       сервера достучаться не удалось: человеку нужна причина, а не «ошибка». -->
+  <div id="diag" class="hidden">
+    <div class="sect">🔌 Проверка связи</div>
+    <div id="diagBody"></div>
+  </div>
+
+<script>
+(function () {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  // Живой бэкенд — Tailscale Funnel, адрес зашит. В ссылке может прийти
+  // переопределение (?api=…) на случай переезда, но обычно его нет.
+  //
+  // Порядок перебора важен и после отказа от Cloudflare-туннеля: ссылку в
+  // кнопке Telegram кеширует до следующего /start, поэтому переопределение в
+  // ней легко оказывается устаревшим — упираться в него, имея рабочий Funnel,
+  // нельзя. Если сервер ОТВЕТИЛ (пусть отказом) — перебор прекращаем: адреса
+  // ведут к одному серверу, его решение от смены адреса не изменится.
+  // Не достучались никуда — приложение уйдёт в запасной режим по #d=.
+  // Две независимые двери к одному серверу. У части игроков провайдер режет
+  // ts.net (проверено 30.07.2026: страница грузится, до API запросы не
+  // доходят вовсе), у кого-то может резаться Cloudflare — поэтому перебираем.
+  // Cloudflare первым: охват шире.
+  const CF = 'https://api.one4two.ru';
+  const FUNNEL = 'https://botpc.tail5ed4ef.ts.net';
+  const API_LIST = [...new Set([
+    (new URLSearchParams(location.search).get('api') || '').replace(/\/+$/, ''),
+    CF, FUNNEL,
+  ])].filter(Boolean);
+  let API = API_LIST[0] || '';
+  // Админ может выключить дверь (например, Cloudflare лёг) — тогда её незачем
+  // пробовать вовсе. Список приходит с той двери, что ответила, и живёт в
+  // localStorage до следующего успешного ответа: в момент отказа спросить
+  // некого, а перебирать заведомо мёртвое — терять по 8 секунд.
+  function savedDoors() {
+    try { return JSON.parse(localStorage.getItem('doors') || 'null'); }
+    catch (e) { return null; }
+  }
+  function rememberDoors(doors) {
+    try { localStorage.setItem('doors', JSON.stringify(doors || [])); } catch (e) {}
+  }
+  // Человек может закрепить свою дверь: у одних режется ts.net, у других
+  // Cloudflare, и порядок по умолчанию подходит не всем. Выбор живёт на
+  // устройстве — это его сеть, а не общая настройка команды.
+  function preferredDoor() {
+    try { return localStorage.getItem('doorPref') || ''; } catch (e) { return ''; }
+  }
+  function setPreferredDoor(url) {
+    try {
+      if (url) localStorage.setItem('doorPref', url);
+      else localStorage.removeItem('doorPref');
+    } catch (e) {}
+  }
+  window.setPreferredDoor = url => { setPreferredDoor(url); runDiag(); };
+
+  function doorOrder() {
+    const saved = savedDoors();
+    const off = new Set((saved || []).filter(d => !d.enabled).map(d => d.url));
+    let live = API_LIST.filter(u => !off.has(u));
+    // Все выключены — значит настройка испорчена; пробуем как обычно.
+    if (!live.length) live = API_LIST.slice();
+    const pref = preferredDoor();
+    // Закреплённую ставим первой, но НЕ единственной: если она сегодня молчит,
+    // человек должен попасть в приложение через вторую, а не упереться в свой
+    // же выбор.
+    if (pref && live.includes(pref)) live = [pref, ...live.filter(u => u !== pref)];
+    return live;
+  }
+  // Сколько ждём ответа на пробе двери, прежде чем идти к следующей.
+  const PROBE_TIMEOUT = 8000;
+
+  let live = false, rosterSize = 3, maxPer = 3, locked = false, inherited = false;
+  let seasonInfo = null;          // сезон целиком — правила берут веса отсюда
+  // Режим сбора состава. Их может быть включено несколько (админка), тогда
+  // человек выбирает перед игрой; при одном включённом переключатель скрыт.
+  let modes = [], mode = 'free', catPick = {}, activeCat = null;
+  let pool = [], counts = {}, standings = [], weekStart = '';
+  // tables — по таблице на режим (живой вход). Запасной отдаёт одну: класть в
+  // кнопку три таблицы — снова упереться в лимит длины клавиатуры.
+  let tables = {}, myMode = '';
+  let search = '', playedOnly = false, isAdmin = false;
+  let seasonId = null, seasons = [];
+
+  const $ = id => document.getElementById(id);
+  // Поиск везде в боте не различает регистр и «ё» — в приложении так же,
+  // иначе «Алёшин» не находится по «алешин».
+  const norm = t => (t || '').toLowerCase().replace(/ё/g, 'е').trim();
+  function msg(t){ const m=$('msg'); m.textContent=t; m.classList.toggle('hidden', !t); }
+
+  // ─── проверка связи ────────────────────────────────────────────────────────
+  //
+  // Страница живёт на GitHub Pages и открывается всегда, а вот до сервера
+  // человек может не дойти: у части провайдеров режется ts.net, у части —
+  // Cloudflare. Отсюда и диагностика: она пробует КАЖДУЮ дверь с устройства
+  // самого человека и показывает, что именно не работает. Это единственное
+  // место, где такое видно: с сервера обе двери всегда «в порядке».
+
+  async function probeDoor(base) {
+    const t0 = Date.now();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT);
+    try {
+      const r = await fetch(base + '/fantasy/ping', {signal: ctl.signal});
+      await r.json().catch(() => ({}));
+      return {ok: r.ok, code: r.status, ms: Date.now() - t0};
+    } catch (e) {
+      return {ok: false, code: 0, ms: Date.now() - t0,
+              why: e.name === 'AbortError' ? 'не ответил вовремя' : 'не достучались'};
+    } finally { clearTimeout(timer); }
+  }
+
+  // Дверь открыта — это ещё не «работает». Дальше сервер должен принять подпись
+  // Telegram и признать человека своим, и именно на этих шагах чаще всего всё
+  // и ломается. Поэтому проверяем ВЕСЬ путь, а не только канал.
+  async function probeAuth(base) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT);
+    try {
+      const r = await fetch(base + '/fantasy/pool', {
+        signal: ctl.signal,
+        headers: {'X-Init-Data': (tg && tg.initData) || ''},
+      });
+      const data = await r.json().catch(() => ({}));
+      return {code: r.status, error: data.error || ''};
+    } catch (e) {
+      return {code: 0, error: e.name === 'AbortError' ? 'таймаут' : 'нет связи'};
+    } finally { clearTimeout(timer); }
+  }
+
+  async function runDiag() {
+    const box = $('diagBody');
+    box.innerHTML = '<div class="pstat">Проверяю…</div>';
+    const rows = [];
+    for (const base of [CF, FUNNEL]) {
+      const r = await probeDoor(base);
+      const name = base === CF ? 'Cloudflare' : 'Tailscale Funnel';
+      const verdict = r.ok ? `✅ отвечает за ${(r.ms / 1000).toFixed(1)} с`
+        : r.code ? `⚠️ ответил кодом ${r.code} за ${(r.ms / 1000).toFixed(1)} с`
+        : `❌ ${r.why} (${(r.ms / 1000).toFixed(1)} с)`;
+      rows.push({name, base, verdict, ok: r.ok});
+    }
+    const alive = rows.find(r => r.ok);
+    const working = rows.filter(r => r.ok).length;
+
+    // Второй шаг: подпись и допуск — по первой живой двери.
+    let auth = null, authLine = '';
+    if (!tg) authLine = '❌ открыто не из Telegram — подписи нет вовсе';
+    else if (!tg.initData) authLine = '❌ Telegram не передал подпись: открывай ' +
+      'приложение кнопкой в боте, а не ссылкой';
+    else if (alive) {
+      auth = await probeAuth(alive.base);
+      authLine = auth.code === 200 ? '✅ подпись принята, данные идут напрямую'
+        : auth.code === 401 ? '❌ сервер не принял подпись (401) — обычно помогает ' +
+          'полностью закрыть приложение и открыть заново'
+        : auth.code === 403 ? '⚠️ сервер узнал тебя, но не пускает в эту лигу (403): '
+          + esc(auth.error || 'нет доступа')
+        : `⚠️ сервер ответил ${auth.code || auth.error}`;
+    }
+
+    const head = !working
+      ? 'Ни один канал не отвечает с этого устройства. Скорее всего режет провайдер — ' +
+        'попробуй мобильный интернет вместо Wi-Fi или наоборот.'
+      : auth && auth.code === 200
+        ? `Всё в порядке: данные идут через ${esc(alive.name)}.`
+        : `Каналы работают (${working} из ${rows.length}), но до данных дело не дошло — ` +
+          'смотри строку про подпись ниже.';
+
+    box.innerHTML = `<div class="banner">${head}</div>` +
+      rows.map(r => {
+        const pinned = preferredDoor() === r.base;
+        return `<div class="card" style="cursor:default">` +
+          `<div class="info"><div class="pname">${r.name}` +
+          (pinned ? ' <span class="pteam">(основной)</span>' : '') + `</div>` +
+          `<div class="pstat">${r.verdict}</div>` +
+          `<div class="pstat plinks">${esc(r.base)}</div></div>` +
+          `<div class="ctrl"><button class="step wide" ` +
+          `onclick='setPreferredDoor(${jattr(pinned ? "" : r.base)})'>` +
+          `${pinned ? 'Сбросить' : 'Сделать основным'}</button></div></div>`;
+      }).join('') +
+      `<div class="sect">Подпись и допуск</div><div class="pstat">${authLine}</div>` +
+      `<div class="bar" style="padding-left:0;margin-top:8px">` +
+      `<button class="chip" onclick="runDiag()">🔄 Проверить ещё раз</button>` +
+      `<button class="chip" onclick="copyDiag()">📋 Скопировать для админа</button></div>`;
+    window.__diag = {rows, authLine, at: new Date().toISOString()};
+  }
+  window.runDiag = runDiag;
+
+  function copyDiag() {
+    const d = window.__diag || {};
+    const text = 'Проверка связи с фэнтези:\n'
+      + (d.rows || []).map(r => `${r.name}: ${r.verdict}`).join('\n')
+      + `\nПодпись: ${(d.authLine || '').replace(/<[^>]+>/g, '')}`
+      + (preferredDoor() ? `\nЗакреплён канал: ${preferredDoor()}` : '');
+    if (navigator.clipboard) navigator.clipboard.writeText(text);
+    if (tg && tg.showAlert) tg.showAlert('Скопировано — пришли это админу.');
+  }
+  window.copyDiag = copyDiag;
+
+  // Тупиковый экран: кроме сообщения показывать нечего. Вкладки и фильтры
+  // прячем — рабочий вид приложения над текстом ошибки только сбивает с толку.
+  function deadEnd(text) {
+    for (const el of [$('leagueBar'), document.querySelector('.tabs'),
+                      $('draft'), $('table'), $('history'), $('admin'), $('saveBar')]) {
+      if (el) el.classList.add('hidden');
+    }
+    msg(text);
+    // Из тупика должен быть выход к причине: человек видит не «что-то пошло не
+    // так», а какой именно канал у него не работает.
+    const d = $('diag');
+    if (d) { d.classList.remove('hidden'); runDiag(); }
+  }
+
+  // Отказ в доступе объясняем с ником, который видит бот: причина почти всегда
+  // в том, что он не совпадает с ником в таблице команды, и увидеть свой ник
+  // прямо в сообщении быстрее, чем выяснять это перепиской с админом.
+  function deniedText() {
+    let u = '';
+    try { u = tg.initDataUnsafe.user.username || ''; } catch (e) {}
+    return '🚫 У тебя нет доступа к фэнтези.\n\n' +
+      'Она открыта только игрокам команды из состава.\n\n' +
+      (u ? `Бот видит тебя как @${u}.\n\n` : '') +
+      'Если ты в составе — попроси администратора сверить твой ник в таблице команды.';
+  }
+  function haptic(t){ try{ tg.HapticFeedback.impactOccurred(t); }catch(e){} }
+  function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  const total = () => Object.values(counts).reduce((a,b)=>a+b, 0);
+
+  // ─── источники данных ──────────────────────────────────────────────────────
+
+  // Быстрая проверка достижимости: без неё недоступный бэкенд заставлял ждать
+  // полный таймаут, а причину («не доходит» или «отвечает, но отказывает»)
+  // было не отличить.
+  // Намеренно без заголовка X-Init-Data: это «простой» запрос, браузер не шлёт
+  // предзапрос. Провал здесь означает именно сеть или DNS, а не CORS.
+  async function reachable() {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5000);
+    try { await fetch(API + '/health', {signal: ctl.signal}); return true; }
+    catch (e) { return false; }
+    finally { clearTimeout(timer); }
+  }
+
+  async function api(path, opts, timeoutMs) {
+    // Выбранную лигу подмешиваем во ВСЕ вызовы — бэкенд считает по ней.
+    if (seasonId) path += (path.indexOf('?') >= 0 ? '&' : '?') + 'season=' + encodeURIComponent(seasonId);
+    const ctl = new AbortController();
+    // Первый заход после простоя поднимает Funnel и идёт заметно дольше обычного,
+    // а на мобильной сети к этому добавляется её собственная задержка. Ждать
+    // 15с здесь означало гарантированно свалиться в запасной режим на рабочем
+    // канале — держим запас.
+    const timer = setTimeout(() => ctl.abort(), timeoutMs || 25000);
+    try {
+      const r = await fetch(API + path, Object.assign({
+        signal: ctl.signal,
+        headers: Object.assign({'X-Init-Data': (tg && tg.initData) || ''},
+                               (opts && opts.body) ? {'Content-Type':'application/json'} : {}),
+      }, opts || {}));
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { const e = new Error('HTTP ' + r.status); e.data = data; throw e; }
+      return data;
+    } finally { clearTimeout(timer); }
+  }
+
+  // Запасной режим: бот кладёт данные в URL — #d=base64url(JSON).
+  function readHashData() {
+    const m = (location.hash || '').match(/[#&]d=([^&]+)/);
+    if (!m) return null;
+    try {
+      let b = m[1].replace(/-/g,'+').replace(/_/g,'/');
+      while (b.length % 4) b += '=';
+      const bytes = Uint8Array.from(atob(b), c => c.charCodeAt(0));
+      return JSON.parse(new TextDecoder('utf-8').decode(bytes));
+    } catch (e) { return null; }
+  }
+
+  const ZERO = {games:0,pts:0,reb:0,ast:0,stl:0,blk:0,tur:0,fp:0,fp_avg:0};
+
+  // Приводим оба формата к одному виду. В запасном режиме ключи сокращены,
+  // чтобы URL Mini App не разрастался.
+  function fromHash(D) {
+    seasonInfo = D.season;
+    rosterSize = D.season.roster_size || 3;
+    maxPer = D.season.max_per_player || rosterSize;
+    locked = !!D.locked;
+    weekStart = D.week_start || '';
+    standings = D.standings || [];
+    pool = (D.pool || []).map(p => {
+      const s = p.s || {};
+      return { ref: p.r, name: p.m || p.r, number: p.n || '', team: '',
+        // Уровень может не приехать (ужатый payload) — выводим из цены сами:
+        // он и так всегда следует за ней, полосы рангов есть в season.ranks.
+        price: p.c || 0, tier: p.t || tierByPrice(p.c || 0),
+        st: {games:s.g||0, pts:s.p||0, reb:s.rb||0, ast:s.a||0,
+             stl:s.s||0, blk:s.b||0, tur:s.t||0, fp:s.f||0,
+             fp_avg: s.g ? Math.round((s.f||0)/s.g*10)/10 : 0},
+        last: {fp: s.lf, date: s.ld} };
+    });
+    for (const r of (D.roster || [])) counts[r] = (counts[r] || 0) + 1;
+    inherited = !!D.inherited;
+    // Кабинет приезжает прямо в кнопке — без живого API он тоже работает.
+    meData = D.me && D.me.found ? D.me : null;
+    $('tab-me').classList.toggle('hidden', !meData);
+    setModes(D.season.modes, D.mode, D.cats);
+    $('subtitle').textContent = D.season.name + ' · формат ' + D.season.format;
+  }
+
+  async function fromApi(timeoutMs) {
+    const [p, r, s] = await Promise.all([
+      api('/fantasy/pool', null, timeoutMs), api('/fantasy/roster', null, timeoutMs),
+      api('/fantasy/standings', null, timeoutMs),
+    ]);
+    if (p.doors) rememberDoors(p.doors);
+    if (!p.season) { msg('Сейчас нет активного сезона фэнтези.'); return false; }
+    // Членство больше не пропуск: играть может любой желающий. Флаг остаётся
+    // в ответе — по нему различаются командные мелочи, а не вход.
+    seasons = p.seasons || [];
+    if (!seasonId) seasonId = p.season.id;   // первый ответ фиксирует лигу
+    renderLeaguePicker();
+    seasonInfo = p.season;
+    rosterSize = p.season.roster_size || 3;
+    maxPer = p.season.max_per_player || rosterSize;
+    isAdmin = !!p.admin;
+    locked = !!r.locked;
+    weekStart = r.week_start || s.week_start || '';
+    standings = s.standings || [];
+    tables = s.tables || {};
+    myMode = s.my_mode || '';
+    pool = (p.pool || []).map(x => ({
+      ref: x.ref, name: x.name || x.ref, number: x.number || '', team: x.team || '',
+      price: x.price || 0, tier: x.tier || '',
+      st: Object.assign({}, ZERO, x.stats || {}),
+      last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
+      excluded: !!x.excluded,
+    }));
+    for (const ref of (r.roster || [])) counts[ref] = (counts[ref] || 0) + 1;
+    inherited = !!r.inherited;
+    setModes(p.season.modes, r.mode, r.cats);
+    $('subtitle').textContent = p.season.name + ' · формат ' + p.season.format;
+    // Кабинет — только тем, кого бот опознал как игрока команды (или админу).
+    $('tab-me').classList.toggle('hidden', !(p.player || p.admin));
+    // Игры — после пула: если открытая игра есть, её заявка заменит общий
+    // список, а недельный набор останется запасным путём.
+    loadGames();
+    return true;
+  }
+
+  // ─── отрисовка ─────────────────────────────────────────────────────────────
+
+  function sortPool() {
+    const key = $('sort').value;
+    // Цена живёт на самом игроке, а не в его статистике: сортировать по ней
+    // надо отдельной веткой, иначе список молча не менял порядок.
+    const val = p => key === 'price' ? (p.price || 0) : (p.st[key] || 0);
+    pool.sort((a, b) => key === 'name'
+      ? a.name.localeCompare(b.name, 'ru')
+      : val(b) - val(a) || a.name.localeCompare(b.name, 'ru'));
+  }
+
+  // Под фамилией — очки за последнюю игру + подсказка тапнуть за подробностями.
+  function statLine(p) {
+    if (!p.st.games) return 'нет сыгранных игр';
+    const lf = p.last && p.last.fp;
+    const head = (lf === null || lf === undefined)
+      ? `${p.st.games} игр · ${p.st.fp} FP`
+      : `Посл. игра: ${lf} FP`;
+    return live ? `${head} · нажми для деталей ›` : head;
+  }
+
+  // Карточка игрока: платина/золото/серебро/бронза — по стоимости из таблицы.
+  // Цену ведёт тренер, поэтому значок обязан браться из данных, а не считаться
+  // на фронте: иначе после ручной правки он разойдётся с ценой.
+  const TIER_ICON = {'Элита': '👑', 'Платина': '💎', 'Золото': '🥇',
+                     'Серебро': '🥈', 'Бронза': '🥉'};
+  const TIER_KEY = {'Элита': 'elite', 'Платина': 'plat', 'Золото': 'gold',
+                    'Серебро': 'silver', 'Бронза': 'bronze'};
+
+  function tierBadge(p) {
+    const icon = TIER_ICON[p.tier];
+    return icon ? `<span class="tier tier-${TIER_KEY[p.tier] || ''}" title="${esc(p.tier)}">${icon}</span>` : '';
+  }
+
+  function priceLabel(p) {
+    return p.price ? `<b class="price">${p.price}</b> · ` : '';
+  }
+
+  function passesFilter(p) {
+    // Убранные админом не показываются никому: вернуть их можно на вкладке ⚙️,
+    // а в общем списке они только мешали выбирать состав.
+    if (p.excluded) return false;
+    // Выбранных всегда показываем, чтобы не терять свой состав из виду.
+    if (counts[p.ref]) return true;
+    if (search && norm(p.name).indexOf(search) < 0) return false;
+    if (playedOnly && !(p.st && p.st.games)) return false;
+    if (tierFilter.size && !tierFilter.has(p.tier)) return false;
+    if (affordable && (p.price || 0) > budget() - spent()) return false;
+    return true;
+  }
+
+  // Ранг — это и есть ценовая полоса (бронза 5–14, серебро 15–29 и так далее),
+  // поэтому фильтр один: чип показывает и ранг, и диапазон. Отдельный список
+  // «ценовых диапазонов» дублировал бы эти же границы.
+  let tierFilter = new Set(), affordable = false;
+
+  // Ранг по цене — те же полосы, что у бота (fantasy_modes.tier_for).
+  function tierByPrice(price) {
+    if (!price) return '';
+    const bands = ((seasonInfo || {}).ranks || {}).ranks || [];
+    for (const b of bands) if (price >= b.low) return b.rank;   // сверху вниз
+    return '';
+  }
+
+  function rankBands() {
+    const info = (seasonInfo && seasonInfo.ranks && seasonInfo.ranks.ranks) || [];
+    if (info.length) return info.map(r => ({rank: r.rank, low: r.low, high: r.high}));
+    // Запасной вход (данные приехали в кнопке, а не из API) — полос не знаем,
+    // собираем список из того, что есть у игроков в пуле.
+    const seen = [];
+    for (const k of Object.keys(TIER_ICON)) if (pool.some(p => p.tier === k)) seen.push({rank: k});
+    return seen;
+  }
+
+  function renderFilterBar() {
+    const bar = $('filterBar');
+    const on = mode === 'budget';
+    bar.classList.toggle('hidden', !on);
+    if (!on) { tierFilter.clear(); affordable = false; return; }
+    const left = budget() - spent();
+    bar.innerHTML = rankBands().map(b => {
+      const band = b.low ? ` ${b.low}–${b.high}` : '';
+      return `<button class="chip${tierFilter.has(b.rank) ? ' on' : ''}" ` +
+        `onclick="toggleTier(${jattr(b.rank)})">${TIER_ICON[b.rank] || ''}${band}</button>`;
+    }).join('') +
+      `<button class="chip${affordable ? ' on' : ''}" onclick="toggleAffordable()">` +
+      `💰 по карману (${left >= 0 ? left : 'перебор'})</button>`;
+  }
+
+  function toggleTier(rank) {
+    haptic('light');
+    tierFilter.has(rank) ? tierFilter.delete(rank) : tierFilter.add(rank);
+    renderFilterBar(); renderPool();
+  }
+  window.toggleTier = toggleTier;
+
+  function toggleAffordable() {
+    haptic('light');
+    affordable = !affordable;
+    renderFilterBar(); renderPool();
+  }
+  window.toggleAffordable = toggleAffordable;
+
+  // ─── ставка на конкретную игру ─────────────────────────────────────────────
+  //
+  // Раньше состав собирался на неделю и играл во всех матчах подряд. Теперь
+  // ставят на игру, а список игроков в ней — заявка тренера на этот матч.
+  // Игры и пул под них считает сервер: сколько у кого матчей и кто с лигой не
+  // сведён — знание базы, приложение получает готовое.
+  let betGames = [], gameKey = '', gamePool = null;
+
+  const keyOf = g => g ? g.source + ':' + g.game_id : '';
+
+  function renderGameBar() {
+    const bar = $('gameBar'), list = $('gameList');
+    bar.classList.toggle('hidden', betGames.length === 0);
+    if (!betGames.length) return;
+    list.innerHTML = '';
+    for (const g of betGames) {
+      const b = document.createElement('button');
+      b.className = 'gamebtn' + (keyOf(g) === gameKey ? ' on' : '');
+      b.textContent = g.label || (g.opponent + ' · ' + g.date);
+      b.onclick = () => { if (keyOf(g) !== gameKey) loadGame(keyOf(g)); };
+      list.appendChild(b);
+    }
+  }
+
+  async function loadGames(preferKey) {
+    if (!live) return;                       // без живого API игр не спросить
+    try {
+      const q = preferKey ? ('?source=' + encodeURIComponent(preferKey.split(':')[0])
+                             + '&game_id=' + encodeURIComponent(preferKey.split(':').slice(1).join(':')))
+                          : '';
+      const r = await api('/fantasy/games' + q);
+      betGames = r.games || [];
+      if (!betGames.length) { renderGameBar(); return; }
+      gameKey = keyOf(r.game);
+      applyGamePool(r);
+    } catch (e) {
+      betGames = []; renderGameBar();        // не сложилось — остаётся недельный набор
+    }
+  }
+
+  const loadGame = key => loadGames(key);
+
+  function applyGamePool(r) {
+    // Пул под игру заменяет общий: ставить можно только на заявленных.
+    gamePool = (r.pool || []).map(x => ({
+      ref: (x.refs || [])[0] || '',
+      refs: x.refs || [],
+      name: x.name || '', number: x.number || '', team: x.team || '',
+      price: x.price || 0, tier: x.tier || '',
+      st: Object.assign({}, ZERO, x.stats || {}),
+      last: {fp: (x.last||{}).fp, date: (x.last||{}).date},
+      games: x.games || 1, unlinked: !!x.unlinked,
+    }));
+    pool = gamePool;
+    counts = {};
+    for (const ref of (r.pick || [])) counts[ref] = (counts[ref] || 0) + 1;
+    const lost = gamePool.filter(p => p.unlinked).length;
+    const note = $('poolNote');
+    note.classList.toggle('hidden', lost === 0);
+    if (lost) note.textContent = '⚠️ ' + lost + ' из состава не нашлись в заявке лиги — '
+      + 'поставить на них нельзя. Скажи тренеру, он поправит написание.';
+    renderGameBar();
+    renderPool();
+    updateCounter();
+  }
+
+  function renderPool() {
+    sortPool();
+    renderFilterBar();
+    const el = $('pool'); el.innerHTML = '';
+    const full = total() >= rosterSize;
+    const visible = pool.filter(passesFilter);
+    $('poolEmpty').classList.toggle('hidden', visible.length > 0);
+    for (const p of visible) {
+      const n = counts[p.ref] || 0;
+      const canAdd = !locked && !full && n < maxPer && !p.unlinked;
+      const c = document.createElement('div');
+      c.className = 'card' + (n ? ' sel' : '') + ((locked || (!n && full)) ? ' disabled' : '');
+      const ctrl =
+        `<button class="step" data-act="dec" ${(!n || locked) ? 'disabled' : ''}>−</button>` +
+        `<span class="cnt${n ? '' : ' zero'}">${n}</span>` +
+        `<button class="step" data-act="inc" ${canAdd ? '' : 'disabled'}>+</button>`;
+      const costMode = mode === 'budget';
+      const badge = costMode
+        ? `<div class="num cost" title="стоимость">${p.price || '—'}</div>`
+        : `<div class="num">${esc(p.number || '—')}</div>`;
+      // Номер — во ВТОРУЮ строку: в первой он отъедал место у фамилии, и
+      // длинные превращались в «Шлепикас Р…». Цена в бюджете уже в кружке,
+      // поэтому в строке статистики её не дублируем.
+      const jersey = costMode && p.number ? `<b class="jersey">№${esc(p.number)}</b> · ` : '';
+      // «×2» — человек заявлен ещё на одну игру и наберёт очки и там; «нет в
+      // лиге» — состав его знает, а заявка лиги нет, ставить не на кого.
+      const tags = (p.games > 1 ? `<span class="tag tag-two">×${p.games}</span>` : '')
+        + (p.unlinked ? '<span class="tag tag-off">нет в лиге</span>' : '');
+      c.innerHTML = badge +
+        `<div class="info"><div class="pname">${tierBadge(p)}` +
+        `<span class="nm">${esc(p.name)}</span>${tags}` +
+        (live ? '<span class="chev">›</span>' : '') + `</div>` +
+        `<div class="pstat">${jersey}${costMode ? '' : priceLabel(p)}` +
+        `${esc(statLine(p))}</div></div>` +
+        `<div class="ctrl">${ctrl}</div>`;
+      const inc = c.querySelector('[data-act=inc]'); if (inc) inc.onclick = e => { e.stopPropagation(); bump(p.ref, +1); };
+      const dec = c.querySelector('[data-act=dec]'); if (dec) dec.onclick = e => { e.stopPropagation(); bump(p.ref, -1); };
+      c.querySelector('.info').onclick = () => openPlayer(p.ref);
+      el.appendChild(c);
+    }
+    updateCounter();
+  }
+
+  // ─── режимы сбора состава ──────────────────────────────────────────────────
+
+  function modeCfg(id) { return (modes || []).find(m => m.id === (id || mode)) || {}; }
+  const budget = () => modeCfg('budget').budget || 100;
+  const spent = () => selectedRefs().reduce((a, r) => a + (byRef(r).price || 0), 0);
+  const byRef = ref => pool.find(p => p.ref === ref) || {};
+
+  function setModes(list, current, cats) {
+    modes = list || [];
+    const ids = modes.map(m => m.id);
+    mode = ids.includes(current) ? current : (ids[0] || 'free');
+    // Режим сохранённого состава: играть можно только в одном, поэтому надо
+    // помнить, откуда человек уходит, если начал собирать в другом.
+    savedMode = ids.includes(current) ? current : '';
+    savedCount = Object.keys(counts).length;
+    catPick = {};
+    const slots = (modeCfg('category').categories || []).map(c => c.id);
+    (cats || []).forEach((c, i) => {
+      const refs = selectedRefs();
+      if (slots.includes(c) && refs[i]) catPick[c] = refs[i];
+    });
+    activeCat = slots.find(c => !catPick[c]) || slots[0] || null;
+    renderModeBar();
+  }
+
+  let savedMode = '', savedCount = 0;
+
+  const modeTitle = id => (modes.find(m => m.id === id) || {}).title || id;
+
+  // Предупреждаем ЗАРАНЕЕ, а не только в момент сохранения: человек должен
+  // понимать, что собирает второй состав ВЗАМЕН первого, а не вдобавок.
+  function renderModeNote() {
+    const el = $('modeNote');
+    const switching = savedCount && savedMode && savedMode !== mode;
+    el.textContent = switching
+      ? `⚠️ У тебя уже собран состав в режиме «${modeTitle(savedMode)}». Играть ` +
+        'можно только в одном: сохранишь этот — прежний сбросится.'
+      : '';
+    el.classList.toggle('hidden', !switching);
+  }
+
+  function renderModeBar() {
+    const bar = $('modeBar');
+    bar.classList.toggle('hidden', (modes || []).length < 2);
+    bar.innerHTML = (modes || []).map(m =>
+      `<button class="chip${m.id === mode ? ' on' : ''}" onclick="pickMode('${m.id}')">` +
+      `${esc(m.title)}</button>`).join('');
+    renderModeNote();
+    renderCatBar();
+  }
+
+  function pickMode(id) {
+    if (id === mode) return;
+    haptic('light');
+    mode = id;
+    counts = {}; catPick = {};      // правила разные — состав собирается заново
+    inherited = false;              // и перенесённым он больше не считается
+    const slots = (modeCfg('category').categories || []).map(c => c.id);
+    activeCat = slots[0] || null;
+    tierFilter.clear(); affordable = false;
+    renderModeBar(); renderPool(); syncButton();
+  }
+  window.pickMode = pickMode;
+
+  // В категорийном режиме место в составе — это категория: выбираешь слот,
+  // потом игрока. Так виднее, за что он будет приносить очки.
+  function renderCatBar() {
+    const bar = $('catBar');
+    const cats = modeCfg('category').categories || [];
+    const on = mode === 'category' && cats.length;
+    bar.classList.toggle('hidden', !on);
+    if (!on) return;
+    bar.innerHTML = cats.map(c => {
+      const who = catPick[c.id] ? byRef(catPick[c.id]).name || '' : '';
+      const label = who ? `${esc(c.title)}: ${esc(who.split(' ')[0])}` : esc(c.title);
+      return `<button class="chip${c.id === activeCat ? ' on' : ''}" ` +
+             `onclick="pickCat('${c.id}')">${label}</button>`;
+    }).join('');
+  }
+
+  function pickCat(id) {
+    haptic('light');
+    if (activeCat === id && catPick[id]) {        // повторное нажатие — очистить
+      delete counts[catPick[id]];
+      delete catPick[id];
+    }
+    activeCat = id;
+    renderModeBar(); renderPool(); syncButton();
+  }
+  window.pickCat = pickCat;
+
+  function assignCategory(ref) {
+    const cats = (modeCfg('category').categories || []).map(c => c.id);
+    if (!cats.length) return;
+    // Один игрок — одна категория: если он уже где-то стоит, снимаем оттуда.
+    for (const c of cats) if (catPick[c] === ref) { delete catPick[c]; delete counts[ref]; }
+    const slot = activeCat && !catPick[activeCat] ? activeCat : cats.find(c => !catPick[c]);
+    if (!slot) return;
+    catPick[slot] = ref;
+    counts[ref] = 1;
+    activeCat = cats.find(c => !catPick[c]) || slot;
+    haptic('medium');
+    renderModeBar(); renderPool(); syncButton();
+  }
+
+  function bump(ref, delta) {
+    if (mode === 'category') {                    // тут плюс/минус не по числу
+      if (locked) return;
+      if (delta > 0) assignCategory(ref);
+      else {
+        for (const c of Object.keys(catPick)) if (catPick[c] === ref) delete catPick[c];
+        delete counts[ref];
+        renderModeBar(); renderPool(); syncButton();
+      }
+      return;
+    }
+    const n = counts[ref] || 0;
+    if (delta > 0) {
+      if (locked || total() >= rosterSize || n >= maxPer) return;
+      counts[ref] = n + 1; haptic('medium');
+    } else {
+      if (locked || !n) return;
+      if (n === 1) delete counts[ref]; else counts[ref] = n - 1;
+      haptic('light');
+    }
+    renderPool(); syncButton();
+  }
+
+  function slots() {
+    const cats = modeCfg('category').categories || [];
+    return mode === 'category' && cats.length ? cats.length : rosterSize;
+  }
+
+  function updateCounter() {
+    let hint = maxPer < rosterSize ? ` · до ${maxPer} на игрока` : '';
+    if (mode === 'budget') {
+      const left = budget() - spent();
+      hint = ` · бюджет ${spent()}/${budget()}` + (left < 0 ? ' — перебор!' : '');
+    } else if (mode === 'category') {
+      hint = ' · по игроку на категорию';
+    }
+    $('counter').textContent = `Выбрано: ${total()} / ${slots()}${hint}`;
+    // Состав живёт, пока его не поменяли: человек должен видеть, что этот
+    // набор перенесён с прошлой игры и уже играет — заново собирать не нужно.
+    //
+    // Цены двигаются после каждой игры, поэтому перенесённый состав может стать
+    // дороже бюджета. Задним числом мы его не ломаем: он уже сыгран этим
+    // набором и продолжает играть. Бюджет проверяется в момент СОХРАНЕНИЯ —
+    // значит подорожание бьёт только по следующей пересборке.
+    const note = $('carryNote');
+    const pricey = inherited && mode === 'budget' && spent() > budget();
+    note.textContent = pricey
+      ? `💹 Твои игроки подорожали (${spent()} из ${budget()}). Состав играет ` +
+        'как есть — но чтобы собрать новый, надо будет уложиться в бюджет.'
+      : (inherited
+          ? '↩️ Состав перенесён с прошлой игры — он играет и дальше, пока ты его не поменяешь.'
+          : '');
+    note.classList.toggle('hidden', !note.textContent);
+  }
+
+  // Плашку показываем только на вкладке состава и только когда набран полный
+  // ростер — на «Таблице» и на экране игрока сохранять нечего.
+  function syncButton() {
+    const onDraft = !$('draft').classList.contains('hidden');
+    const overBudget = mode === 'budget' && spent() > budget();
+    const ready = onDraft && !locked && total() === slots() && !overBudget;
+    $('saveBar').classList.toggle('hidden', !ready);
+  }
+
+  // Состав как плоский список с повторами — порядок пула, чтобы был стабилен.
+  function selectedRefs() {
+    const out = [];
+    for (const p of pool) for (let i = 0; i < (counts[p.ref] || 0); i++) out.push(p.ref);
+    return out;
+  }
+
+  const SAVE_ERRORS = {
+    invalid_roster: 'Неверное число игроков.',
+    over_budget: 'Состав дороже бюджета — замени кого-то на подешевле.',
+    no_price: 'У кого-то из выбранных нет цены — напиши админу.',
+    bad_categories: 'Нужно закрыть каждую категорию.',
+    duplicate_player: 'Один игрок может занимать только одну категорию.',
+    unknown_player: 'В составе есть игрок не из пула.',
+    too_many_copies: 'Слишком много копий одного игрока.',
+    locked: 'Идёт игра — состав заморожен. Менять можно будет сразу после результата.',
+    not_a_member: 'Эта фэнтези-лига пока только для игроков команды.',
+  };
+
+  function confirmModeSwitch() {
+    const text = 'Играть можно только в одном режиме. Состав в режиме ' +
+      `«${modeTitle(savedMode)}» сбросится, в зачёт пойдёт новый.`;
+    return new Promise(resolve => {
+      if (tg && tg.showPopup) {
+        tg.showPopup({title: 'Сменить режим?', message: text.slice(0, 250),
+                      buttons: [{id: 'ok', type: 'destructive', text: 'Сохранить'},
+                                {id: 'no', type: 'cancel'}]},
+                     id => resolve(id === 'ok'));
+      } else if (tg && tg.showConfirm) {
+        tg.showConfirm(text, ok => resolve(!!ok));
+      } else {
+        resolve(window.confirm(text));
+      }
+    });
+  }
+
+  async function saveRoster() {
+    haptic('heavy');
+    if (savedCount && savedMode && savedMode !== mode) {
+      if (!await confirmModeSwitch()) return;
+    }
+    const refs = mode === 'category'
+      ? (modeCfg('category').categories || []).map(c => catPick[c.id])
+      : selectedRefs();
+    const cats = mode === 'category'
+      ? (modeCfg('category').categories || []).map(c => c.id) : [];
+    if (!live) { tg.sendData(JSON.stringify({ refs, mode, cats })); return; }  // Telegram закроет
+    const btn = $('saveBtn');
+    btn.disabled = true; btn.textContent = 'Сохраняю…';
+    try {
+      if (gameKey) {
+        const [src, ...rest] = gameKey.split(':');
+        await api('/fantasy/games', { method: 'POST',
+          body: JSON.stringify({ source: src, game_id: rest.join(':'), refs, mode }) });
+      } else {
+        await api('/fantasy/roster', { method: 'POST', body: JSON.stringify({ refs, mode, cats }) });
+      }
+      inherited = false;
+      savedMode = mode; savedCount = refs.length; renderModeNote();
+      tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
+                                   buttons:[{type:'close'}]}, () => tg.close())
+                   : tg.close();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Сохранить состав';
+      const text = (e.data && SAVE_ERRORS[e.data.error]) || 'Не удалось сохранить. Попробуй ещё раз.';
+      tg.showAlert ? tg.showAlert(text) : alert(text);
+    }
+  }
+  window.saveRoster = saveRoster;
+
+  // ─── экран игрока ──────────────────────────────────────────────────────────
+
+  let P = null, slice = 'last';
+
+  async function openPlayer(ref) {
+    if (!live) { tg && tg.showAlert ? tg.showAlert('Статистика игрока доступна только при связи с ботом.') : 0; return; }
+    haptic('light');
+    $('player').classList.remove('hidden');
+    $('pTitle').textContent = 'Загрузка…';
+    $('pSub').textContent = '';
+    $('pBody').innerHTML = '';
+    $('saveBar').classList.add('hidden');
+    if (tg && tg.BackButton) { tg.BackButton.show(); tg.BackButton.onClick(closePlayer); }
+    try {
+      P = await api('/fantasy/player?ref=' + encodeURIComponent(ref));
+    } catch (e) {
+      $('pTitle').textContent = 'Не удалось загрузить';
+      return;
+    }
+    slice = 'last';
+    renderPlayer();
+  }
+
+  function closePlayer() {
+    $('player').classList.add('hidden');
+    if (tg && tg.BackButton) tg.BackButton.hide();
+    syncButton();
+  }
+  window.closePlayer = closePlayer;
+
+  function showSlice(name) {
+    slice = name;
+    $('ptab-last').classList.toggle('active', name === 'last');
+    $('ptab-season').classList.toggle('active', name === 'season');
+    renderPlayer();
+  }
+  window.showSlice = showSlice;
+
+  function statCard(value, label) {
+    return `<div class="stat"><b>${value}</b><span>${label}</span></div>`;
+  }
+
+  // «5 игр» / «2 игры» / «1 игра» — иначе текст выглядит машинным.
+  function games(n) {
+    const t = Math.abs(n) % 100, o = t % 10;
+    if (t > 10 && t < 20) return n + ' игр';
+    if (o === 1) return n + ' игра';
+    if (o >= 2 && o <= 4) return n + ' игры';
+    return n + ' игр';
+  }
+
+  // Карточка игрока: ранг, цена и пять показателей полосками. Полоски меряем
+  // от ЛУЧШЕГО в пуле (шкала приходит с сервера), а не от выдуманного
+  // потолка: «12 очков за игру» само по себе ни о чём не говорит, а «почти
+  // как у лучшего в команде» — говорит.
+  const CARD_BARS = [['pts', 'Очки'], ['reb', 'Подборы'], ['ast', 'Передачи'],
+                     ['stl', 'Перехваты'], ['blk', 'Блоки']];
+
+  function playerCard(p) {
+    const avg = (p.season && p.season.avg) || {}, scale = p.scale || {};
+    const key = TIER_KEY[p.tier] || '';
+    const bars = CARD_BARS.map(([k, title]) => {
+      const val = +(avg[k] || 0), max = +(scale[k] || 0);
+      const pct = max > 0 ? Math.min(100, Math.round(val / max * 100)) : 0;
+      return `<div class="c2-bar"><span>${title}</span>` +
+        `<u><i style="width:${pct}%"></i></u><b>${val.toFixed(1)}</b></div>`;
+    }).join('');
+    const sub = [p.number ? '№' + p.number : '', p.tier || '', p.tournament || '']
+      .filter(Boolean).map(esc).join(' · ');
+    return `<div class="c2 t-${key}"><div class="c2-top">` +
+      `<div class="c2-rate"><b>${p.price || '—'}</b><span>цена</span></div>` +
+      `<div class="c2-id"><div class="c2-name">${TIER_ICON[p.tier] || ''} ${esc(p.name)}</div>` +
+      `<div class="c2-sub">${sub}</div></div></div>` +
+      `<div class="c2-bars">${bars}</div>` +
+      '<div class="c2-note">Полоска — доля от лучшего в пуле за игру.</div></div>';
+  }
+
+  function renderPlayer() {
+    const s = P.season;
+    $('pTitle').textContent = (P.number ? '№' + P.number + ' ' : '') + P.name;
+    $('pSub').textContent = P.tournament || '';
+    const b = $('pBody');
+
+    // Посещаемость и пропуски показываем в обоих срезах: без них непонятно,
+    // за сколько матчей набраны очки.
+    let html = playerCard(P) +
+      `<div class="warn">Сыграл <b>${s.games}</b> из ${games(s.team_games)} команды` +
+      (s.missed_streak ? ` · пропустил ${games(s.missed_streak)} подряд` : '') + `</div>`;
+
+    if (slice === 'last') {
+      const l = P.last;
+      if (!l) {
+        html += '<div class="banner">В этом турнире ещё не играл</div>';
+      } else {
+        html += `<div class="sect">${l.game_date} · ${l.home ? 'дома' : 'в гостях'} с ` +
+          `${esc(l.opponent || 'соперником')} · ${l.our_score}:${l.their_score}</div>` +
+          '<div class="grid">' +
+          statCard(l.fp, 'фэнтези-очки') + statCard(l.pts, 'очки') + statCard(l.reb, 'подборы') +
+          statCard(l.ast, 'передачи') + statCard(l.stl, 'перехваты') + statCard(l.blk, 'блоки') +
+          statCard(l.tur, 'потери') + statCard(l.fgm + '/' + l.fga, 'броски') +
+          statCard(l.tpm + '/' + l.tpa, 'трёхочковые') +
+          '</div>';
+      }
+    } else {
+      const a = s.avg, pct = v => v === null || v === undefined ? '—' : v + '%';
+      html += '<div class="grid">' +
+        statCard(s.fp, 'фэнтези-очки') + statCard(s.fp_avg, 'FP за игру') + statCard(s.games, 'сыграно') +
+        '</div><div class="sect">В среднем за игру</div><div class="grid">' +
+        statCard(a.pts ?? 0, 'очки') + statCard(a.reb ?? 0, 'подборы') + statCard(a.ast ?? 0, 'передачи') +
+        statCard(a.stl ?? 0, 'перехваты') + statCard(a.blk ?? 0, 'блоки') + statCard(a.tur ?? 0, 'потери') +
+        '</div><div class="sect">Реализация</div><div class="grid">' +
+        statCard(pct(s.fg_pct), 'с игры') + statCard(pct(s.tp_pct), 'трёхочковые') +
+        statCard(pct(s.ft_pct), 'штрафные') +
+        '</div>';
+    }
+
+    if (P.log && P.log.length) {
+      html += '<div class="sect">Последние игры</div>';
+      for (const g of P.log) {
+        html += `<div class="row"><span class="d">${g.game_date}</span>` +
+          `<span>${g.pts} очк · ${g.reb} подб · ${g.ast} пас</span>` +
+          `<b>${g.fp}</b></div>`;
+      }
+    }
+    b.innerHTML = html;
+  }
+
+  let openRank = -1;   // раскрытая история участника
+  // У каждого режима своя таблица: правила разные, и общий зачёт сравнивал бы
+  // несравнимое. Очки остаются в таблице того режима, которым набраны.
+  let tableMode = '';
+
+  function renderTableModes() {
+    const bar = $('tableModes');
+    const ids = Object.keys(tables || {});
+    bar.classList.toggle('hidden', ids.length < 2 || tableTab !== 'board');
+    if (ids.length < 2) { tableMode = ids[0] || ''; return; }
+    if (!ids.includes(tableMode)) tableMode = myMode && ids.includes(myMode) ? myMode : ids[0];
+    bar.innerHTML = ids.map(id =>
+      `<button class="chip${id === tableMode ? ' on' : ''}" ` +
+      `onclick="pickTableMode(${jattr(id)})">${esc(modeTitle(id))}` +
+      `${id === myMode ? ' · ты' : ''}</button>`).join('');
+  }
+
+  function pickTableMode(id) {
+    haptic('light');
+    tableMode = id; openRank = -1;
+    renderStandings();
+  }
+  window.pickTableMode = pickTableMode;
+
+  function renderStandings() {
+    renderTableModes();
+    const el = $('standings'); el.innerHTML = '';
+    const rows = (tables && tables[tableMode]) || standings;
+    $('weekLabel').textContent = (tables && Object.keys(tables).length > 1)
+      ? `Зачёт режима «${modeTitle(tableMode)}»` : 'Общий зачёт лиги';
+    if (!rows.length) { el.innerHTML = '<div class="banner">Пока нет очков</div>'; return; }
+    rows.forEach((row, i) => {
+      const medal = ['🥇','🥈','🥉'][i] || (i + 1) + '.';
+      const div = document.createElement('div'); div.className = 'rank';
+      div.innerHTML = `<div class="place">${medal}</div>` +
+        `<div class="info"><div class="pname">${esc(row.name || 'Участник')}` +
+        ((row.history && row.history.length) ? '<span class="chev">›</span>' : '') + `</div></div>` +
+        `<div class="pts">${row.points}</div>`;
+      div.onclick = () => { openRank = (openRank === i ? -1 : i); renderStandings(); };
+      el.appendChild(div);
+      // История по турам — раскрывается под участником.
+      if (openRank === i && row.history && row.history.length) {
+        for (const h of row.history.slice().reverse()) {
+          const hr = document.createElement('div'); hr.className = 'row';
+          hr.innerHTML = `<span class="d">${esc(h.label || ('Тур с ' + h.week))}</span><b>${h.points}</b>`;
+          el.appendChild(hr);
+        }
+      }
+    });
+  }
+
+  function showTab(name) {
+    for (const t of ['draft', 'table', 'history', 'me', 'rules', 'admin']) {
+      $(t).classList.toggle('hidden', name !== t);
+      $('tab-' + t).classList.toggle('active', name === t);
+    }
+    syncButton();
+    if (name === 'table') showTableTab(tableTab);
+    if (name === 'history') loadHistory();
+    if (name === 'admin') loadAdmin();
+    if (name === 'rules') renderRules();
+    if (name === 'me') loadMe(meRef);
+  }
+  window.showTab = showTab;
+
+  // ─── личный кабинет игрока ─────────────────────────────────────────────────
+  //
+  // Показывает не «цену 63», а дорогу: где человек, что держит его здесь и что
+  // нужно сделать. Все числа приходят из того же движка, которым бот двигает
+  // цену, — обещать одно и делать другое нельзя. Вкладка появляется, только
+  // если бот опознал в человеке игрока команды; админ может открыть чужую.
+
+  let meRef = '';           // пусто — свой кабинет
+  let meData = null;        // кабинет из payload (запасной вход)
+
+  async function loadMe(ref) {
+    const el = $('meBody');
+    el.innerHTML = '<div class="banner">Загружаю…</div>';
+    if (!live) {
+      // Запасной вход: свой кабинет уже приехал в кнопке, чужой без сервера
+      // не посмотреть.
+      el.innerHTML = meData ? meCards(meData)
+        : '<div class="banner">Кабинет откроется, когда бот свяжет тебя с игроком ' +
+          'команды. Нажми /start в чате — кнопка обновится.</div>';
+      return;
+    }
+    let d;
+    try {
+      d = await api('/fantasy/me' + (ref ? '?ref=' + encodeURIComponent(ref) : ''));
+    } catch (e) {
+      el.innerHTML = '<div class="banner">Не удалось загрузить кабинет.</div>';
+      return;
+    }
+    renderMePicker(d);
+    if (!d.found) {
+      el.innerHTML = '<div class="banner">' + (d.reason === 'no_player'
+        ? 'Пока не могу связать тебя с игроком команды. Напиши админу — он ' +
+          'сопоставит тебя со строкой в таблице, и кабинет откроется.'
+        : 'Не нашёл такого игрока.') + '</div>';
+      return;
+    }
+    el.innerHTML = meCards(d);
+  }
+  window.loadMe = loadMe;
+
+  // Админу — выбор, чей кабинет смотреть: вопросы «почему у меня так» приходят
+  // ему, и отвечать вслепую невозможно.
+  function renderMePicker(d) {
+    const bar = $('meWho');
+    bar.classList.toggle('hidden', !isAdmin);
+    if (!isAdmin) return;
+    // Пул отсортирован под вкладку «Состав» (по очкам, цене...) — для выбора
+    // человека это бесполезно, здесь нужен алфавит. Копируем, чтобы не сбить
+    // порядок самого пула.
+    const byName = [...pool].filter(p => !p.excluded)
+      .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    const opts = ['<option value="">— мой кабинет —</option>'].concat(
+      byName.map(p =>
+        `<option value="${esc(p.ref)}"${p.ref === meRef ? ' selected' : ''}>` +
+        `${esc(p.name)}</option>`)).join('');
+    bar.innerHTML = `<select id="meSelect" aria-label="Чей кабинет">${opts}</select>`;
+    $('meSelect').onchange = e => { meRef = e.target.value; loadMe(meRef); };
+  }
+
+  function meCards(d) {
+    const icon = TIER_ICON[d.tier] || '';
+    const inBand = d.high > d.low ? Math.round((d.price - d.low) / (d.high - d.low) * 100) : 0;
+    // Админ смотрит чужой кабинет — обращаться к нему на «ты» в этот момент
+    // странно: тексты переключаются на третье лицо.
+    const you = d.mine !== false;
+
+    // Куда идёт дело: сравниваем форму с порогами своего ранга.
+    let mood = (you ? 'Держишься' : 'Держится') + ' в своём ранге.';
+    if (d.up_threshold !== null && d.form_up >= d.up_threshold)
+      mood = '📈 ' + (you ? 'Идёшь' : 'Идёт') + ' на повышение!';
+    else if (d.down_threshold !== null && d.form_down < d.down_threshold)
+      mood = '📉 Форма ниже пола ранга.';
+
+    const head = ruleCard(`${icon} ${esc(d.name)}${d.number ? ' · №' + esc(d.number) : ''}`,
+      `<b>Цена ${d.price}</b> · ранг «${esc(d.rank)}» (${d.low}–${d.high})<br>` +
+      `Внутри ранга — ${inBand}%.<br><br>${mood}`);
+
+    const form = ruleCard(you ? '📊 Твоя форма' : '📊 Форма игрока',
+      `За последние ${d.form_up_games || 0} ${plural(d.form_up_games || 0, 'игру', 'игры', 'игр')} — ` +
+      `<b>${d.form_up}</b> фэнтези-очков за игру.` +
+      (d.form_up_games < d.up_games
+        ? `<br><br>Для движения ранга нужно ${d.up_games} ` +
+          `${plural(d.up_games, 'игра', 'игры', 'игр')} — сыграно ${d.form_up_games}. ` +
+          'Пока игр меньше, цена стоит: двигать не на чем.'
+        : ''));
+
+    let up = '';
+    if (d.up_rank) {
+      up = ruleCard(`⬆️ До ранга «${esc(d.up_rank)}»`,
+        `Нужно держать <b>${d.up_threshold}</b> очков за игру ` +
+        `${d.up_games} ${plural(d.up_games, 'игру', 'игры', 'игр')} подряд.<br><br>` +
+        (d.need_up_next === null
+          ? 'Пока сыграно мало игр — считать не от чего.'
+          : (d.need_up_next <= 0
+            ? '✅ ' + (you ? 'Ты уже проходишь' : 'Уже проходит') +
+              ': даже слабая игра не собьёт среднее. ' +
+              (you ? 'Сыграй ближайший матч' : 'Ближайший сыгранный матч') +
+              ' — и ранг вырастет.'
+            : `В следующей игре нужно набрать <b>${d.need_up_next}</b> очков — ` +
+              'самая старая игра выпадает из окна, и среднее считается заново.')));
+    } else {
+      up = ruleCard('👑 Выше некуда',
+        (you ? 'Ты в высшем ранге' : 'Игрок в высшем ранге') + '. Осталось только держаться.');
+    }
+
+    let down = '';
+    if (d.down_rank) {
+      down = ruleCard(`⬇️ Чтобы не упасть в «${esc(d.down_rank)}»`,
+        `Провал ниже <b>${d.down_threshold}</b> очков за игру ` +
+        `${d.down_games} ${plural(d.down_games, 'игру', 'игры', 'игр')} подряд — и ранг ниже.<br><br>` +
+        (d.keep_next === null
+          ? 'Пока сыграно мало игр — падение не грозит.'
+          : (d.keep_next <= 0
+            ? `✅ Запас есть: даже 0 очков в следующей игре не уронит ранг.`
+            : `⚠️ В следующей игре нужно набрать хотя бы <b>${d.keep_next}</b>, ` +
+              `иначе ${you ? 'упадёшь' : 'упадёт'}.`)));
+    }
+
+    const next = d.next && d.next.price ? ruleCard('🔮 После ближайшей игры',
+      d.next.price === d.price
+        ? 'При нынешней форме цена не изменится.'
+        : `При нынешней форме цена станет <b>${d.next.price}</b> ` +
+          `(${d.next.price > d.price ? '+' : ''}${d.next.price - d.price}).` +
+          (d.next.rank !== d.rank ? ` Ранг: «${esc(d.next.rank)}».` : '') +
+          '<br><br>Цена меняется только если ' +
+          (you ? 'ты играл' : 'игрок играл') + ' в этой игре.') : '';
+
+    // Каждая игра раскрывается: в списке только дата и очки, а «почему
+    // столько» — внутри. Строкой из шести показателей экран превращался в
+    // простыню, ради которой пришлось бы листать весь кабинет.
+    const games = (d.games || []).length
+      ? '<div class="sect">Последние игры · нажми, чтобы раскрыть</div>' +
+        d.games.map(gameRow).join('')
+      : '';
+
+    return head + form + up + down + next + games;
+  }
+
+  // Показатели за ОДНУ игру — внутри карточки игрока. Имя не `statLine`:
+  // так уже называется строка под фамилией в общем списке, а объявления
+  // функций в одной области видимости затирают друг друга по имени. Второе
+  // молча перекрывало первое, и весь список писал «В протоколе одни нули»
+  // вместо очков за последнюю игру.
+  function gameStatLine(g) {
+    const bits = [];
+    if (g.pts) bits.push(`Очки ${g.pts}`);
+    if (g.reb) bits.push(`Подборы ${g.reb}`);
+    if (g.ast) bits.push(`Передачи ${g.ast}`);
+    if (g.stl) bits.push(`Перехваты ${g.stl}`);
+    if (g.blk) bits.push(`Блоки ${g.blk}`);
+    if (g.tur) bits.push(`Потери ${g.tur}`);
+    return bits.length ? bits.join(' · ') : 'В протоколе одни нули.';
+  }
+
+  function shotLine(g) {
+    const bits = [];
+    if (g.fga) bits.push(`С игры ${g.fgm}/${g.fga}`);
+    if (g.tpa) bits.push(`Трёхочковые ${g.tpm}/${g.tpa}`);
+    if (g.fta) bits.push(`Штрафные ${g.ftm}/${g.fta}`);
+    return bits.join(' · ');
+  }
+
+  function gameRow(g) {
+    const when = `${(g.date || '').slice(8, 10)}.${(g.date || '').slice(5, 7)}`;
+    const head = [when, g.title, g.vs, g.score].filter(Boolean).map(esc).join(' · ');
+    const shots = shotLine(g);
+    const body =
+      `<div class="pstat">${esc(gameStatLine(g))}</div>` +
+      (g.mins ? `<div class="pstat">${g.mins} мин на площадке</div>` : '') +
+      (shots ? `<div class="pstat">${esc(shots)}</div>` : '');
+    return `<details class="guess"><summary class="row">` +
+      `<span>${head}<span class="chev">▾</span></span><b>${g.fp}</b></summary>` +
+      `<div class="guess-body">${body}</div></details>`;
+  }
+
+  // ─── правила ───────────────────────────────────────────────────────────────
+  //
+  // Собираются из настроек сезона, а не пишутся текстом: веса очков и размер
+  // состава админ меняет на ходу, и правила обязаны меняться вместе с ними —
+  // иначе экран начнёт врать в первый же день после правки.
+
+  // Подписи начислений. Каталог живёт на сервере (fantasy_stats.SCORING_KEYS)
+  // и приезжает в админке; здесь — запасной словарь для экрана правил, куда
+  // каталог не передаётся.
+  const WEIGHT_TITLES = {
+    pts: 'Очко', reb: 'Подбор', reb_off: 'Подбор в атаке',
+    reb_def: 'Подбор в защите', ast: 'Передача', stl: 'Перехват',
+    blk: 'Блок-шот', tur: 'Потеря', pf: 'Свой фол', foul_on: 'Фол на тебе',
+    miss: 'Промах с игры', ftmiss: 'Промах штрафного',
+    fgm: 'Попадание с игры', fga: 'Бросок с игры',
+    tpm: 'Трёхочковое попадание', tpa: 'Трёхочковый бросок',
+    ftm: 'Штрафной точный', fta: 'Штрафной бросок',
+    dd: 'Дабл-дабл', td: 'Трипл-дабл', kpi: 'КПИ',
+    plus_minus: 'Плюс-минус', mins: 'Минута на площадке',
+  };
+
+  function rankRules(r) {
+    if (!r || !r.ranks) return '';
+    const rows = r.ranks.map(x =>
+      `<div class="row"><span>${TIER_ICON[x.rank] || ''} ${esc(x.rank)} · ${x.low}–${x.high}</span>` +
+      `<b>${x.up ? '↑ ' + x.up : '—'} / ${x.down ? '↓ ' + x.down : '—'}</b></div>`).join('');
+    return ruleCard('📈 Как меняется цена',
+      'Цена не стоит на месте: после каждой игры бот смотрит твою форму — ' +
+      `сколько фэнтези-очков за игру ты набираешь в среднем.<br><br>` +
+      `<b>Подняться в ранг выше:</b> держать «потолок» своего ранга ` +
+      `${r.up_games} игр подряд.<br>` +
+      `<b>Упасть на ранг ниже:</b> провалиться под «пол» своего ранга ` +
+      `${r.down_games} игр подряд.<br>` +
+      'Пороги разные: чтобы войти в серебро, нужно 9 очков за игру, а чтобы ' +
+      'выпасть из него — провалиться ниже 7. Так игрок на границе не прыгает ' +
+      'туда-обратно после каждого матча.<br><br>' +
+      `Пока ранг тот же, цена ползёт к уровню формы, но не больше чем на ` +
+      `${r.step} за игру и не выходя за полосу ранга. Игр меньше ` +
+      `${r.up_games} — цена стоит: двигать не на чем.<br><br>` +
+      'Пересчёт идёт только по тем, кто в этой игре играл: пропустил матч — ' +
+      'цена не двигается ни вверх, ни вниз.<br><br>' +
+      '<b>Что будет с моим составом?</b> Цены пересчитываются после каждой ' +
+      'игры. Если твои игроки подорожали и состав вылез за бюджет — он всё ' +
+      'равно играет дальше как есть, очки не отнимаются. Бюджет проверяется ' +
+      'только когда ты собираешь состав заново.') +
+      `<div class="sect">Пороги: ↑ подъём / ↓ падение (очков за игру)</div>` + rows;
+  }
+
+  function ruleCard(title, body) {
+    return `<div class="rank" style="display:block">` +
+      `<div class="pname">${title}</div><div class="pstat">${body}</div></div>`;
+  }
+
+  function renderRules() {
+    const el = $('rulesBody');
+    const s = seasonInfo || {};
+    const size = s.roster_size || rosterSize;
+    const per = s.max_per_player || maxPer;
+    const w = s.weights || {};
+    // Нулевые показатели в правила не выносим: список стал полным каталогом,
+    // и половина строк была бы «×0» — шум вместо правил.
+    const keys = Object.keys(w).filter(k => (w[k] || 0) !== 0);
+    const rows = keys.length
+      ? `<div class="sect">Сколько дают действия</div>` + keys.map(k =>
+          `<div class="row"><span>${esc(WEIGHT_TITLES[k] || k)}</span>` +
+          `<b>${w[k] > 0 ? '+' : ''}${w[k]}</b></div>`).join('') +
+        ruleCard('ℹ️ Про брак и дабл-даблы',
+          'Промах с игры и промах штрафного считаются из протокола: попытки ' +
+          'минус попадания. Так дорогим становится не тот, кто много бросает, ' +
+          'а тот, кто попадает.<br><br>' +
+          'Дабл-дабл — два показателя из пяти (очки, подборы, передачи, ' +
+          'перехваты, блок-шоты) по 10 и больше. Трипл-дабл — три и больше, ' +
+          'и он идёт ВМЕСТО дабл-дабла, а не сверх него.')
+      : ruleCard('🧾 Начисления',
+          'Таблица начислений подгрузится, когда приложение свяжется с ботом. ' +
+          'Открой его заново — или нажми /start в чате, чтобы обновить кнопку.');
+
+    const ms = s.modes || [];
+    const modeCards = ms.map(m => {
+      if (m.id === 'budget') {
+        return ruleCard('💰 Режим «Бюджет»',
+          `На каждую игру даётся ${m.budget} очков. За них собираешь состав: ` +
+          'у каждого игрока своя цена — чем результативнее, тем дороже. Очки ' +
+          'начисляются за ВСЕ действия выбранных. Бюджет на следующую игру ' +
+          'выдаётся заново и не копится.');
+      }
+      if (m.id === 'category') {
+        const cats = (m.categories || []).map(c => esc(c.title)).join(', ');
+        return ruleCard('🎯 Режим «По категориям»',
+          `Выбираешь по игроку в каждую категорию: ${cats}. Игрок приносит очки ` +
+          'ТОЛЬКО за свою категорию — остальная его статистика не считается, ' +
+          'один человек — одна категория. Бюджет тут не нужен. ' +
+          'С другими режимами этот не сравнивают: у каждого своя таблица.');
+      }
+      return ruleCard('🏀 Режим «Свободный»',
+        `Состав из ${size} игроков, без бюджета. Одного человека можно взять ` +
+        (per >= size ? 'несколько раз' : `до ${per} раз(а)`) +
+        ' — тогда его очки за игру засчитаются столько раз, сколько слотов ты ' +
+        'ему отдал: два слота — очки идут дважды.');
+    }).join('');
+
+    el.innerHTML =
+      (ms.length > 1
+        ? ruleCard('🎮 Режимы',
+            'Перед игрой выбери, как играть — переключатель наверху вкладки ' +
+            '«Состав». Играть можно только в ОДНОМ режиме: соберёшь состав в ' +
+            'другом — прежний сбросится.<br><br>' +
+            'У каждого режима своя таблица, режимы между собой не соревнуются. ' +
+            'Правила у них разные, и складывать такие очки в один зачёт было бы ' +
+            'нечестно. Уже набранные очки остаются в таблице своего режима.')
+        : '') +
+      modeCards +
+      ruleCard('⏱ Когда меняется',
+        'Состав замораживается со стартовым свистком и оттаивает, когда бот ' +
+        'пришлёт результат игры в чат. Между играми меняй сколько хочешь.') +
+      ruleCard('↩️ Если не поменял',
+        'Состав остаётся прежним и играет следующий матч. Забыл — всё равно ' +
+        'получишь очки, менять каждую неделю не обязательно.') +
+      ruleCard('🧮 Очки',
+        'За каждую игру очки считаются по статистике твоих игроков и ' +
+        'фиксируются навсегда. Задним числом они не пересчитываются: ' +
+        'поменял состав после игры — прошлые очки остаются как были.') +
+      rankRules(s.ranks) +
+      ruleCard('💎 Карточки и цена',
+        'У каждого игрока есть цена — она собрана из его статистики: очки за ' +
+        'игру, где текущий сезон весит больше прошлого. Цвет карточки зависит ' +
+        'только от цены:<br>' +
+        '👑 Элита — 70 и дороже<br>' +
+        '💎 Платина — 50–69<br>' +
+        '🥇 Золото — 30–49<br>' +
+        '🥈 Серебро — 15–29<br>' +
+        '🥉 Бронза — до 14<br>' +
+        'Цена показана в строке под именем. В режиме «Бюджет» именно её и ' +
+        'тратишь; в остальных она просто показывает уровень игрока.') +
+      rows +
+      ruleCard('📊 Где смотреть',
+        'Вкладка «Таблица» — общий зачёт участников. «🔥 Топ» — кто из игроков ' +
+        'принёс больше очков и кто из участников лучше угадал, с их составами.') +
+      ruleCard('❓ Вопросы',
+        'Кнопка «💬 Написать админам» под чатом — предложения и баги туда же.');
+  }
+  window.renderRules = renderRules;
+
+  // ─── админка ───────────────────────────────────────────────────────────────
+  //
+  // Каждая лига правится по своему id. Инлайн-кнопки в чате этого не умели: при
+  // двух активных лигах правка уходила в последнюю, и админ этого не видел.
+
+  async function loadAdmin() {
+    const el = $('adminBody');
+    if (!live) { el.innerHTML = '<div class="banner">Админка доступна только при связи с ботом.</div>'; return; }
+    el.innerHTML = '<div class="banner">Загрузка…</div>';
+    try { renderAdmin(await api('/fantasy/admin')); }
+    catch (e) { el.innerHTML = '<div class="banner">Не удалось открыть админку.</div>'; }
+  }
+
+  // Какие списки игроков раскрыты и где стояла страница. Ответ сервера
+  // перерисовывает всю админку, и без этого после «Убрать» список схлопывался,
+  // а экран прыгал наверх — а убирают обычно нескольких подряд.
+  const openPlayers = new Set();
+
+  async function adminDo(body) {
+    const y = window.scrollY;
+    try {
+      renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(body)}));
+      window.scrollTo(0, y);
+    } catch (e) { tg && tg.showAlert ? tg.showAlert('Не получилось сохранить.') : 0; }
+  }
+  window.adminDo = adminDo;
+
+  // Пересчёт цен руками. Тот же расчёт, что после игры: стартовая точка —
+  // цены из листа «Игроки», поэтому правки тренера не перебиваются, а
+  // становятся новой точкой отсчёта. dry=true — только показать.
+  async function recalcPrices(sid, dry) {
+    const btnText = dry ? 'Считаю…' : 'Пересчитываю…';
+    const el = $('adminBody');
+    el.insertAdjacentHTML('afterbegin', `<div class="pstat" id="recalcWait">${btnText}</div>`);
+    try {
+      const r = await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(
+        {action: 'prices_recalc', season_id: sid, value: dry ? 1 : 0})});
+      renderAdmin(r);
+      const res = r.recalc || {};
+      const lines = (res.changes || []).slice(0, 20).map(c =>
+        `${c.name}: ${c.old} → ${c.new} (${c.rank})`).join('\n');
+      const head = (res.changes || []).length
+        ? (dry ? `Изменится ${res.changes.length} из ${res.checked}:`
+               : `Записано ${res.updated} из ${res.checked}:`)
+        : `Проверено ${res.checked || 0} — двигать некого.`;
+      const msg = head + (lines ? '\n\n' + lines : '');
+      tg && tg.showAlert ? tg.showAlert(msg.slice(0, 380)) : alert(msg);
+    } catch (e) {
+      tg && tg.showAlert ? tg.showAlert('Пересчёт не прошёл.') : 0;
+    } finally {
+      const w = $('recalcWait'); if (w) w.remove();
+    }
+  }
+  window.recalcPrices = recalcPrices;
+
+  // JSON внутри onclick='...' : апостроф в названии («Кубок 'A'») закрывал бы
+  // атрибут и ломал кнопку. Браузер разворачивает сущности до того, как строку
+  // увидит JS, поэтому экранируем тем же esc.
+  const jattr = o => esc(JSON.stringify(o));
+
+  function plural(n, one, few, many) {
+    const a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b > 1 && b < 5) return few;
+    return b === 1 ? one : many;
+  }
+
+  function teamChip(seasonId, t) {
+    const act = t.in_pool ? 'pool_remove' : 'pool_add';
+    // Убираем по team_id, добавляем целиком (нужны source/comp_id для ростера).
+    const val = t.in_pool ? jattr(String(t.team_id)) : jattr(t);
+    return `<button class="chip${t.in_pool ? ' on' : ''}" ` +
+      `onclick='adminDo({action:"${act}",season_id:${seasonId},value:${val}})'>` +
+      `${t.in_pool ? '✅' : '⚪'} ${esc(t.name || (t.source + ':' + t.team_id))}</button>`;
+  }
+
+  function playerRow(seasonId, p) {
+    const act = jattr({action: 'player_toggle', season_id: seasonId, value: p.ref});
+    // У выпавших из заявки вместо имени номер — опознать человека можно только
+    // по ссылке на его профиль в лиге, поэтому ссылки показываем всегда.
+    const links = (p.profiles || []).map(l =>
+      `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>`).join(' · ');
+    const games = p.games ? `${p.games} ${plural(p.games, 'игра', 'игры', 'игр')}` : 'игр нет';
+    return `<div class="card${p.excluded ? ' disabled' : ''}" data-pref="${esc(p.ref)}">` +
+      `<div class="num">${esc(p.number || '—')}</div>` +
+      `<div class="info"><div class="pname">${esc(p.name)}` +
+      (p.off_roster ? ' <span class="pteam">(нет в заявке)</span>' : '') +
+      (p.excluded ? ' <span class="pteam">(убран)</span>' : '') + `</div>` +
+      `<div class="pstat">${esc(p.team || '')} · ${games}` +
+      (p.price ? ` · ${TIER_ICON[p.tier] || ''} цена ${p.price}` : ' · цены нет') +
+      `</div>` +
+      (links ? `<div class="pstat plinks">${links}</div>` : '') + `</div>` +
+      `<div class="ctrl"><button class="step" title="Цена" ` +
+      `onclick='setPrice(${jattr(p.ref)},${seasonId},${p.price || 0})'>💰</button>` +
+      `<button class="step wide" onclick='adminDo(${act})'>` +
+      `${p.excluded ? 'Вернуть' : 'Убрать'}</button></div></div>`;
+  }
+
+  // Цена правится прямо в списке: в попапе Telegram поля ввода нет, поэтому
+  // раскрываем строку под карточкой — так же, как сделан ввод названия сезона.
+  // Пишем всё равно в лист «Игроки»: он остаётся единственным источником, и
+  // следующий автоматический пересчёт оттолкнётся от поставленного тренером.
+  function setPrice(ref, seasonId, cur) {
+    const card = document.querySelector(`[data-pref="${ref}"]`);
+    if (!card) return;
+    const open = card.parentNode.querySelector('.price-edit');
+    if (open && open.dataset.ref === ref) { open.remove(); return; }
+    if (open) open.remove();
+    const box = document.createElement('div');
+    box.className = 'price-edit';
+    box.dataset.ref = ref;
+    box.innerHTML = `<span>Цена 0–100:</span>` +
+      `<input type="number" min="0" max="100" step="1" value="${cur || ''}">` +
+      `<button class="step">✓</button>`;
+    card.after(box);
+    const input = box.querySelector('input');
+    box.querySelector('button').onclick = () => {
+      const v = parseInt(input.value, 10);
+      if (!(v >= 0 && v <= 100)) { input.focus(); return; }
+      box.remove();
+      savePrice(ref, seasonId, v);
+    };
+    input.focus();
+    input.select();
+  }
+  window.setPrice = setPrice;
+
+  async function savePrice(ref, seasonId, value) {
+    const y = window.scrollY;
+    try {
+      renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(
+        {action: 'price_set', season_id: seasonId, ref: ref, value: value})}));
+      window.scrollTo(0, y);
+    } catch (e) {
+      // Отдельное сообщение на каждый случай: «не получилось» вынуждает
+      // гадать, а причины тут разные и лечатся по-разному.
+      const code = (e && e.data && e.data.error) || '';
+      const text = code === 'unknown_row'
+        ? 'Не нашёл этого игрока в листе «Игроки» — цену там ставит строка таблицы. ' +
+          'Если бот только что перезапускался, попробуй через минуту.'
+        : code === 'sheet_write_failed'
+        ? 'Таблица не приняла запись. Проверь доступ бота к листу «Игроки».'
+        : 'Не получилось сохранить цену.';
+      tg && tg.showAlert ? tg.showAlert(text) : alert(text);
+    }
+  }
+
+  function renderAdmin(d) {
+    const el = $('adminBody');
+    el.innerHTML = '';
+    if (!d.seasons || !d.seasons.length) {
+      el.innerHTML = '<div class="banner">Активных лиг нет. Запусти сезон из чат-админки.</div>';
+      return;
+    }
+    const head = document.createElement('div');
+    head.className = 'bar';
+    head.style.padding = '0 0 8px';
+    head.innerHTML = `<button class="chip" onclick="createSeason()">➕ Новый сезон</button>`;
+    el.appendChild(head);
+    const form = document.createElement('div');
+    form.className = 'bar hidden';
+    form.id = 'newSeason';
+    form.innerHTML =
+      `<input id="seasonName" type="text" placeholder="Название, например «Осень 2026»">` +
+      `<select id="seasonFormat"><option value="3x3">3×3</option><option value="5x5">5×5</option></select>` +
+      `<button class="chip on" onclick="submitSeason()">Создать</button>`;
+    el.appendChild(form);
+    for (const s of d.seasons) {
+      const box = document.createElement('div');
+      box.className = 'rank';
+      box.style.display = 'block';
+      // Снятый турнир должен возвращаться: иначе один промах и очки не
+      // считаются, а вернуть нечем.
+      const add = (s.can_add || []).map(sc =>
+        `<button class="chip" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${jattr(sc)}})'>` +
+        `+ ${esc(sc.name || sc.source)}</button>`).join(' ');
+      // Команды пула: тем же тумблером и добавляем, и убираем — «добавить» без
+      // «убрать» уже приводило к тому, что случайно снятую лигу не вернуть.
+      const teams = (s.teams || []).map(t => teamChip(s.id, t)).join(' ');
+      // Режимы участия: набором. Один включённый — переключателя у игроков нет.
+      const md = s.modes || {};
+      const modeChips = (s.all_modes || []).map(m =>
+        `<button class="chip${(md.modes || []).includes(m.id) ? ' on' : ''}" ` +
+        `onclick='adminDo({action:"mode_toggle",season_id:${s.id},value:${jattr(m.id)}})'>` +
+        `${(md.modes || []).includes(m.id) ? '✅' : '⚪'} ${esc(m.title)}</button>`).join(' ');
+      const excludedCount = (s.players || []).filter(p => p.excluded).length;
+      const scopes = (s.scopes || []).map(sc =>
+        `<button class="chip on" onclick='adminDo({action:"scope_toggle",season_id:${s.id},value:${jattr(sc)}})'>` +
+        `${esc(sc.name || (sc.source + " " + (sc.stage_id || sc.season_id || "")))} ✕</button>`).join(' ');
+      box.innerHTML =
+        `<div class="pname">${esc(s.name)}</div>` +
+        `<div class="pstat">формат ${esc(s.format)} · состав ${s.roster_size} · ` +
+        `до ${s.max_per_player} на игрока</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip${s.format === '3x3' ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"format",season_id:${s.id},value:"3x3"})'>3×3</button>` +
+          `<button class="chip${s.format === '5x5' ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"format",season_id:${s.id},value:"5x5"})'>5×5</button>` +
+          `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:1})'>по 1</button>` +
+          `<button class="chip" onclick='adminDo({action:"max_per",season_id:${s.id},value:${s.roster_size}})'>без лимита</button>` +
+        `</div>` +
+        `<div class="pstat">Режимы участия:</div>` +
+        `<div class="bar" style="padding-left:0">${modeChips}</div>` +
+        ((md.modes || []).includes('budget')
+          ? `<div class="pstat">Бюджет на состав из ${s.roster_size} игроков ` +
+            `(самые дорогие стоят по 70–100)</div>` +
+            `<div class="bar" style="padding-left:0">` +
+            (s.roster_size >= 5 ? [100, 150, 200] : [50, 100, 150]).map(v =>
+              `<button class="chip${md.budget === v ? ' on' : ''}" ` +
+              `onclick='adminDo({action:"budget",season_id:${s.id},value:${v}})'>` +
+              `бюджет ${v}</button>`).join(' ') + `</div>` : '') +
+        `<div class="pstat">Движение цен: сколько игр подряд держать форму, ` +
+        `чтобы сменился ранг (↑ вверх, ↓ вниз), и на сколько очков цена ` +
+        `двигается за один пересчёт</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          [3, 5].map(v => `<button class="chip${(s.prices || {}).up_games === v ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"rank_up_games",season_id:${s.id},value:${v}})'>` +
+            `↑ ${v} игр</button>`).join(' ') + ' ' +
+          [3, 5].map(v => `<button class="chip${(s.prices || {}).down_games === v ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"rank_down_games",season_id:${s.id},value:${v}})'>` +
+            `↓ ${v} игр</button>`).join(' ') + ' ' +
+          [1, 3, 5].map(v => `<button class="chip${(s.prices || {}).step === v ? ' on' : ''}" ` +
+            `onclick='adminDo({action:"price_step",season_id:${s.id},value:${v}})'>` +
+            `±${v} за игру</button>`).join(' ') +
+        `</div>` +
+        `<div class="pstat">Доступ: ${s.open_to_all
+            ? 'играть может любой, кто открыл приложение'
+            : 'только игроки команды из листа «Игроки»'}</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip${s.open_to_all ? ' on' : ''}" ` +
+          `onclick='adminDo({action:"open_toggle",season_id:${s.id}})'>` +
+          `${s.open_to_all ? '🔒 Закрыть для команды' : '🌍 Открыть для всех'}</button>` +
+        `</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip" onclick='recalcPrices(${s.id}, true)'>👀 Показать пересчёт</button> ` +
+          `<button class="chip" onclick='recalcPrices(${s.id}, false)'>💰 Пересчитать цены</button>` +
+        `</div>` +
+        // Точка отсчёта: игры до неё в движение цены не идут. Ставится, когда
+        // тренер закончил проставлять цены руками — иначе первый же пересчёт
+        // двинет людей по старой истории, которую цена уже учитывает.
+        `<div class="pstat">Считать игры с: ` +
+          `<b>${(s.prices || {}).since || 'всей истории'}</b>` +
+          ((s.prices || {}).since
+            ? ` — до полного окна (${(s.prices || {}).up_games || 5} игр) цены держатся`
+            : '') + `</div>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip" onclick='adminDo({action:"prices_since",season_id:${s.id}})'>` +
+            `🔒 Цены выставлены — считать с сегодня</button> ` +
+          (((s.prices || {}).since)
+            ? `<button class="chip" onclick='adminDo({action:"prices_since",season_id:${s.id},value:false})'>` +
+              `↺ Считать всю историю</button>` : '') +
+        `</div>` +
+        `<div class="pstat">Чьи игроки в пуле${s.manual_pool ? '' : ' (по умолчанию — наши)'}:</div>` +
+        `<div class="bar" style="padding-left:0">${teams || '<span class="pstat">команд не найдено</span>'}</div>` +
+        `<div class="pstat">Турниры в зачёте${s.manual_scopes ? '' : ' (авто)'}:</div>` +
+        `<div class="bar" style="padding-left:0">${scopes || '<span class="pstat">не выбраны — очки не считаются!</span>'}</div>` +
+        (add ? `<div class="pstat">Можно добавить:</div><div class="bar" style="padding-left:0">${add}</div>` : '') +
+        weightsBlock(s, d) +
+        `<details class="adm-players" data-season="${s.id}"` +
+        `${openPlayers.has(s.id) ? ' open' : ''}>` +
+        `<summary>Игроки пула: ${(s.players || []).length}` +
+        `${excludedCount ? ` · убрано ${excludedCount}` : ''}</summary>` +
+        (s.players || []).map(p => playerRow(s.id, p)).join('') + `</details>` +
+        `<div class="bar" style="padding-left:0">` +
+          `<button class="chip" onclick='confirmFinish(${s.id}, ${jattr(s.name)})'>🏁 Завершить лигу</button>` +
+        `</div>`;
+      el.appendChild(box);
+      const det = box.querySelector('details[data-season]');
+      if (det) det.addEventListener('toggle', () => {
+        if (det.open) openPlayers.add(s.id); else openPlayers.delete(s.id);
+      });
+      const wdet = box.querySelector('details[data-weights]');
+      if (wdet) wdet.addEventListener('toggle', () => {
+        if (wdet.open) openWeights.add(s.id); else openWeights.delete(s.id);
+      });
+    }
+  }
+
+  // Начисления правятся по строкам протокола: у каждого показателя свой
+  // коэффициент, невключённые стоят нулями и в подсчёт не идут. Сохраняем ВЕСЬ
+  // набор разом — правят обычно несколько строк сразу, и гонять сезон через
+  // десяток запросов ни к чему.
+  const openWeights = new Set();
+
+  function weightsBlock(s, d) {
+    const w = s.weights || {};
+    const keys = (d.weight_keys || []).length
+      ? d.weight_keys : Object.keys(w).map(k => ({key: k, title: k}));
+    const on = keys.filter(k => (w[k.key] || 0) !== 0).length;
+    const rows = keys.map(k => {
+      const v = w[k.key] || 0;
+      // Именно text, а не number: на телефоне с русской раскладкой запятая в
+      // числовом поле делает value пустым, и коэффициент молча превратился бы
+      // в ноль. inputmode оставляет цифровую клавиатуру, запятую разбираем сами.
+      return `<div class="wrow"><span>${esc(k.title)}</span>` +
+             `<input type="text" inputmode="decimal" ` +
+             `class="${v === 0 ? 'zero' : ''}" data-wkey="${esc(k.key)}" value="${v}"></div>`;
+    }).join('');
+    return `<details class="adm-players" data-weights="${s.id}"` +
+      `${openWeights.has(s.id) ? ' open' : ''}>` +
+      `<summary>Начисления за действия: включено ${on} из ${keys.length}</summary>` +
+      `<div class="wnote">Ноль — показатель не считается. Минус — штраф. ` +
+      `«Подбор (всего)» уже включает атакующие и защитные: задавай что-то одно, ` +
+      `иначе они посчитаются дважды.</div>` +
+      rows +
+      `<div class="bar" style="padding-left:0">` +
+      `<button class="chip on" onclick="saveWeights(${s.id})">💾 Сохранить начисления</button>` +
+      `</div></details>`;
+  }
+
+  async function saveWeights(sid) {
+    const box = document.querySelector(`details[data-weights="${sid}"]`);
+    if (!box) return;
+    const value = {};
+    for (const inp of box.querySelectorAll('input[data-wkey]')) {
+      const num = parseFloat(String(inp.value).replace(',', '.'));
+      value[inp.dataset.wkey] = isNaN(num) ? 0 : num;
+    }
+    openWeights.add(sid);                 // после перерисовки блок остаётся открыт
+    try {
+      renderAdmin(await api('/fantasy/admin', {method: 'POST', body: JSON.stringify(
+        {action: 'weights', season_id: sid, value})}));
+      haptic('heavy');
+      const msg = 'Начисления сохранены. Очки за уже сыгранные игры не ' +
+        'пересчитываются — новые правила работают со следующей игры.';
+      tg && tg.showAlert ? tg.showAlert(msg) : alert(msg);
+    } catch (e) {
+      tg && tg.showAlert ? tg.showAlert('Не получилось сохранить начисления.') : 0;
+    }
+  }
+  window.saveWeights = saveWeights;
+
+  function createSeason() {
+    // В попапе Telegram нет поля ввода, но само приложение — обычная страница:
+    // показываем свою строку ввода. Команда боту (/season …) остаётся как
+    // запасной путь для тех, у кого живой API недоступен.
+    const box = $('newSeason');
+    box.classList.toggle('hidden');
+    if (!box.classList.contains('hidden')) $('seasonName').focus();
+  }
+
+  function submitSeason() {
+    const name = ($('seasonName').value || '').trim();
+    if (!name) { $('seasonName').focus(); return; }
+    const fmt = $('seasonFormat').value || '3x3';
+    $('seasonName').value = '';
+    $('newSeason').classList.add('hidden');
+    adminDo({action: 'start', name: name, format: fmt});
+  }
+  window.submitSeason = submitSeason;
+  window.createSeason = createSeason;
+
+  function confirmFinish(id, name) {
+    // Завершение необратимо — спрашиваем, иначе один промах закрывает сезон.
+    const ask = 'Завершить лигу «' + name + '»? Набор состава прекратится.';
+    if (tg && tg.showConfirm) {
+      tg.showConfirm(ask, ok => { if (ok) adminDo({action: 'finish', season_id: id}); });
+    } else if (confirm(ask)) {
+      adminDo({action: 'finish', season_id: id});
+    }
+  }
+  window.confirmFinish = confirmFinish;
+
+  // ─── топ игроков по фэнтези-очкам ──────────────────────────────────────────
+
+  let topPeriod = 'last';
+  const topCache = {};
+
+  async function showTop(period) {
+    topPeriod = period;
+    haptic('light');
+    for (const b of document.querySelectorAll('#topPeriods .chip')) {
+      b.classList.toggle('on', b.dataset.period === period);
+    }
+    if (topCache[period]) { renderTop(topCache[period]); return; }
+
+    // Запасной режим: в payload лежат только суммарные очки за турнир, поэтому
+    // честно показываем всё время и не притворяемся, что знаем срезы.
+    if (!live) {
+      // Угадавших офлайн берём из общего зачёта — он и есть «за всё время».
+      // Заполняем их ДО проверки периода: список от периода тут не зависит, а
+      // при выходе по return вкладка «Угадали» оставалась пустой и писала
+      // «никто не набрал очков» — хотя очки есть, просто срезов в payload нет.
+      const guess = (standings || []).map(s => ({name: s.name, points: s.points}));
+      guessBlocks = guess.length
+        ? [{mode: '', title: 'Все участники', rows: guess}] : [];
+      renderGuessModes();
+      renderGuessList();
+      if (period !== 'all') {
+        $('weekLabel').textContent = tableTab === 'guess' ? GUESS_OFFLINE_NOTE : '';
+        $('topList').innerHTML = '<div class="banner">Срезы по периодам доступны ' +
+          'при связи с ботом. Здесь — только «Всё время».</div>';
+        return;
+      }
+      const rows = pool.filter(p => p.st && p.st.games)
+        .map(p => ({ref: p.ref, name: p.name, games: p.st.games, fp: p.st.fp,
+                    pts: p.st.pts, reb: p.st.reb, ast: p.st.ast}))
+        .sort((a, b) => b.fp - a.fp).slice(0, 30);
+      renderTop({title: 'за всё время', top: rows, guessers: guess});
+      return;
+    }
+
+    $('weekLabel').textContent = '';
+    $('topList').innerHTML = '<div class="banner">Загрузка…</div>';
+    try {
+      const d = await api('/fantasy/top?period=' + period);
+      topCache[period] = d;
+      renderTop(d);
+    } catch (e) {
+      $('topList').innerHTML = '<div class="banner">Не удалось загрузить топ.</div>';
+    }
+  }
+  window.showTop = showTop;
+
+  function medal(i) { return ['🥇','🥈','🥉'][i] || (i + 1) + '.'; }
+
+  // Зачёт, топ игроков и топ угадавших — один раздел «Таблица» с подвкладками.
+  // Отдельная вкладка «Топ» уводила в сторону: человек искал таблицу в двух
+  // местах и не понимал, чем они отличаются.
+  let tableTab = 'board';
+
+  function showTableTab(which) {
+    tableTab = which;
+    haptic('light');
+    for (const [id, key] of [['ttab-board','board'], ['ttab-players','players'],
+                             ['ttab-guess','guess']]) {
+      $(id).classList.toggle('active', which === key);
+    }
+    $('standings').classList.toggle('hidden', which !== 'board');
+    $('topList').classList.toggle('hidden', which !== 'players');
+    $('guessList').classList.toggle('hidden', which !== 'guess');
+    // Периоды — только там, где они что-то меняют; режимы — там, где зачёт.
+    $('topPeriods').classList.toggle('hidden', which === 'board');
+    renderTableModes();
+    renderGuessModes();
+    if (which === 'board') { renderStandings(); return; }
+    if (!topCache[topPeriod]) showTop(topPeriod);
+    else renderTop(topCache[topPeriod]);
+  }
+  window.showTableTab = showTableTab;
+
+  // Топ угадавших разнесён по режимам: у свободного выбора при лучшей игре
+  // выходит вдвое больше очков, чем у бюджета, — в общем списке это был бы
+  // топ режима, а не людей.
+  let guessMode = '';
+  let guessBlocks = [];
+
+  // В запасном режиме очки угадавших — суммарные за турнир, а чипы сверху
+  // показывают период. Про это надо сказать прямо, иначе человек читает
+  // «последняя игра» и не понимает, откуда там сотни очков.
+  const GUESS_OFFLINE_NOTE = 'Угадавшие — за всё время (срезы только при связи с ботом)';
+
+  function renderGuessModes() {
+    const bar = $('guessModes');
+    const show = tableTab === 'guess' && guessBlocks.length > 1;
+    bar.classList.toggle('hidden', !show);
+    if (!guessBlocks.length) { guessMode = ''; return; }
+    if (!guessBlocks.some(b => b.mode === guessMode)) {
+      const mine = guessBlocks.find(b => b.mode === myMode);
+      guessMode = (mine || guessBlocks[0]).mode;
+    }
+    if (!show) return;
+    bar.innerHTML = guessBlocks.map(b =>
+      `<button class="chip${b.mode === guessMode ? ' on' : ''}" ` +
+      `onclick="pickGuessMode(${jattr(b.mode)})">${esc(b.title)}` +
+      `${b.mode === myMode ? ' · ты' : ''}</button>`).join('');
+  }
+
+  function pickGuessMode(id) {
+    haptic('light');
+    guessMode = id;
+    renderGuessModes();
+    renderGuessList();
+  }
+  window.pickGuessMode = pickGuessMode;
+
+  function pickLine(pick) {
+    const when = (pick.date || '').slice(8, 10) + '.' + (pick.date || '').slice(5, 7);
+    const who = (pick.players || []).map(esc).join(', ') || '—';
+    return `<div class="pstat">Игра ${when} · ${pick.points} FP<br>${who}</div>`;
+  }
+
+  function renderTop(d) {
+    $('weekLabel').textContent = d.title ? 'Фэнтези-очки ' + d.title : '';
+
+    const el = $('topList');
+    el.innerHTML = '';
+    if (!d.top || !d.top.length) {
+      el.innerHTML = '<div class="banner">За этот период игр не было.</div>';
+    } else {
+      d.top.forEach((p, i) => {
+        const div = document.createElement('div');
+        div.className = 'rank';
+        div.innerHTML = `<div class="place">${medal(i)}</div>` +
+          `<div class="info"><div class="pname">${esc(p.name)}<span class="chev">›</span></div>` +
+          `<div class="pstat">${games(p.games)} · ${p.pts} очк · ${p.reb} подб · ${p.ast} пас</div></div>` +
+          `<div class="pts">${p.fp}</div>`;
+        div.onclick = () => openPlayer(p.ref);
+        el.appendChild(div);
+      });
+    }
+
+    guessBlocks = d.guessers_by_mode && d.guessers_by_mode.length
+      ? d.guessers_by_mode
+      : (d.guessers && d.guessers.length
+         ? [{mode: '', title: 'Все участники', rows: d.guessers}] : []);
+    renderGuessModes();
+    renderGuessList();
+  }
+
+  function renderGuessList() {
+    const gl = $('guessList');
+    gl.innerHTML = '';
+    const block = guessBlocks.find(b => b.mode === guessMode) || guessBlocks[0];
+    const rows = (block && block.rows) || [];
+    if (!rows.length) {
+      // Разные причины — разные слова. В запасном режиме таблица могла просто
+      // не поместиться в кнопку (её выкидывают первой при урезании payload), и
+      // «никто не набрал очков» тут прямая неправда.
+      gl.innerHTML = live
+        ? '<div class="banner">За этот период никто не набрал очков.</div>'
+        : '<div class="banner">Таблица угадавших не поместилась в запасной вход. '
+          + 'Открой приложение при связи с ботом — она там есть.</div>';
+      return;
+    }
+    rows.forEach((g, i) => {
+      const picks = g.picks || [];
+      const det = document.createElement('details');
+      det.className = 'guess';
+      det.innerHTML =
+        `<summary class="rank"><div class="place">${medal(i)}</div>` +
+        `<div class="info"><div class="pname">${esc(g.name || 'Участник')}` +
+        (picks.length ? '<span class="chev">▾</span>' : '') + `</div>` +
+        (g.games ? `<div class="pstat">${games(g.games)} в зачёте</div>` : '') + `</div>` +
+        `<div class="pts">${g.points}</div></summary>` +
+        (picks.length
+          ? `<div class="guess-body">${picks.map(pickLine).join('')}</div>`
+          : '<div class="guess-body"><div class="pstat">Состав не сохранился.</div></div>');
+      gl.appendChild(det);
+    });
+  }
+
+  // ─── история: кто куда поехал по ценам после каждой игры ──────────────────
+  //
+  // Развёрнута последняя игра — она и интересна; остальные свёрнуты, но
+  // открываются. Данные приходят по играм, а не общим списком: цена двигается
+  // после конкретного матча, и «почему упал» без игры рядом не читается.
+
+  // Историю НЕ кешируем на сеанс: цены двигаются после каждой игры и по
+  // кнопке в админке, а приложение живёт открытым часами. Один раз
+  // загруженный пустой список выглядел как «ничего не изменилось», хотя
+  // изменения уже были.
+  async function loadHistory() {
+    const el = $('historyBody');
+    if (!live) {
+      el.innerHTML = '<div class="banner">История цен доступна при связи с ботом.</div>';
+      return;
+    }
+    if (!el.children.length) el.innerHTML = '<div class="banner">Загрузка…</div>';
+    try {
+      const d = await api('/fantasy/history');
+      renderHistory(d.games || []);
+    } catch (e) {
+      el.innerHTML = '<div class="banner">Не удалось загрузить историю.</div>';
+    }
+  }
+
+  function priceLine(c) {
+    const up = c.new > c.old;
+    const arrow = up ? '▲' : '▼';
+    const rank = (c.new_rank && c.new_rank !== c.old_rank)
+      ? ` · ранг ${esc(c.old_rank)} → ${esc(c.new_rank)}` : '';
+    return `<div class="row"><span class="d">${arrow} ${esc(c.name || 'Игрок')}</span>` +
+      `<span>${c.old} → ${c.new}${rank}</span>` +
+      `<b>${up ? '+' : ''}${c.new - c.old}</b></div>`;
+  }
+
+  function changesWord(n) {
+    if (n % 10 === 1 && n % 100 !== 11) return n + ' изменение';
+    if (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14)) return n + ' изменения';
+    return n + ' изменений';
+  }
+
+  function renderHistory(games) {
+    const el = $('historyBody');
+    el.innerHTML = '';
+    if (!games.length) {
+      el.innerHTML = '<div class="banner">Сыгранных игр в базе пока нет.</div>';
+      return;
+    }
+    games.forEach((g, i) => {
+      const det = document.createElement('details');
+      det.className = 'guess';
+      if (i === 0) det.open = true;         // последняя игра — сразу открыта
+      const n = g.changes.length;
+      // Игра была, а движений нет — это два разных случая: цены не менялись
+      // или мы тогда их ещё не записывали. Врать про «не менялись» нельзя.
+      const note = n ? changesWord(n) + ' в ценах'
+        : (g.recorded ? 'Цены не изменились'
+                      : 'Изменения тогда не записывались');
+      const body = n ? g.changes.map(priceLine).join('')
+        : `<div class="pstat">${g.recorded
+            ? 'После этой игры ни у кого не сдвинулась цена.'
+            : 'Бот начал запоминать движения цен позже этой игры — ' +
+              'восстановить их нечем.'}</div>`;
+      det.innerHTML =
+        `<summary class="rank"><div class="info">` +
+        `<div class="pname">${esc(g.title || g.date)}<span class="chev">▾</span></div>` +
+        `<div class="pstat">${note}</div></div></summary>` +
+        `<div class="guess-body">${body}</div>`;
+      el.appendChild(det);
+    });
+  }
+
+  function togglePlayed() {
+    playedOnly = !playedOnly;
+    $('playedChip').classList.toggle('on', playedOnly);
+    renderPool();
+  }
+  window.togglePlayed = togglePlayed;
+
+  function renderLeaguePicker() {
+    const bar = $('leagueBar'), sel = $('league');
+    if (!seasons || seasons.length < 2) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+    sel.innerHTML = seasons.map(s =>
+      `<option value="${s.id}"${s.id === seasonId ? ' selected' : ''}>${esc(s.name)} · ${esc(s.format)}</option>`
+    ).join('');
+    sel.onchange = e => switchSeason(parseInt(e.target.value, 10));
+  }
+
+  async function switchSeason(id) {
+    if (id === seasonId) return;
+    haptic('light');
+    seasonId = id;
+    counts = {};            // состав у каждой лиги свой
+    // Топ и правила тоже про конкретную лигу: старое содержимое оставлять
+    // нельзя, иначе после переключения человек видит цифры чужого сезона.
+    $('topList').innerHTML = '';
+    $('guessList').innerHTML = '';
+    $('historyBody').innerHTML = '';
+    guessBlocks = [];
+    for (const k of Object.keys(topCache)) delete topCache[k];
+    msg('Загрузка…');
+    try { if (!await fromApi()) return; } catch (e) { msg('Не удалось переключить лигу.'); return; }
+    msg('');
+    renderPool(); renderStandings(); renderRules(); syncButton();
+  }
+
+  // ─── старт ─────────────────────────────────────────────────────────────────
+
+  async function init() {
+    // Открыли специально ради проверки связи (кнопка в боте даёт #diag) —
+    // показываем её сразу и не грузим остальное: человек пришёл за причиной.
+    if (/[#&]diag\b/.test(location.hash || '')) {
+      deadEnd('');
+      $('diag').classList.remove('hidden');
+      runDiag();
+      return;
+    }
+    // Живой режим — если бэкенд доступен. Он даёт свежую статистику и позволяет
+    // открывать приложение кнопкой меню (там sendData недоступен).
+    let why = '';
+    if (!API_LIST.length) why = 'бэкенд не настроен';
+    else if (!tg) why = 'вне Telegram';
+    else if (!tg.initData) why = 'Telegram не передал подпись';
+    else {
+      let refusal = null;
+      for (const base of doorOrder()) {
+        API = base;
+        try {
+          // На ПРОБЕ ждём мало: одна из дверей бывает мигающей (у Cloudflare
+          // соединения с edge рвутся каждые пару минут), и 25 секунд ожидания
+          // на ней — это 25 секунд белого экрана вместо мгновенного перехода
+          // ко второй двери. Разбудить спящий канал даёт вторая попытка, уже
+          // с полным запасом времени.
+          let ok;
+          try { ok = await fromApi(PROBE_TIMEOUT); }
+          catch (e) {
+            if (e.name !== 'AbortError') throw e;
+            // Первая попытка разбудила канал — вторая обычно уже быстрая.
+            msg('Подключаюсь к боту…');
+            ok = await fromApi();
+          }
+          msg('');
+          if (!ok) return;
+          live = true;
+          break;
+        } catch (e) {
+          // Отказ НАШЕГО сервера — этоJSON с полем error; тогда перебирать
+          // адреса бессмысленно, они ведут к одному серверу. А вот страница
+          // ошибки Cloudflare (530/502) приходит как HTML, и e.data остаётся
+          // пустым объектом — раньше он считался «сервер ответил», перебор
+          // обрывался, и запасная дверь не пробовалась ни разу. Из-за этого
+          // падение одного входа выглядело как полный отказ приложения.
+          if (e.data && e.data.error) { refusal = e; break; }
+        }
+      }
+      if (!live) {
+        // Если бот прислал запасную кнопку с данными (#d=), он уже подтвердил
+        // игрока: показываем из payload, даже если живой API ответил «не член»
+        // или «не подтверждён» (у части игроков это ложное срабатывание — ник
+        // в таблице, спящий туннель). Сохранение всё равно перепроверит сервер
+        // по числовому id, так что лишнего не сохранить.
+        const hasHash = !!readHashData();
+        // Сервер прямо отказал И запасных данных нет: откат не поможет.
+        if (!hasHash && refusal && refusal.data.error === 'not_a_member') {
+          deadEnd(deniedText()); return;
+        }
+        if (!hasHash && refusal && refusal.data.error === 'unauthorized') {
+          deadEnd('Не удалось подтвердить вход. Открой фэнтези через бота.'); return;
+        }
+        if (refusal) {
+          why = 'сервер ответил: ' + (refusal.data.error || refusal.message);
+        } else {
+          // Пинг только объясняет неудачу, но не мешает попытке: сделать его
+          // шлагбаумом значило бы ронять живой режим на медленной сети.
+          why = (await reachable()) ? 'запрос завис, хотя сервер отвечает'
+                                    : 'не открывается ' + API.replace(/^https?:\/\//, '');
+        }
+      }
+    }
+    if (!live) {
+      const D = readHashData();
+      if (!D) { deadEnd('Фэнтези сейчас недоступна (' + why + '). Попробуй позже.'); return; }
+      if (!D.season) { deadEnd('Сейчас нет активного сезона фэнтези.'); return; }
+      fromHash(D);
+    }
+    if (!pool.length) { deadEnd('Пул игроков пуст — попробуй позже.'); return; }
+    $('tab-admin').classList.toggle('hidden', !isAdmin);
+    $('lockBanner').classList.toggle('hidden', !locked);
+    msg('');
+    $('sort').onchange = renderPool;
+    $('search').oninput = e => { search = norm(e.target.value); renderPool(); };
+    renderPool(); renderStandings();
+    syncButton();
+  }
+  init();
+})();
+</script>
+</body>
+</html>

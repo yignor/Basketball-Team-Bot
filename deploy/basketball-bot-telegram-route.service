@@ -1,0 +1,15 @@
+[Unit]
+Description=Route only Telegram-bound traffic for basketball-bot's botuser through awg0
+After=awg-quick@awg0.service network-online.target bot-vpn-route.service
+Wants=awg-quick@awg0.service
+
+[Service]
+Type=oneshot
+# RemainAfterExit здесь БЫЛ и его специально убрали — из-за него самолечение
+# лечило ровно один раз. Подробности в AFTER-REBOOT.md, раздел «Ловушка
+# самолечения». Коротко: oneshot с RemainAfterExit остаётся active навсегда,
+# а таймер не перезапускает то, что и так активно.
+ExecStart=/usr/local/sbin/basketball-bot-telegram-route.sh
+
+[Install]
+WantedBy=multi-user.target

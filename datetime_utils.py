@@ -10,15 +10,18 @@ import logging
 # Настройка логирования
 logger = logging.getLogger(__name__)
 
+MOSCOW_TZ = datetime.timezone(datetime.timedelta(hours=3))
+
+
 def get_moscow_time():
     """
     Получает текущее время в московском часовом поясе (UTC+3)
-    
+
     Returns:
         datetime.datetime: Текущее время в московском часовом поясе
     """
     try:
-        moscow_tz = datetime.timezone(datetime.timedelta(hours=3))
+        moscow_tz = MOSCOW_TZ
         now = datetime.datetime.now(moscow_tz)
         logger.debug(f"Получено московское время: {now}")
         return now

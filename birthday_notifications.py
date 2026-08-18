@@ -85,7 +85,8 @@ async def check_birthdays():
                 return
             
             from telegram import Bot
-            current_bot = Bot(token=bot_token)
+            import bot_factory
+            current_bot = bot_factory.make_bot(bot_token)
             
             # Получаем список чатов для отправки уведомлений о днях рождения
             automation_topics = duplicate_protection.get_config_ids().get("automation_topics") or {}

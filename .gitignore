@@ -68,9 +68,12 @@ tmp/
 !game_announcements.json
 !pyrightconfig.json
 
-# Test files (keep locally)
+# Разовые проверочные скрипты в корне — их держим локально.
 test_*.py
 test_*.json
+# ...но пачка тестов должна ездить с кодом: её гоняют перед деплоем на самом
+# сервере, а туда всё попадает только через git.
+!tests/*.py
 
 # Playwright
 .playwright/
@@ -80,9 +83,19 @@ test-results/
 # Generated report files (created locally by player_stats.py / team_stats.py)
 *.html
 # ...кроме фронта Mini App — он должен быть в репозитории (GitHub Pages)
-!webapp/*.html
+!docs/fantasy/*.html
 
 # SQLite cache (local mirror of Google Sheets — rebuilt automatically, never authoritative)
 data/*.db
 data/*.db-wal
 data/*.db-shm
+
+# Резервные копии базы. Репозиторий публичный (с него же раздаётся Mini App),
+# а в копии — фамилии команды, telegram-id и оплаты: такой файл в истории git
+# уже не спрячешь.
+backups/
+*.sqlite.gz
+
+# Базы команд нового бота: у каждой свои люди и деньги, в репозиторий
+# им нельзя — он публичный, с него раздаётся Mini App.
+data/multi/

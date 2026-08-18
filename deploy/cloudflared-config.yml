@@ -1,0 +1,21 @@
+# Конфиг именованного туннеля Cloudflare для фэнтези-API.
+# Кладётся в /etc/cloudflared/config.yml (root:root, 600).
+#
+# tunnel — имя (или UUID) туннеля, созданного `cloudflared tunnel create`.
+# credentials-file — файл с ключом, его создаёт та же команда.
+tunnel: pullup-api
+credentials-file: /etc/cloudflared/pullup-api.json
+
+# QUIC (UDP/7844) у этого провайдера не живёт: туннель регистрируется и тут же
+# отваливается с «timeout: no recent network activity», а снаружи домен отдаёт
+# 502 (проверено 03.08.2026). http2 идёт по TCP/443 — тем же путём, что и
+# обычный HTTPS, поэтому проходит там, где UDP режут.
+protocol: http2
+
+ingress:
+  # Наружу отдаём ТОЛЬКО фэнтези-API. Он слушает петлю, прямого сетевого
+  # пути к нему нет, а всё под ним требует подписи Telegram initData.
+  - hostname: api.one4two.ru
+    service: http://127.0.0.1:8081
+  # Обязательное правило-заглушка: всё остальное закрыто.
+  - service: http_status:404

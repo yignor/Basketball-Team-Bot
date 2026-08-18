@@ -1,0 +1,21 @@
+[Unit]
+Description=Periodically re-check basketball-bot Telegram-only VPN routing (self-heal)
+
+[Timer]
+OnBootSec=1min
+# КАЛЕНДАРНЫЙ, а не OnUnitActiveSec — намеренно.
+#
+# OnUnitActiveSec отсчитывает от момента, когда служба стала активной, и этим
+# завязан на её состояние. Один раз это уже сломалось: oneshot с
+# RemainAfterExit остался active навсегда, отсчитывать стало не от чего, и
+# самолечение молчало пять дней. Потом сломалось второй раз — уже после
+# правки: daemon-reload перечитал файл, но оставил юнит в старом состоянии
+# active, и таймер снова показывал «следующий запуск: никогда».
+#
+# Календарь не зависит ни от чего: каждые две минуты по часам, что бы ни
+# случилось с состоянием службы.
+OnCalendar=*:0/2
+Unit=basketball-bot-telegram-route.service
+
+[Install]
+WantedBy=timers.target

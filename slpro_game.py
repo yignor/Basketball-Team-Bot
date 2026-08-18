@@ -43,7 +43,9 @@ class PlayerStat:
     tur: int = 0
     blk: int = 0
     pf: int = 0
+    foul_on: int = 0             # фолы, заработанные игроком (на нём сфолили)
     time_played: int = 0
+    plus_minus: int = 0
     start_five: bool = False
 
     @property
@@ -135,6 +137,17 @@ def parse_box_score(resp: Dict[str, Any]) -> Optional[BoxScore]:
             team_id = None
         pts = e.get("points") or 0
 
+        # Плюс-минус. В событии заброшенного мяча приходит массив `players` —
+        # кто в этот момент был на площадке. Значит считается точно, а не по
+        # прикидке: своим на паркете плюсуем очки, чужим — минусуем.
+        if action == _MADE and team_id is not None:
+            for on_court in (e.get("players") or []):
+                q = box.players.get(on_court)
+                if q is None:
+                    continue
+                same_side = (team_id == box.home_id) == q.is_home
+                q.plus_minus += pts if same_side else -pts
+
         # Счёт по четвертям (по забитым)
         if action == _MADE and team_id is not None:
             period = e.get("period") or 0
@@ -177,6 +190,11 @@ def parse_box_score(resp: Dict[str, Any]) -> Optional[BoxScore]:
             p.blk += 1
         elif action in ("foul", "unsportfoul"):
             p.pf += 1
+        elif action == "foul_on_player":
+            # Отдельное событие: на ком сфолили. В протоколе оно есть почти у
+            # каждого фола (31 из 32 в проверенной игре), поэтому заработанные
+            # фолы можно считать честно, а не выводить из штрафных бросков.
+            p.foul_on += 1
 
     box.quarters = [(quarter_pts[per][0], quarter_pts[per][1]) for per in sorted(quarter_pts)]
     return box
@@ -195,28 +213,97 @@ def format_quarters(box: BoxScore, our_team_id: int) -> str:
     return " · ".join(parts)
 
 
-def format_leaders(box: BoxScore, our_team_id: int, top_scorers: int = 3) -> str:
-    """Короткий блок лидеров нашей команды для сообщения о результате.
-    Имена берём транзитно (display_name) — в хранилище это не идёт."""
-    ours = [p for p in box.team_players(our_team_id) if p.pts or p.reb or p.ast]
+def format_leaders(box: BoxScore, our_team_id: int,
+                   won: Optional[bool] = None,
+                   jokes: Any = None) -> str:
+    """Блок игроков для сообщения о результате — как у Инфобаскета.
+
+    Логика та же и намеренно вывернутая: **выиграли — показываем, что нужно
+    улучшить; проиграли — кто всё-таки вытащил**. Хвалить после победы незачем,
+    а после поражения важно, чтобы люди не расходились с одним чувством вины.
+
+    По одному игроку на показатель: список из трёх фамилий никто не читает.
+    Имена транзитные (display_name), в хранилище не идут. `jokes` — реестр
+    шуток от своих (player_jokes.Jokes), дописывает фразу к строке игрока."""
+    ours = [p for p in box.team_players(our_team_id) if p.pts or p.reb or p.ast or p.pf]
     if not ours:
         return ""
-    lines = []
-    mvp = box.mvp(our_team_id)
-    if mvp:
-        name = mvp.display_name or f"№{mvp.number}"
-        lines.append(f"⭐️ MVP: {name} — {mvp.pts} очк, {mvp.reb} подб, {mvp.ast} пас (КПИ {mvp.efficiency})")
-    top = sorted(ours, key=lambda p: p.pts, reverse=True)[:top_scorers]
-    scorers = ", ".join(f"{(p.display_name or ('№'+p.number))} {p.pts}" for p in top)
-    if scorers:
-        lines.append(f"🏀 Очки: {scorers}")
-    top_reb = max(ours, key=lambda p: p.reb, default=None)
-    top_ast = max(ours, key=lambda p: p.ast, default=None)
-    extra = []
-    if top_reb and top_reb.reb:
-        extra.append(f"подборы — {(top_reb.display_name or ('№'+top_reb.number))} ({top_reb.reb})")
-    if top_ast and top_ast.ast:
-        extra.append(f"передачи — {(top_ast.display_name or ('№'+top_ast.number))} ({top_ast.ast})")
-    if extra:
-        lines.append("📊 " + "; ".join(extra))
-    return "\n".join(lines)
+
+    def nm(p: Any) -> str:
+        return p.display_name or f"№{p.number}"
+
+    def joke(p: Any) -> str:
+        return jokes.for_name(p.display_name) if (jokes and p.display_name) else ""
+
+    def pct(made: int, att: int) -> int:
+        return round(made / att * 100) if att else 0
+
+    # Сначала решаем, КОМУ достанутся фразы: иначе они всегда доставались бы
+    # первым строкам блока, а до последних не доходило никогда.
+    if jokes is not None:
+        heroes = []
+        ft = [p for p in ours if p.fta >= 2]
+        two = [p for p in ours if p.fg2a >= 3]
+        three = [p for p in ours if p.fg3a >= 3]
+        if won:
+            if ft:
+                heroes.append(min(ft, key=lambda p: pct(p.ftm, p.fta)))
+            if two:
+                heroes.append(min(two, key=lambda p: pct(p.fg2m, p.fg2a)))
+            if three:
+                heroes.append(min(three, key=lambda p: pct(p.fg3m, p.fg3a)))
+            heroes += [max(ours, key=lambda p: p.tur), max(ours, key=lambda p: p.pf),
+                       min(ours, key=lambda p: p.efficiency)]
+        else:
+            heroes += [max(ours, key=lambda p: p.pts), max(ours, key=lambda p: p.reb),
+                       max(ours, key=lambda p: p.ast), max(ours, key=lambda p: p.stl),
+                       max(ours, key=lambda p: p.efficiency)]
+        jokes.plan([h.display_name for h in heroes if h and h.display_name])
+
+    def fg_pct(p: Any) -> str:
+        """Процент с игры рядом с очками — как в блоке Инфобаскета."""
+        att = p.fg2a + p.fg3a
+        return f" ({(p.fg2m + p.fg3m) / att * 100:.1f}%)" if att else ""
+
+    lines: List[str] = []
+    if won:
+        lines.append("😅 ЧТО НУЖНО УЛУЧШИТЬ:")
+        # Проценты считаем только тем, кто реально бросал: 0% с одной попытки
+        # — не показатель, а случайность.
+        ft = [p for p in ours if p.fta >= 2]
+        if ft:
+            w = min(ft, key=lambda p: pct(p.ftm, p.fta))
+            lines.append(f"🏀 Штрафные: {nm(w)} - {pct(w.ftm, w.fta)}%{joke(w)}")
+        two = [p for p in ours if p.fg2a >= 3]
+        if two:
+            w = min(two, key=lambda p: pct(p.fg2m, p.fg2a))
+            lines.append(f"🎯 Двухочковые: {nm(w)} - {pct(w.fg2m, w.fg2a)}%{joke(w)}")
+        three = [p for p in ours if p.fg3a >= 3]
+        if three:
+            w = min(three, key=lambda p: pct(p.fg3m, p.fg3a))
+            lines.append(f"🎯 Трехочковые: {nm(w)} - {pct(w.fg3m, w.fg3a)}%{joke(w)}")
+        w = max(ours, key=lambda p: p.tur)
+        if w.tur:
+            lines.append(f"💥 Потери: {nm(w)} - {w.tur}{joke(w)}")
+        w = max(ours, key=lambda p: p.pf)
+        if w.pf:
+            lines.append(f"⚠️ Фолы: {nm(w)} - {w.pf}{joke(w)}")
+        w = min(ours, key=lambda p: p.efficiency)
+        lines.append(f"📉 КПИ: {nm(w)} - {w.efficiency}{joke(w)}")
+    else:
+        lines.append("🏆 ЛУЧШИЕ ИГРОКИ:")
+        w = max(ours, key=lambda p: p.pts)
+        if w.pts:
+            lines.append(f"🥇 Очки: {nm(w)} - {w.pts}{fg_pct(w)}{joke(w)}")
+        w = max(ours, key=lambda p: p.reb)
+        if w.reb:
+            lines.append(f"🏀 Подборы: {nm(w)} - {w.reb}{joke(w)}")
+        w = max(ours, key=lambda p: p.ast)
+        if w.ast:
+            lines.append(f"🎯 Передачи: {nm(w)} - {w.ast}{joke(w)}")
+        w = max(ours, key=lambda p: p.stl)
+        if w.stl:
+            lines.append(f"🥷 Перехваты: {nm(w)} - {w.stl}{joke(w)}")
+        w = max(ours, key=lambda p: p.efficiency)
+        lines.append(f"📈 КПИ: {nm(w)} - {w.efficiency}{joke(w)}")
+    return "\n".join(lines) if len(lines) > 1 else ""

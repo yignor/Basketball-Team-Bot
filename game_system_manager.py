@@ -240,7 +240,8 @@ class GameSystemManager:
         
         if BOT_TOKEN:
             from telegram import Bot
-            self.bot = Bot(token=BOT_TOKEN)
+            import bot_factory
+            self.bot = bot_factory.make_bot(BOT_TOKEN)
     
     def _to_int(self, value: Any) -> Optional[int]:
         """Безопасно конвертирует значение в int"""
@@ -412,8 +413,17 @@ class GameSystemManager:
         self.team_name_keywords = sorted(keyword_sources)
     
     def _resolve_team_name(self, team_id: Optional[int], fallback: Optional[str] = None) -> Optional[str]:
+        """Название нашей команды для сообщений.
+
+        Имя из лиги идёт ПЕРВЫМ: в столбце «Альтернативное имя» тренер держит
+        название турнира («Летняя лига · Группа 4»), и опрос получался
+        «Летняя лига · Группа 4 против 30 FPS». Лига знает, как называется
+        команда, а alt_name остаётся запасным вариантом — на случай, когда
+        лига имени не дала."""
         if team_id is None:
             return fallback
+        if isinstance(fallback, str) and fallback.strip():
+            return fallback.strip()
         config = self.team_configs.get(team_id) if isinstance(self.team_configs, dict) else None
         if isinstance(config, dict):
             alt_name = config.get('alt_name')
@@ -729,27 +739,47 @@ class GameSystemManager:
             game_info['team2_id'] = widget_data['team_b_id']
 
     def _game_record_matches(self, record: Dict[str, Any], game_info: Dict[str, Any]) -> bool:
+        """Та же самая игра, что мы уже объявляли?
+
+        Сравниваем дату, время и команды — то, ради чего анонс переотправляют.
+        ЗАЛ намеренно не сравниваем: лига то заполняет его, то отдаёт
+        «Неизвестно» (виджет отвечает не всегда), и от этого мигания анонс
+        уходил в чат по второму и третьему разу. 09.08 так и вышло: в 09:00
+        анонс с залом «Марвелхолл», а вечером лига вернула «Неизвестно» — и
+        команда получила то же сообщение ещё дважды.
+        """
         if not record:
             return False
         record_date = (record.get('game_date') or '').strip()
         record_time = self._normalize_time_string(record.get('game_time'))
-        record_arena = (record.get('arena') or '').strip()
         record_team_a = (record.get('team_a_id') or '').strip()
         record_team_b = (record.get('team_b_id') or '').strip()
 
         game_date = (game_info.get('date') or '').strip()
         game_time = self._normalize_time_string(game_info.get('time'))
-        game_arena = (game_info.get('venue') or '').strip()
         game_team_a = str(game_info.get('team1_id') or '').strip()
         game_team_b = str(game_info.get('team2_id') or '').strip()
 
-        return (
+        same = (
             record_date == game_date
             and record_time == game_time
-            and record_arena == game_arena
             and record_team_a == game_team_a
             and record_team_b == game_team_b
         )
+        if not same:
+            # Пишем, ЧТО именно разошлось: следующий лишний анонс не придётся
+            # расследовать заново.
+            diff = []
+            if record_date != game_date:
+                diff.append(f"дата {record_date!r} → {game_date!r}")
+            if record_time != game_time:
+                diff.append(f"время {record_time!r} → {game_time!r}")
+            if record_team_a != game_team_a or record_team_b != game_team_b:
+                diff.append(f"команды {record_team_a}/{record_team_b} → "
+                            f"{game_team_a}/{game_team_b}")
+            print(f"🔄 Игра {game_info.get('game_id')} отличается от записанной: "
+                  f"{'; '.join(diff)}")
+        return same
 
     def _detect_game_changes(
         self,
@@ -1157,6 +1187,104 @@ class GameSystemManager:
                 best_game_id = rec_game_id_int
         return best
 
+    async def _skip_if_coach_made(self, source: str, game_info: Dict[str, Any],
+                                  opponent: str) -> bool:
+        """Не заводил ли эту игру тренер руками. True — опрос уже есть.
+
+        Тренер объявляет матч раньше лиги, и без этой проверки бот через день
+        рассылает второй опрос по той же игре: команда голосует дважды, состав
+        и оплата разъезжаются по двум записям. Так и случилось на боевых.
+
+        Совпадение по сопернику и дате считаем достаточным (подробнее почему —
+        в game_link). Перенос датой не связываем молча: бывало, что игру
+        отменили, а в API её просто передвинули, — про такое спрашиваем."""
+        import game_link
+        try:
+            game_id = str(game_info.get('game_id') or '')
+            if not game_id or game_link.decided(source, game_id):
+                return game_link.already_handled(source, game_id)
+            day = game_link._as_date(game_info.get('date'))
+            twin = game_link.find_twin(source, day, opponent or '')
+            if not twin:
+                return False
+            coach_id = str(twin.get('game_id') or '')
+            when = twin["day"].strftime('%d.%m')
+            if twin.get('same_day'):
+                game_link.link(source, game_id, coach_id, game_link.AUTO,
+                               f"{opponent} {when}")
+                print(f"🔗 Игра {game_id} — это заведённая тренером {coach_id} "
+                      f"({opponent}, {when}). Второй опрос не создаю.")
+                await self._notify_coach_link(source, game_id, coach_id,
+                                              opponent, twin, game_info)
+                return True
+            # Дата разъехалась — это перенос. Решает тренер.
+            await self._ask_coach_about_move(source, game_id, coach_id,
+                                             opponent, twin, game_info)
+            return True
+        except Exception as e:
+            # Развязка — удобство, а не условие работы: сломалась она — пусть
+            # опрос уйдёт как раньше, дубль лучше молчания.
+            print(f"⚠️ Проверка тренерской игры не удалась: {e}")
+            return False
+
+    async def _notify_coach_link(self, source: str, league_id: str, coach_id: str,
+                                 opponent: str, twin: Dict[str, Any],
+                                 game_info: Dict[str, Any]) -> None:
+        """Тренеру: «это та же игра, второй опрос не слал»."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        text = (f"🔗 {opponent}, {twin['day']:%d.%m} — эта игра появилась в "
+                f"расписании лиги.\n\n"
+                f"Опрос ты уже отправлял, второй я слать не стал: состав и "
+                f"оплата останутся на одной игре.\n\n"
+                f"Если это всё-таки разные матчи — скажи, и я заведу опрос.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🆕 Это разные игры", callback_data=f"gl:split:{source}:{league_id}")]])
+        await self._tell_coaches(text, markup)
+
+    async def _ask_coach_about_move(self, source: str, league_id: str, coach_id: str,
+                                    opponent: str, twin: Dict[str, Any],
+                                    game_info: Dict[str, Any]) -> None:
+        """Тренеру: «дата разъехалась — слать новый опрос?»"""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        import game_link
+        day = game_link._as_date(game_info.get('date'))
+        league_day = f"{day:%d.%m}" if day else "?"
+        text = (f"📅 {opponent}: в расписании лиги игра стоит на "
+                f"{league_day}, а твой опрос был на "
+                f"{twin['day']:%d.%m}.\n\n"
+                f"Похоже на перенос. Сам опрос не рассылаю: бывает, что игру "
+                f"отменили, а в расписании просто передвинули.\n\n"
+                f"Отправить новый опрос на дату лиги?")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📨 Отправить новый опрос",
+                                  callback_data=f"gl:new:{source}:{league_id}")],
+            [InlineKeyboardButton("🙅 Не надо, игра та же",
+                                  callback_data=f"gl:keep:{source}:{league_id}")]])
+        await self._tell_coaches(text, markup)
+        # Помечаем «спросили», иначе следующий прогон спросит снова. Состояние
+        # ставим «связано»: пока тренер не ответил, второго опроса быть не должно.
+        game_link.link(source, league_id, str(twin.get('game_id') or ''),
+                       game_link.AUTO, f"перенос? {opponent}")
+
+    async def _tell_coaches(self, text: str, markup=None) -> None:
+        """Только в личку тренерам: это рабочая переписка, а не новость для
+        команды (то же правило, что у разборов и оплат)."""
+        import sheets_cache
+        ids = {str(a["tg_user_id"]) for a in
+               sheets_cache.access_list(sheets_cache.ACCESS_TEAM)
+               if a.get("tg_user_id")}
+        ids |= {x.strip() for x in os.getenv(
+            "ADMIN_USER_IDS", os.getenv("ADMIN_USER_ID", "")).split(",") if x.strip()}
+        if not self.bot:
+            print("⚠️ Бот не поднят — тренерам не сказал")
+            return
+        for uid in ids:
+            try:
+                await self.bot.send_message(chat_id=int(uid), text=text,
+                                            reply_markup=markup)
+            except Exception as e:
+                print(f"⚠️ Не сказал тренеру {uid}: {e}")
+
     def _register_superseded_game_for_monitoring(self, superseded: Dict[str, Any], game_info: Dict[str, Any]) -> None:
         """Регистрирует старый (переприсвоенный лигой) game_id как
         АНОНС_ИГРА, чтобы game_watcher и мониторинг результатов начали
@@ -1229,6 +1357,22 @@ class GameSystemManager:
                 if changes:
                     await self._notify_game_update(changes, game_info)
                     summary = self._format_changes_summary(changes)
+                    # Перенос даты или смена соперника — по сути другая игра:
+                    # нужен новый опрос по новой дате (раньше бот только слал
+                    # уведомление и молчал). Снимаем старую опрос-запись и старые
+                    # регистрации голосов, затем создаём свежий опрос. Прочие
+                    # изменения (время/арена) — только фиксируем.
+                    if 'date' in changes or 'opponent' in changes:
+                        duplicate_protection.deactivate_records_by_prefix(
+                            "GAME_POLL_REG", f"GAME_POLL_REG_GPOLL_{game_id}_")
+                        duplicate_protection.deactivate_game_record("ОПРОС_ИГРА", str(game_id))
+                        print(f"🔄 Игра {game_id}: {summary} — создаю новый опрос")
+                        question = await self.create_game_poll(game_info)
+                        if question:
+                            self._duplicate_check_cache[cache_key] = {"created": True}
+                            self._log_game_action("ОПРОС_ИГРА", game_info, "ОПРОС СОЗДАН", question)
+                            return True
+                        return False
                     self._log_game_action("ОПРОС_ИГРА", game_info, "ДАННЫЕ ОБНОВЛЕНЫ", summary)
                 else:
                     print(f"⏭️ Опрос для GameID {game_id} уже есть в сервисном листе")
@@ -1264,6 +1408,11 @@ class GameSystemManager:
                 if self._check_duplicate_by_date_time_opponent(date, time, opponent):
                     print(f"⏭️ Игра {date} {time} против {opponent} уже найдена в сервисном листе (дата, время и противник совпадают), пропускаем создание опроса")
                     return False
+
+            # Эту игру тренер мог завести руками, пока её не было в
+            # расписании. Тогда опрос уже висит, и второй не нужен.
+            if await self._skip_if_coach_made("infobasket", game_info, opponent):
+                return False
 
             # Тот же слот (дата/время/арена), но другой game_id — лига
             # переприсвоила ID той же игре (например, заменился соперник).
@@ -1605,8 +1754,16 @@ class GameSystemManager:
         return reached
 
     def _is_correct_time_for_polls(self) -> bool:
-        """Опросы создаём начиная с настроенного времени (GAME_POLLS)."""
-        return self._notify_time_reached(AUTOMATION_KEY_GAME_POLLS)
+        """Опрос создаём СРАЗУ, как нашли игру, — часа не ждём.
+
+        Раньше опрос придерживали до времени из «Конфига» (9:00), как анонс.
+        Для анонса это верно: он про сегодняшнюю игру, и ночью его слать
+        некуда. А опрос — про игру, до которой ещё дни: чем раньше он висит,
+        тем больше людей успеет ответить, и тем раньше тренер видит состав.
+        Придерживать его — терять время на ровном месте.
+
+        Анонсы по-прежнему ждут своего часа (_is_correct_time_for_announcements)."""
+        return True
 
     def _is_correct_time_for_announcements(self) -> bool:
         """Анонсы шлём начиная с настроенного времени (GAME_ANNOUNCEMENTS)."""
@@ -2155,6 +2312,15 @@ class GameSystemManager:
 
         return announcement
     
+    @staticmethod
+    def _joke_game_date(game_info: Dict) -> str:
+        """Дата игры в ISO — по ней шутка понимает, «прошла ли уже её игра».
+        В game_info дата лежит в русском формате («27.06.2026»)."""
+        s = str(game_info.get('date') or '').strip()
+        if len(s) == 10 and s[2] == '.' and s[5] == '.':
+            return f"{s[6:]}-{s[3:5]}-{s[:2]}"
+        return s
+
     def format_game_result_message(self, game_info: Dict, game_link: Optional[str] = None, our_team_leaders: Optional[Dict] = None) -> str:
         """Форматирует сообщение с результатами игры, включая лидеров нашей команды"""
         try:
@@ -2249,6 +2415,20 @@ class GameSystemManager:
                 message += date_line
             else:
                 message += date_line
+
+            # Запись игры, если её уже нашли в VK (ищет vk_video фоном; в базе
+            # она лежит в том же столбце, куда SLPRO пишет свою ссылку).
+            try:
+                import sheets_cache
+                with sheets_cache.get_connection() as conn:
+                    row = conn.execute(
+                        """SELECT video_vk FROM game_meta
+                           WHERE source = 'infobasket' AND game_id = ?""",
+                        (str(game_info.get('game_id') or ''),)).fetchone()
+                if row and row["video_vk"]:
+                    message += f"📹 <a href=\"{row['video_vk']}\">Запись игры</a>\n"
+            except Exception as e:
+                print(f"⚠️ Ссылка на запись игры не подставилась: {e}")
             
             if our_team_leaders:
                 our_score_val = game_info.get('our_score', '?')
@@ -2258,46 +2438,68 @@ class GameSystemManager:
                     is_victory = int(our_score_val) > int(opponent_score_val)
                 except (TypeError, ValueError):
                     is_victory = False
-                
+
+                # Шутки от своих: фраза, заранее оставленная этому игроку кем-то
+                # из команды. Сообщение о результате перестаёт быть выгрузкой из
+                # протокола. Не завелось — публикуем как раньше, без них.
+                try:
+                    import player_jokes
+                    jokes = player_jokes.Jokes(
+                        is_victory, source="infobasket",
+                        game_id=game_info.get('game_id') or "",
+                        game_date=self._joke_game_date(game_info))
+                    # Жребий бросаем ДО сборки строк: иначе фразы всегда
+                    # доставались бы первым показателям блока.
+                    anti = our_team_leaders.get('anti_leaders', {}) or {}
+                    pool = anti.values() if is_victory else our_team_leaders.values()
+                    jokes.plan([d.get('name', '') for d in pool
+                                if isinstance(d, dict)])
+                except Exception:
+                    jokes = None
+
+                def _joke(data: Dict) -> str:
+                    return jokes.for_name(data.get('name', '')) if jokes else ''
+
                 if is_victory:
                     message += "\n😅 ЧТО НУЖНО УЛУЧШИТЬ:\n"
                     anti_leaders = our_team_leaders.get('anti_leaders', {})
                     if anti_leaders:
                         if 'worst_free_throw' in anti_leaders:
                             data = anti_leaders['worst_free_throw']
-                            message += f"🏀 Штрафные: {data['name']} - {data['value']}%\n"
+                            message += f"🏀 Штрафные: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'worst_two_point' in anti_leaders:
                             data = anti_leaders['worst_two_point']
-                            message += f"🎯 Двухочковые: {data['name']} - {data['value']}%\n"
+                            message += f"🎯 Двухочковые: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'worst_three_point' in anti_leaders:
                             data = anti_leaders['worst_three_point']
-                            message += f"🎯 Трехочковые: {data['name']} - {data['value']}%\n"
+                            message += f"🎯 Трехочковые: {data['name']} - {data['value']}%{_joke(data)}\n"
                         if 'turnovers' in anti_leaders:
                             data = anti_leaders['turnovers']
-                            message += f"💥 Потери: {data['name']} - {data['value']}\n"
+                            message += f"💥 Потери: {data['name']} - {data['value']}{_joke(data)}\n"
                         if 'fouls' in anti_leaders:
                             data = anti_leaders['fouls']
-                            message += f"⚠️ Фолы: {data['name']} - {data['value']}\n"
+                            message += f"⚠️ Фолы: {data['name']} - {data['value']}{_joke(data)}\n"
                         if 'worst_kpi' in anti_leaders:
                             data = anti_leaders['worst_kpi']
-                            message += f"📉 КПИ: {data['name']} - {data['value']}\n"
+                            message += f"📉 КПИ: {data['name']} - {data['value']}{_joke(data)}\n"
                 else:
                     message += "\n🏆 ЛУЧШИЕ ИГРОКИ:\n"
                     if 'points' in our_team_leaders:
                         data = our_team_leaders['points']
-                        message += f"🥇 Очки: {data['name']} - {data['value']} ({data.get('percentage', 0)}%)\n"
+                        message += (f"🥇 Очки: {data['name']} - {data['value']} "
+                                    f"({data.get('percentage', 0)}%){_joke(data)}\n")
                     if 'rebounds' in our_team_leaders:
                         data = our_team_leaders['rebounds']
-                        message += f"🏀 Подборы: {data['name']} - {data['value']}\n"
+                        message += f"🏀 Подборы: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'assists' in our_team_leaders:
                         data = our_team_leaders['assists']
-                        message += f"🎯 Передачи: {data['name']} - {data['value']}\n"
+                        message += f"🎯 Передачи: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'steals' in our_team_leaders:
                         data = our_team_leaders['steals']
-                        message += f"🥷 Перехваты: {data['name']} - {data['value']}\n"
+                        message += f"🥷 Перехваты: {data['name']} - {data['value']}{_joke(data)}\n"
                     if 'best_kpi' in our_team_leaders:
                         data = our_team_leaders['best_kpi']
-                        message += f"📈 КПИ: {data['name']} - {data['value']}\n"
+                        message += f"📈 КПИ: {data['name']} - {data['value']}{_joke(data)}\n"
             
             return message
             

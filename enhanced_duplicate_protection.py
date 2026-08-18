@@ -9,6 +9,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from dotenv import load_dotenv
+
+import config_sheet
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime_utils import get_moscow_time
@@ -72,6 +74,17 @@ CONFIG_SECTION_END_MARKERS = {
     "=== END ===",
 }
 DEFAULT_END_MARKER = "--- END ---"
+# ТИП админ заполняет по-человечески (выпадающий список ИНФОБАСКЕТ / SLPRO),
+# а не служебными CONFIG_TEAM/CONFIG_COMP. Раньше такая строка попадала в
+# ветку «неизвестный тип» и молча отбрасывалась — команда исчезала из поиска
+# игр. Держим синонимы здесь, чтобы список пополнялся в одном месте.
+INFOBASKET_TYPE_ALIASES = {"ИНФОБАСКЕТ", "INFOBASKET", "ИБ", "IB", "ФБП", "FBP"}
+# SLPRO-строки читает slpro_client: там ИД — код дивизиона (SUMC), а «ИД
+# команды» — её название, поэтому числовой парсер к ним неприменим.
+SLPRO_TYPE_ALIASES = {"SLPRO", "СЛПРО", "SL PRO", "SL-PRO"}
+# VK-строки читает vk_video: там в «ИД» короткое имя группы, а не турнир.
+# Пропускаем их здесь явно, чтобы имя группы не попало в comp_ids.
+VK_TYPE_ALIASES = {"VK", "ВК", "ВКОНТАКТЕ", "VKONTAKTE"}
 VOTING_SECTION_END_MARKER = "--- END VOTING ---"
 VOTING_SECTION_HEADER = [
     "ID голосования",
@@ -225,9 +238,9 @@ class EnhancedDuplicateProtection:
                     print(f"✅ Лист '{CONFIG_WORKSHEET_NAME}' подключен")
                     self._ensure_config_header()
                 except gspread.WorksheetNotFound:
-                    print(f"⚠️ Лист '{CONFIG_WORKSHEET_NAME}' не найден, создаём его")
-                    self.config_worksheet = self.spreadsheet.add_worksheet(title=CONFIG_WORKSHEET_NAME, rows=200, cols=len(CONFIG_HEADER))
-                    self._ensure_config_header()
+                    # Лист ведёт админ — бот его не создаёт и не правит.
+                    print(f"❌ Лист '{CONFIG_WORKSHEET_NAME}' не найден. Создай его сам: "
+                          f"блоки --- START GAME/VOTING/AUTOMATIONS --- и строки внутри")
             else:
                 print("❌ SPREADSHEET_ID не настроен")
                 
@@ -256,263 +269,28 @@ class EnhancedDuplicateProtection:
             print(f"⚠️ Не удалось обновить заголовок сервисного листа: {e}")
 
     def _ensure_config_header(self) -> None:
+        """Раньше бот дописывал в «Конфиг» заголовки, маркеры и дефолтные
+        строки. Теперь лист — территория админа: бот только читает и, если
+        чего-то не хватает, говорит об этом в лог, а не правит таблицу."""
         worksheet = self.config_worksheet
         if not worksheet:
             return
         try:
-            header = worksheet.row_values(1)
-            if not header:
-                worksheet.update(f'A1:{chr(ord("A") + len(CONFIG_HEADER) - 1)}1', [CONFIG_HEADER])
+            import config_sheet
+            rows = worksheet.get_all_values()
+            if not rows:
+                print(f"⚠️ Лист '{CONFIG_WORKSHEET_NAME}' пуст — заполни его сам, "
+                      f"бот в него не пишет")
                 return
-            desired_length = len(CONFIG_HEADER)
-            if len(header) < desired_length:
-                header.extend([""] * (desired_length - len(header)))
-            updated = False
-            for index, expected in enumerate(CONFIG_HEADER):
-                current_value = header[index] if index < len(header) else ""
-                # Обновляем, если ячейка пустая или значение не соответствует ожидаемому
-                if not current_value or current_value.strip() != expected.strip():
-                    header[index] = expected
-                    updated = True
-            if updated:
-                worksheet.update(f'A1:{chr(ord("A") + len(CONFIG_HEADER) - 1)}1', [header])
-                print(f"✅ Заголовки листа '{CONFIG_WORKSHEET_NAME}' обновлены")
-            self._ensure_voting_section_structure(worksheet)
+            print(f"📋 {config_sheet.describe(rows[1:])}")
         except Exception as e:
-            print(f"⚠️ Не удалось обновить заголовок листа '{CONFIG_WORKSHEET_NAME}': {e}")
- 
+            print(f"⚠️ Не удалось прочитать лист '{CONFIG_WORKSHEET_NAME}': {e}")
     def _ensure_voting_section_structure(self, worksheet) -> None:
-        """Гарантирует наличие раздела для конфигурации голосований"""
-        try:
-            total_columns = MAX_CONFIG_COLUMNS
-            padded_header = VOTING_SECTION_HEADER + [""] * (total_columns - len(VOTING_SECTION_HEADER))
-
-            all_data = worksheet.get_all_values()
-            end_row_index: Optional[int] = None
-            end_marker_value: Optional[str] = None
-            for idx, row in enumerate(all_data, start=1):
-                if row and row[0].strip() in CONFIG_SECTION_END_MARKERS:
-                    end_row_index = idx
-                    end_marker_value = row[0].strip()
-                    break
-
-            if end_row_index is None:
-                end_row_index = len(all_data) + 1
-                worksheet.append_row(
-                    [DEFAULT_END_MARKER] + [""] * (total_columns - 1),
-                    value_input_option="USER_ENTERED",
-                )
-                all_data.append([DEFAULT_END_MARKER])
-            elif end_marker_value and end_marker_value != DEFAULT_END_MARKER:
-                worksheet.update(f"A{end_row_index}", [[DEFAULT_END_MARKER]])
-                all_data[end_row_index - 1][0] = DEFAULT_END_MARKER
-
-            # Обновляем данные после возможных изменений
-            all_data = worksheet.get_all_values()
-
-            header_row_index: Optional[int] = None
-            for idx in range(end_row_index + 1, len(all_data) + 1):
-                row = all_data[idx - 1]
-                normalized = [cell.strip() for cell in row]
-                if not any(normalized):
-                    continue
-                if normalized[0].upper() == VOTING_SECTION_END_MARKER.upper():
-                    break
-                legacy_header_detected = any(
-                    normalized[:len(legacy)] == [cell.strip() for cell in legacy]
-                    for legacy in LEGACY_VOTING_HEADERS
-                )
-                if legacy_header_detected or normalized[:len(VOTING_SECTION_HEADER)] == VOTING_SECTION_HEADER or any(
-                    "Параметры (JSON)" in cell for cell in normalized
-                ):
-                    header_row_index = idx
-                    break
-
-            if header_row_index is None:
-                insert_index = end_row_index + 1
-                if insert_index - 1 < len(all_data):
-                    candidate = all_data[insert_index - 1]
-                    if any(cell.strip() for cell in candidate):
-                        insert_index += 1
-                worksheet.insert_row(
-                    padded_header,
-                    insert_index,
-                    value_input_option="USER_ENTERED",
-                )
-                header_row_index = insert_index
-                all_data = worksheet.get_all_values()
-            else:
-                worksheet.update(
-                    f"A{header_row_index}:{chr(ord('A') + total_columns - 1)}{header_row_index}",
-                    [padded_header],
-                )
-                all_data[header_row_index - 1] = padded_header
-
-            # Проверяем наличие маркера конца блока голосований
-            has_voting_end_marker = any(
-                row and row[0].strip().upper() == VOTING_SECTION_END_MARKER.upper()
-                for row in worksheet.get_all_values()
-            )
-            if not has_voting_end_marker:
-                worksheet.append_row(
-                    [VOTING_SECTION_END_MARKER] + [""] * (total_columns - 1),
-                    value_input_option="USER_ENTERED",
-                )
-
-            guide_exists = False
-            for row in worksheet.get_all_values():
-                if row and isinstance(row[0], str) and row[0].strip().startswith("# Подсказка"):
-                    guide_exists = True
-                    break
-            if not guide_exists:
-                for guide_row in VOTING_GUIDE_ROWS:
-                    padded_instruction = guide_row + [""] * (total_columns - len(guide_row))
-                    worksheet.append_row(
-                        padded_instruction,
-                        value_input_option="USER_ENTERED",
-                    )
-            self._ensure_automation_section_structure(worksheet)
-        except Exception as error:
-            print(f"⚠️ Не удалось гарантировать структуру раздела голосований: {error}")
-
+        """Оставлено пустым намеренно: раздел голосований ведёт админ."""
+        return
     def _ensure_automation_section_structure(self, worksheet) -> None:
-        """Гарантирует наличие раздела настроек автоматических сообщений"""
-        try:
-            total_columns = MAX_CONFIG_COLUMNS
-            padded_header = AUTOMATION_SECTION_HEADER + [""] * (total_columns - len(AUTOMATION_SECTION_HEADER))
-            all_data = worksheet.get_all_values()
-
-            header_row_index: Optional[int] = None
-            for idx, row in enumerate(all_data, start=1):
-                normalized = [cell.strip() for cell in row]
-                if not any(normalized):
-                    continue
-                if normalized[:len(AUTOMATION_SECTION_HEADER)] == AUTOMATION_SECTION_HEADER:
-                    header_row_index = idx
-                    break
-                for legacy in LEGACY_AUTOMATION_HEADERS:
-                    if normalized[:len(legacy)] == [cell.strip() for cell in legacy]:
-                        header_row_index = idx
-                        break
-                if header_row_index is not None:
-                    break
-
-            if header_row_index is None:
-                worksheet.append_row(
-                    padded_header,
-                    value_input_option="USER_ENTERED",
-                )
-                all_data = worksheet.get_all_values()
-                header_row_index = len(all_data)
-            else:
-                # Всегда обновляем заголовок, чтобы убедиться что он соответствует текущей структуре
-                # Проверяем, совпадает ли текущий заголовок с новым
-                current_header = [cell.strip() for cell in all_data[header_row_index - 1][:len(AUTOMATION_SECTION_HEADER)]]
-                if current_header != AUTOMATION_SECTION_HEADER:
-                    # Заголовок устарел, обновляем его
-                    worksheet.update(
-                        f"A{header_row_index}:{chr(ord('A') + len(AUTOMATION_SECTION_HEADER) - 1)}{header_row_index}",
-                        [AUTOMATION_SECTION_HEADER],
-                    )
-                    all_data = worksheet.get_all_values()
-                    all_data[header_row_index - 1] = AUTOMATION_SECTION_HEADER + [""] * (len(all_data[header_row_index - 1]) - len(AUTOMATION_SECTION_HEADER))
-
-            existing_entries: Dict[str, Dict[str, str]] = {}
-            for row in all_data[header_row_index:]:
-                if not row:
-                    continue
-                label = (row[0] or "").strip()
-                if (
-                    not label
-                    or label == AUTOMATION_SECTION_HEADER[0]
-                    or label.upper() == AUTOMATION_SECTION_END_MARKER.upper()
-                    or label.startswith("#")
-                    or label.upper() == "КОД"
-                ):
-                    continue
-                mapped_key = AUTOMATION_NAME_TO_KEY.get(label.lower())
-                key_upper = mapped_key.upper() if mapped_key else label.upper()
-                display_name = AUTOMATION_KEY_TO_NAME.get(key_upper, label)
-                topic_value = row[1] if len(row) > 1 else ""
-                chat_id_value = row[2] if len(row) > 2 else ""
-                anon_value = row[3] if len(row) > 3 else ""
-                multiple_value = row[4] if len(row) > 4 else ""
-                comment_value = row[5] if len(row) > 5 else ""
-                notify_time_value = row[6] if len(row) > 6 else ""
-                existing_entries[key_upper] = {
-                    "label": display_name,
-                    "topic": topic_value,
-                    "chat_id": chat_id_value,
-                    "anon": anon_value,
-                    "multiple": multiple_value,
-                    "comment": comment_value,
-                    "notify_time": notify_time_value,
-                }
-
-            rows_to_write: List[List[str]] = []
-            for default in AUTOMATION_DEFAULT_ROWS:
-                key_upper = default["key"].upper()
-                existing = existing_entries.pop(key_upper, None)
-                label = default["name"]
-                topic_value = ""
-                chat_id_value = ""
-                anon_value = ""
-                multiple_value = ""
-                comment_value = default.get("comment", "")
-                notify_time_value = default.get("notify_time", "")
-                if existing:
-                    label = existing.get("label") or label
-                    topic_value = existing.get("topic", "")
-                    chat_id_value = existing.get("chat_id", "")
-                    anon_value = existing.get("anon", "")
-                    multiple_value = existing.get("multiple", "")
-                    comment_value = existing.get("comment", "") or comment_value
-                    notify_time_value = existing.get("notify_time", "") or notify_time_value
-                rows_to_write.append([label, topic_value, chat_id_value, anon_value, multiple_value, comment_value, notify_time_value])
-
-            for key_upper, entry in existing_entries.items():
-                rows_to_write.append([
-                    entry.get("label") or key_upper,
-                    entry.get("topic", ""),
-                    entry.get("chat_id", ""),
-                    entry.get("anon", ""),
-                    entry.get("multiple", ""),
-                    entry.get("comment", ""),
-                    entry.get("notify_time", ""),
-                ])
-
-            rows_to_write.append([AUTOMATION_SECTION_END_MARKER] + [""] * (len(AUTOMATION_SECTION_HEADER) - 1))
-
-            end_marker_row_index: Optional[int] = None
-            for idx in range(header_row_index + 1, len(all_data) + 1):
-                row = all_data[idx - 1]
-                if row and (row[0] or "").strip().upper() == AUTOMATION_SECTION_END_MARKER.upper():
-                    end_marker_row_index = idx
-
-            existing_range_length = 0
-            if end_marker_row_index:
-                existing_range_length = end_marker_row_index - header_row_index
-            else:
-                existing_range_length = len(rows_to_write)
-
-            range_length = max(existing_range_length, len(rows_to_write))
-            rows_padded: List[List[str]] = []
-            for idx in range(range_length):
-                if idx < len(rows_to_write):
-                    base_row = rows_to_write[idx]
-                else:
-                    base_row = [""] * len(AUTOMATION_SECTION_HEADER)
-                padded = base_row + [""] * (total_columns - len(base_row))
-                rows_padded.append(padded)
-
-            worksheet.update(
-                f"A{header_row_index + 1}:{chr(ord('A') + total_columns - 1)}{header_row_index + range_length}",
-                rows_padded,
-                value_input_option="USER_ENTERED",
-            )
-        except Exception as error:
-            print(f"⚠️ Не удалось гарантировать структуру раздела автоматических сообщений: {error}")
-
+        """Оставлено пустым намеренно: раздел автосообщений ведёт админ."""
+        return
     @staticmethod
     def _normalize_cell_text(value: Any) -> str:
         if value is None:
@@ -986,6 +764,40 @@ class EnhancedDuplicateProtection:
             'team_b_id': r['team_b_id'],
         } for r in rows]
 
+
+    def deactivate_records_by_prefix(self, data_type: str, key_prefix: str) -> int:
+        """Мягко удаляет записи с ключом, начинающимся на key_prefix (local-
+        primary). Нужно при переопросе игры: старые регистрации голосов помечаем
+        удалёнными, чтобы голоса со снятого опроса не считались. Возвращает
+        число затронутых записей."""
+        if not SERVICE_RECORDS_LOCAL_PRIMARY:
+            return 0
+        import sheets_cache
+        with sheets_cache.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_records SET deleted = 1 "
+                "WHERE data_type = ? AND unique_key LIKE ? AND deleted = 0",
+                (data_type.upper(), key_prefix + "%"),
+            )
+            conn.commit()
+            return cur.rowcount
+
+    def deactivate_game_record(self, data_type: str, game_id: Any) -> int:
+        """Мягко удаляет запись игры по game_id (local-primary). Нужно перед
+        перезаписью: уникальные индексы (data_type, unique_key) и
+        (data_type, game_id) частичные (WHERE deleted = 0), поэтому add_record
+        с DO NOTHING не обновит существующую строку — её надо сначала снять."""
+        if not SERVICE_RECORDS_LOCAL_PRIMARY:
+            return 0
+        import sheets_cache
+        with sheets_cache.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_records SET deleted = 1 "
+                "WHERE data_type = ? AND game_id = ? AND deleted = 0",
+                (data_type.upper(), str(game_id)),
+            )
+            conn.commit()
+            return cur.rowcount
 
     def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 2.0):
         """Повторяет вызов функции с экспоненциальной задержкой при ошибках 429"""
@@ -1568,12 +1380,62 @@ class EnhancedDuplicateProtection:
             import sheets_cache
             rows = sheets_cache.get_config_rows()
             if rows:
-                return [CONFIG_HEADER] + rows
+                # Ширина строки зеркала (10 колонок, по J) шире, чем шапка
+                # секции турниров — дополняем, чтобы первая строка не была
+                # короче остальных.
+                width = max(len(r) for r in rows)
+                header = CONFIG_HEADER + [""] * max(0, width - len(CONFIG_HEADER))
+                return [header] + rows
         except Exception:
             pass
         if self.config_worksheet:
             return self.config_worksheet.get_all_values()
         return []
+
+    def _parse_automation_rows(self, rows: List[List[str]]) -> Dict[str, Dict[str, Any]]:
+        """Строки секции автосообщений → {КЛЮЧ: настройки}.
+
+        Список автосообщений фиксирован в коде, поэтому незнакомая подпись —
+        это заметка человека, а не настройка: раньше такая строка заводила
+        автоматизацию с именем-мусором."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows or []:
+            if not row or len(row) == 0:
+                continue
+            raw_label = self._normalize_cell_text(row[0])
+            if not raw_label or raw_label.lower() not in AUTOMATION_NAME_TO_KEY:
+                continue
+            topic_raw = self._normalize_cell_text(row[1]) if len(row) > 1 else ""
+            chat_id_raw = self._normalize_cell_text(row[2]) if len(row) > 2 else ""
+            anon_raw = row[3] if len(row) > 3 else ""
+            multiple_raw = row[4] if len(row) > 4 else ""
+            comment_raw = self._normalize_cell_text(row[5]) if len(row) > 5 else ""
+            notify_time_raw = self._normalize_cell_text(row[6]) if len(row) > 6 else ""
+            key_upper = AUTOMATION_NAME_TO_KEY[raw_label.lower()].upper()
+            entry: Dict[str, Any] = {}
+            display_name = AUTOMATION_KEY_TO_NAME.get(key_upper, raw_label)
+            if display_name:
+                entry["name"] = display_name
+            topic_id_value = self._try_parse_int(topic_raw)
+            if topic_id_value is not None:
+                entry["topic_id"] = topic_id_value
+            elif topic_raw:
+                entry["topic_raw"] = topic_raw
+            # chat_id из таблицы: пусто, один id или несколько через запятую
+            if chat_id_raw:
+                entry["chat_id"] = chat_id_raw
+            anon_value = self._parse_bool_value(anon_raw)
+            if anon_value is not None:
+                entry["is_anonymous"] = anon_value
+            multiple_value = self._parse_bool_value(multiple_raw)
+            if multiple_value is not None:
+                entry["allows_multiple_answers"] = multiple_value
+            if comment_raw:
+                entry["comment"] = comment_raw
+            if notify_time_raw:
+                entry["notify_time"] = notify_time_raw
+            out[key_upper] = entry
+        return out
 
     def _read_config_from_config_sheet(self) -> Dict[str, Any]:
         payload = {
@@ -1598,11 +1460,14 @@ class EnhancedDuplicateProtection:
             fallback_sources: List[Dict[str, Any]] = []
             voting_entries: Dict[str, Dict[str, Any]] = {}
             automation_topics: Dict[str, Dict[str, Any]] = {}
-            found_end_marker = False
 
             required_len = len(CONFIG_HEADER)
 
-            for row in all_data[1:]:
+            # Лист размечен блоками --- START X --- / --- END X ---; всё, что
+            # вне них, — подсказки для человека, и настройками не считается.
+            blocks = config_sheet.split(all_data[1:])
+
+            for row in blocks[config_sheet.GAME]:
                 if not row or len(row) < 1:
                     continue
 
@@ -1613,94 +1478,101 @@ class EnhancedDuplicateProtection:
                 row_type = self._normalize_cell_text(row_extended[0]) if row_extended else ""
                 normalized_type = row_type.upper()
 
-                if not found_end_marker and normalized_type in CONFIG_SECTION_END_MARKERS:
-                    found_end_marker = True
+                comp_id_cell = row_extended[1]
+                team_id_cell = row_extended[2]
+                alt_name = self._normalize_cell_text(row_extended[3])
+                settings_json_cell = row_extended[4]
+                weekday_cell = row_extended[5]
+                fallback_url = row_extended[6] if len(row_extended) > 6 else ""
+                fallback_name = row_extended[7] if len(row_extended) > 7 else ""
+
+                row_comp_ids = self._parse_ids(comp_id_cell)
+                row_team_ids = self._parse_ids(team_id_cell)
+                config_payload = self._parse_json_config(settings_json_cell)
+
+                # Определяем fallback конфигурацию по наличию URL (независимо от типа)
+                # Это позволяет использовать fallback без указания типа FALLBACK в колонке ТИП
+                if fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://')):
+                    fallback_entry = {
+                        "name": fallback_name.strip() or alt_name,
+                        "url": fallback_url.strip(),
+                        "metadata": config_payload or {},
+                    }
+                    # Добавляем comp_ids и team_ids в metadata для fallback
+                    if row_comp_ids:
+                        fallback_entry["metadata"]["comp_ids"] = row_comp_ids
+                    if row_team_ids:
+                        fallback_entry["metadata"]["team_ids"] = row_team_ids
+                    fallback_sources.append(fallback_entry)
+                    # Продолжаем обработку, чтобы также добавить команды в teams, если есть team_ids
+
+                # Человекочитаемый ТИП из выпадающего списка → служебный.
+                if normalized_type in SLPRO_TYPE_ALIASES:
                     continue
+                if normalized_type in VK_TYPE_ALIASES:
+                    continue
+                if normalized_type in INFOBASKET_TYPE_ALIASES:
+                    normalized_type = "CONFIG_TEAM" if row_team_ids else "CONFIG_COMP"
 
-                if found_end_marker and normalized_type == VOTING_SECTION_END_MARKER:
-                    break
+                if not normalized_type:
+                    if row_team_ids:
+                        normalized_type = "CONFIG_TEAM"
+                    elif row_comp_ids:
+                        normalized_type = "CONFIG_COMP"
 
-                if not found_end_marker:
-                    comp_id_cell = row_extended[1]
-                    team_id_cell = row_extended[2]
-                    alt_name = self._normalize_cell_text(row_extended[3])
-                    settings_json_cell = row_extended[4]
-                    weekday_cell = row_extended[5]
-                    fallback_url = row_extended[6] if len(row_extended) > 6 else ""
-                    fallback_name = row_extended[7] if len(row_extended) > 7 else ""
-
-                    row_comp_ids = self._parse_ids(comp_id_cell)
-                    row_team_ids = self._parse_ids(team_id_cell)
-                    config_payload = self._parse_json_config(settings_json_cell)
-
-                    # Определяем fallback конфигурацию по наличию URL (независимо от типа)
-                    # Это позволяет использовать fallback без указания типа FALLBACK в колонке ТИП
-                    if fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://')):
+                if normalized_type in {"CONFIG_COMP", "COMP_CONFIG"}:
+                    comp_ids_set.update(row_comp_ids)
+                elif normalized_type in {"CONFIG_TEAM", "TEAM_CONFIG"}:
+                    comp_ids_set.update(row_comp_ids)
+                    for team_id in row_team_ids:
+                        team_ids_set.add(team_id)
+                        team_entry = teams.setdefault(
+                            team_id,
+                            {"alt_name": None, "comp_ids": set(), "metadata": {}},
+                        )
+                        if alt_name:
+                            team_entry["alt_name"] = alt_name
+                        if row_comp_ids:
+                            team_entry["comp_ids"].update(row_comp_ids)
+                        if config_payload:
+                            team_entry["metadata"].update(config_payload)
+                elif normalized_type in {"TRAINING_POLL", "TRAINING_CONFIG"}:
+                    training_entry = {
+                        "title": config_payload.get("title") or alt_name,
+                        "weekday": config_payload.get("weekday"),
+                        "time": config_payload.get("time"),
+                        "location": config_payload.get("location"),
+                        "topic_id": config_payload.get("topic_id"),
+                        "metadata": config_payload,
+                    }
+                    training_polls.append(training_entry)
+                elif normalized_type in {"FALLBACK", "FALLBACK_SOURCE", "FALLBACK_CONFIG"}:
+                    # Дополнительная проверка для явного типа FALLBACK (на случай, если URL не был распознан выше)
+                    if not (fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://'))):
                         fallback_entry = {
                             "name": fallback_name.strip() or alt_name,
                             "url": fallback_url.strip(),
                             "metadata": config_payload or {},
                         }
-                        # Добавляем comp_ids и team_ids в metadata для fallback
                         if row_comp_ids:
                             fallback_entry["metadata"]["comp_ids"] = row_comp_ids
                         if row_team_ids:
                             fallback_entry["metadata"]["team_ids"] = row_team_ids
-                        fallback_sources.append(fallback_entry)
-                        # Продолжаем обработку, чтобы также добавить команды в teams, если есть team_ids
-
-                    if not normalized_type:
-                        if row_team_ids:
-                            normalized_type = "CONFIG_TEAM"
-                        elif row_comp_ids:
-                            normalized_type = "CONFIG_COMP"
-
-                    if normalized_type in {"CONFIG_COMP", "COMP_CONFIG"}:
-                        comp_ids_set.update(row_comp_ids)
-                    elif normalized_type in {"CONFIG_TEAM", "TEAM_CONFIG"}:
-                        comp_ids_set.update(row_comp_ids)
-                        for team_id in row_team_ids:
-                            team_ids_set.add(team_id)
-                            team_entry = teams.setdefault(
-                                team_id,
-                                {"alt_name": None, "comp_ids": set(), "metadata": {}},
-                            )
-                            if alt_name:
-                                team_entry["alt_name"] = alt_name
-                            if row_comp_ids:
-                                team_entry["comp_ids"].update(row_comp_ids)
-                            if config_payload:
-                                team_entry["metadata"].update(config_payload)
-                    elif normalized_type in {"TRAINING_POLL", "TRAINING_CONFIG"}:
-                        training_entry = {
-                            "title": config_payload.get("title") or alt_name,
-                            "weekday": config_payload.get("weekday"),
-                            "time": config_payload.get("time"),
-                            "location": config_payload.get("location"),
-                            "topic_id": config_payload.get("topic_id"),
-                            "metadata": config_payload,
-                        }
-                        training_polls.append(training_entry)
-                    elif normalized_type in {"FALLBACK", "FALLBACK_SOURCE", "FALLBACK_CONFIG"}:
-                        # Дополнительная проверка для явного типа FALLBACK (на случай, если URL не был распознан выше)
-                        if not (fallback_url.strip() and fallback_url.strip().startswith(('http://', 'https://'))):
-                            fallback_entry = {
-                                "name": fallback_name.strip() or alt_name,
-                                "url": fallback_url.strip(),
-                                "metadata": config_payload or {},
-                            }
-                            if row_comp_ids:
-                                fallback_entry["metadata"]["comp_ids"] = row_comp_ids
-                            if row_team_ids:
-                                fallback_entry["metadata"]["team_ids"] = row_team_ids
-                            if fallback_entry["url"] or fallback_entry["name"]:
-                                fallback_sources.append(fallback_entry)
-                    else:
-                        # Unknown types before the separator are ignored to keep backward compatibility
-                        continue
+                        if fallback_entry["url"] or fallback_entry["name"]:
+                            fallback_sources.append(fallback_entry)
+                else:
+                    # Незнакомый ТИП внутри блока игнорируем: в «Конфиге» бывают
+                    # служебные пометки, ронять из-за них весь разбор незачем.
                     continue
 
-                # Everything below this point belongs to the voting configuration section
+            for row in blocks[config_sheet.VOTING]:
+                if not row or len(row) < 1:
+                    continue
+                row_extended = list(row)
+                if len(row_extended) < required_len:
+                    row_extended.extend([""] * (required_len - len(row_extended)))
+                normalized_type = self._normalize_cell_text(row_extended[0]).upper()
+
                 poll_id_cell = row_extended[0]
                 topic_cell = self._normalize_cell_text(row_extended[1])
                 option_cell = self._normalize_cell_text(row_extended[2])
@@ -1815,58 +1687,19 @@ class EnhancedDuplicateProtection:
                     data.pop("comments", None)
                 voting_polls.append(data)
 
-            automation_header_index: Optional[int] = None
-            for idx, row in enumerate(all_data):
-                candidate = [cell.strip() for cell in row[:len(AUTOMATION_SECTION_HEADER)]]
-                if candidate == AUTOMATION_SECTION_HEADER:
-                    automation_header_index = idx
-                    break
-                for legacy in LEGACY_AUTOMATION_HEADERS:
-                    if candidate[:len(legacy)] == [cell.strip() for cell in legacy]:
-                        automation_header_index = idx
-                        break
-                if automation_header_index is not None:
-                    break
-            if automation_header_index is not None:
-                for row in all_data[automation_header_index + 1:]:
-                    if not row or len(row) == 0:
-                        continue
-                    raw_label = self._normalize_cell_text(row[0])
-                    if not raw_label:
-                        continue
-                    if raw_label.upper() == AUTOMATION_SECTION_END_MARKER:
-                        break
-                    topic_raw = self._normalize_cell_text(row[1]) if len(row) > 1 else ""
-                    chat_id_raw = self._normalize_cell_text(row[2]) if len(row) > 2 else ""
-                    anon_raw = row[3] if len(row) > 3 else ""
-                    multiple_raw = row[4] if len(row) > 4 else ""
-                    comment_raw = self._normalize_cell_text(row[5]) if len(row) > 5 else ""
-                    notify_time_raw = self._normalize_cell_text(row[6]) if len(row) > 6 else ""
-                    mapped_key = AUTOMATION_NAME_TO_KEY.get(raw_label.lower())
-                    key_upper = mapped_key.upper() if mapped_key else raw_label.upper()
-                    entry: Dict[str, Any] = {}
-                    display_name = AUTOMATION_KEY_TO_NAME.get(key_upper, raw_label)
-                    if display_name:
-                        entry["name"] = display_name
-                    topic_id_value = self._try_parse_int(topic_raw)
-                    if topic_id_value is not None:
-                        entry["topic_id"] = topic_id_value
-                    elif topic_raw:
-                        entry["topic_raw"] = topic_raw
-                    # Сохраняем chat_id из таблицы (может быть пустым, одним ID или несколькими через запятую)
-                    if chat_id_raw:
-                        entry["chat_id"] = chat_id_raw
-                    anon_value = self._parse_bool_value(anon_raw)
-                    if anon_value is not None:
-                        entry["is_anonymous"] = anon_value
-                    multiple_value = self._parse_bool_value(multiple_raw)
-                    if multiple_value is not None:
-                        entry["allows_multiple_answers"] = multiple_value
-                    if comment_raw:
-                        entry["comment"] = comment_raw
-                    if notify_time_raw:
-                        entry["notify_time"] = notify_time_raw
-                    automation_topics[key_upper] = entry
+            automation_rows = blocks[config_sheet.AUTOMATIONS]
+            automation_topics.update(self._parse_automation_rows(automation_rows))
+
+            if not automation_topics and automation_rows is not None:
+                legacy_rows = config_sheet.legacy_split(all_data[1:])[config_sheet.AUTOMATIONS]
+                known = [r for r in legacy_rows
+                         if self._normalize_cell_text(r[0] if r else "").lower()
+                         in AUTOMATION_NAME_TO_KEY]
+                if known:
+                    print("⚠️ «Конфиг»: внутри --- START AUTOMATIONS --- нет ни одного "
+                          "известного автосообщения — читаю секцию по заголовку "
+                          f"({len(known)} строк). Проверь, где стоят маркеры.")
+                    automation_topics.update(self._parse_automation_rows(known))
 
             has_data = bool(
                 comp_ids_set

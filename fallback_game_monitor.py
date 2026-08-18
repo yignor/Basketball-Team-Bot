@@ -265,9 +265,11 @@ class FallbackGameMonitor:
                 return []
             
             fallback_configs = []
-            found_end_marker = False
             
-            for row in all_data[1:]:
+            # Читаем только блок --- START GAME --- ... --- END GAME ---:
+            # вне блоков на листе живут подсказки, и раньше они попадали в конфиг.
+            import config_sheet
+            for row in config_sheet.split(all_data[1:])[config_sheet.GAME]:
                 if not row or len(row) < 1:
                     continue
                 
@@ -277,19 +279,7 @@ class FallbackGameMonitor:
                 if len(row_extended) < required_len:
                     row_extended.extend([""] * (required_len - len(row_extended)))
                 
-                # Проверяем маркеры конца секций в первой колонке (ТИП)
-                first_cell = (row_extended[0] or "").strip().upper()
-                if first_cell in {"END", "END_CONFIG", "CONFIG_END", "END OF CONFIG", "КОНЕЦ", 
-                                  "--- END ---", "=== END ==="}:
-                    found_end_marker = True
-                    continue
-                
-                # После маркера конца конфигурации не обрабатываем fallback
-                if found_end_marker:
-                    continue
-                
-                # Пропускаем заголовки секций
-                if first_cell in {"ID ГОЛОСОВАНИЯ", "--- END VOTING ---", "ТИП"}:
+                if (row_extended[0] or "").strip().upper() == "ТИП":
                     continue
                 
                 # Определяем fallback конфигурацию по наличию URL

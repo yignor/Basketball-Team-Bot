@@ -3,9 +3,9 @@
 Статистика игрока по personId Infobasket: все игры, все сезоны, прогресс/регресс.
 
 Запуск:
-  python player_stats.py --person-id 400566
-  python player_stats.py --person-id 400566 --chat-id 123456789
-  python player_stats.py --person-id 400566 --no-telegram --output report.html
+  python player_stats.py --person-id XXXXXX
+  python player_stats.py --person-id XXXXXX --chat-id 123456789
+  python player_stats.py --person-id XXXXXX --no-telegram --output report.html
 """
 
 import argparse
@@ -738,7 +738,11 @@ tr:hover td{{background:#1e2236}}
 
 # ─────────────────────────── Entry point ─────────────────────────────────────
 
-async def main(person_id: int, out_file: str, send_tg: bool) -> None:
+async def main(person_id: int, out_file: str, target: Optional[str] = None) -> None:
+    """Личная статистика игрока. target — ЛИЧНЫЙ chat_id получателя (обычно
+    его же). Личная/прогресс-статистика по договорённости приходит ТОЛЬКО в
+    приват и НИКОГДА в общий чат команды — поэтому отправка идёт лишь при явно
+    заданном приватном получателе, без фолбэка на общий CHAT_ID из .env."""
     data = await analyze_player(person_id)
 
     html = generate_html(data, person_id)
@@ -751,10 +755,15 @@ async def main(person_id: int, out_file: str, send_tg: bool) -> None:
     print(msg)
     print("=" * 60)
 
-    if send_tg and BOT_TOKEN and CHAT_ID:
+    # Групповой чат для личной статистики запрещён: цель — только личный id.
+    if target and target.strip().lstrip("-").isdigit() and target.strip().startswith("-"):
+        print(f"⛔  Отказ: {target} похож на групповой чат. Личная статистика — только в приват.")
+        return
+    if target and BOT_TOKEN:
         from telegram import Bot
-        bot = Bot(token=BOT_TOKEN)
-        chat_ids = [c.strip() for c in CHAT_ID.replace(",", " ").split() if c.strip()]
+        import bot_factory
+        bot = bot_factory.make_bot(BOT_TOKEN)
+        chat_ids = [c.strip() for c in target.replace(",", " ").split() if c.strip()]
         for raw in chat_ids:
             cid: Any = int(raw) if raw.lstrip("-").isdigit() else raw
             try:
@@ -774,17 +783,13 @@ async def main(person_id: int, out_file: str, send_tg: bool) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Статистика игрока по personId Infobasket")
     ap.add_argument("--person-id", type=int, required=True,
-                    help="PersonID в Infobasket (напр. 400566)")
-    ap.add_argument("--no-telegram", action="store_true",
-                    help="Не отправлять в Telegram")
+                    help="PersonID в Infobasket (напр. XXXXXX)")
     ap.add_argument("--output",
                     help="Имя HTML файла (по умолчанию stats_<id>.html)")
-    ap.add_argument("--chat-id",
-                    help="Telegram chat_id (переопределяет CHAT_ID из .env)")
+    ap.add_argument("--to",
+                    help="ЛИЧНЫЙ chat_id получателя (только приват; групповой "
+                         "чат отклоняется). Без него — только HTML, без отправки.")
     args = ap.parse_args()
 
-    if args.chat_id:
-        os.environ["CHAT_ID"] = args.chat_id
-
     out = args.output or f"stats_player_{args.person_id}.html"
-    asyncio.run(main(args.person_id, out, not args.no_telegram))
+    asyncio.run(main(args.person_id, out, args.to))
