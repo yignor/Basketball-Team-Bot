@@ -2426,6 +2426,33 @@ def _ng_preview_screen(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup
         [InlineKeyboardButton("❌ Отмена", callback_data="coach:main")]]))
 
 
+async def _send_game_calendar(bot: Any, gsm: Any, draft: Dict[str, Any],
+                              gid: str) -> bool:
+    """Файл .ics по игре, которую тренер завёл руками.
+
+    Зовём ТУ ЖЕ сборку, что и лиговый путь: вторая реализация ICS разошлась бы
+    с первой на первой же правке. Ошибка здесь не должна ломать создание игры —
+    опрос уже отправлен, и игра существует независимо от календаря."""
+    import game_roster
+    day = draft.get("date")
+    if not day or not draft.get("time"):
+        return False                      # без времени события не построить
+    info = {
+        "game_id": gid,
+        "date": day.strftime("%d.%m.%Y"),
+        "time": draft.get("time", ""),
+        "venue": draft.get("arena", ""),
+    }
+    try:
+        await gsm._send_calendar_event(
+            bot, info, draft.get("our", ""), draft.get("opponent", ""),
+            game_roster.FORMS.get(draft.get("form", ""), ""))
+        return True
+    except Exception as e:
+        log.warning(f"календарь по новой игре {gid} не ушёл: {e}")
+        return False
+
+
 async def _ng_send(query, user) -> None:
     """Отправляет опрос и регистрирует игру — дальше она обычная."""
     import coach_newgame
@@ -2473,9 +2500,14 @@ async def _ng_send(query, user) -> None:
         await asyncio.to_thread(game_roster.set_form, draft["source"], gid,
                                 draft["form"])
     _refresh_poll_cache()
+    # Файл календаря. Лиговые игры получают его автоматически, а заведённые
+    # тренером руками — не получали: путь регистрации у них свой, и вызов
+    # просто некому было сделать.
+    cal = await _send_game_calendar(query.get_bot(), gsm, draft, gid)
     _newgame.pop(user.id, None)
     await query.edit_message_text(
-        f"✅ Игра создана, опрос отправлен ({len(sent)} чат(а)).\n\n"
+        f"✅ Игра создана, опрос отправлен ({len(sent)} чат(а))."
+        + ("\n📆 Календарь отправлен." if cal else "") + "\n\n"
         f"{question}\n\nКак проголосуют — собери состав в «👥 Состав на игру».",
         reply_markup=_coach_markup())
 
