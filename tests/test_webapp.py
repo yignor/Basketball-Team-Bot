@@ -198,6 +198,30 @@ CHECKS = """
     ok(tierFilter.size === 0 && !affordable, '«Все N» сбрасывает фильтры');
     ok(document.getElementById('sort') !== null, 'сортировка на месте, компактной кнопкой');
 
+    // ── перенос состава на другой матч ────────────────────────────────────
+    betGames = [
+      {source:'infobasket', game_id:'777', date:'2026-08-22', time:'14:00',
+       opponent:'Кирпичный Завод', label:'x', declared:true},
+      {source:'slpro', game_id:'4600', date:'2026-08-24', time:'21:00',
+       opponent:'Резалит (Летний Кубок)', label:'y', declared:true},
+    ];
+    gameKey = 'infobasket:777';
+    showCopyOffer(['ib:1:p1'], betGames.filter(g => keyOf(g) !== gameKey));
+    ok(!document.getElementById('copyBox').classList.contains('hidden'),
+       'после сохранения предлагается перенос');
+    const items = document.getElementById('copyList').children;
+    ok(items.length === 2, 'один другой матч плюс кнопка «Готово»: ' + items.length);
+    ok(/Резалит</.test(items[0].innerHTML) || /Резалит/.test(items[0].innerHTML),
+       'матч назван без скобок с турниром');
+    ok(items[0].innerHTML.indexOf('(') < 0, 'скобок в подписи нет');
+
+    // Вход в другой матч убирает старое предложение — оно уже не про него.
+    applyGamePool({ game:{label:'x', date:'2026-08-24', opponent:'Резалит'},
+      declared:true, pool:[{refs:['ib:1:p1'], name:'Иванов Иван'}], pick:[] },
+      'slpro:4600');
+    ok(document.getElementById('copyBox').classList.contains('hidden'),
+       'при входе в матч предложение переноса скрыто');
+
     showGames();
     ok(!document.getElementById('gamesScreen').classList.contains('hidden'), 'возврат к списку игр');
     ok(!document.querySelector('.tabs').classList.contains('hidden'), 'снаружи матча вкладки вернулись');

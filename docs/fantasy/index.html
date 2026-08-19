@@ -308,6 +308,14 @@
     <div class="list" id="pool"></div>
     <div id="poolEmpty" class="banner hidden">Никого не нашлось по фильтру.</div>
     <div id="poolNote" class="banner hidden"></div>
+    <!-- После сохранения ставки: тот же состав можно приложить и к другим
+         матчам. Значок «×2» говорит, что человек играет ещё где-то, но ставку
+         туда всё равно надо сделать — раньше это приходилось делать руками. -->
+    <div id="copyBox" class="hidden">
+      <div class="gs-title" id="copyTitle">Применить этот состав и к другой игре?</div>
+      <div id="copyList"></div>
+      <div id="copyDone" class="banner hidden"></div>
+    </div>
   </div>
   <div id="table" class="hidden">
     <div class="tabs">
@@ -993,6 +1001,7 @@
       ? 'один состав на все известные матчи'
       : whenLine(r.game || {});
 
+    $('copyBox').classList.add('hidden');   // новый матч — старое предложение ни к чему
     const note = $('poolNote');
     const lost = gamePool.filter(p => p.unlinked).length;
     if (!isAll && r.declared === false) {
@@ -1298,6 +1307,59 @@
     });
   }
 
+  // Перенос состава на другие матчи. Проверку «все ли заявлены» делает
+  // СЕРВЕР — он и так её делает при сохранении, и второй раз считать то же
+  // самое в приложении значило бы разойтись с ним при первом же расхождении.
+  // Поэтому просто пробуем сохранить и честно показываем, что вышло.
+  function showCopyOffer(refs, others) {
+    const box = $('copyBox'), list = $('copyList');
+    box.classList.remove('hidden');
+    $('copyDone').classList.add('hidden');
+    $('copyTitle').textContent = 'Состав сохранён. Применить его и к другой игре?';
+    list.innerHTML = '';
+    for (const g of others) {
+      const card = document.createElement('div');
+      card.className = 'gs-card';
+      card.innerHTML =
+        `<div class="gs-mid"><div class="gs-opp">${esc(teamOnly(g.opponent) || 'соперник')}</div>` +
+        `<div class="gs-sub">${esc(whenLine(g))}</div></div>` +
+        '<div class="gs-go">+</div>';
+      card.onclick = () => copyTo(g, refs, card);
+      list.appendChild(card);
+    }
+    const done = document.createElement('button');
+    done.className = 'chip';
+    done.textContent = 'Готово';
+    done.onclick = () => (tg.close ? tg.close() : showGames());
+    list.appendChild(done);
+    box.scrollIntoView && box.scrollIntoView({behavior: 'smooth'});
+  }
+
+  async function copyTo(g, refs, card) {
+    haptic('light');
+    const note = $('copyDone');
+    card.classList.add('disabled');
+    try {
+      await api('/fantasy/games', { method: 'POST', body: JSON.stringify(
+        { source: g.source, game_id: g.game_id, refs, mode }) });
+      card.querySelector('.gs-go').textContent = '✓';
+      note.classList.remove('hidden');
+      note.textContent = 'Готово: состав применён и к матчу «'
+        + (teamOnly(g.opponent) || 'соперник') + '».';
+    } catch (e) {
+      card.classList.remove('disabled');
+      note.classList.remove('hidden');
+      // Кого именно не хватает — знает сервер; переводим ссылки в фамилии,
+      // иначе человек увидит «ib:36502:5» и не поймёт, кого менять.
+      const bad = ((e.data && e.data.refs) || [])
+        .map(r => (pool.find(p => p.ref === r) || {}).name || r);
+      note.textContent = bad.length
+        ? 'В матче «' + (teamOnly(g.opponent) || 'соперник') + '» нет в заявке: '
+          + bad.join(', ') + '. Собери на него отдельный состав.'
+        : 'Не получилось применить к этому матчу. Попробуй ещё раз.';
+    }
+  }
+
   async function saveRoster() {
     haptic('heavy');
     if (savedCount && savedMode && savedMode !== mode) {
@@ -1323,6 +1385,14 @@
       }
       inherited = false;
       savedMode = mode; savedCount = refs.length; renderModeNote();
+      // Есть куда переносить — не закрываем приложение, а предлагаем. Закрыть
+      // и заставить открывать заново ради второго матча было бы издевательством.
+      const others = betGames.filter(g => keyOf(g) !== gameKey);
+      if (gameKey && gameKey !== ALL && others.length) {
+        btn.disabled = false; btn.textContent = 'Сохранить состав';
+        showCopyOffer(refs, others);
+        return;
+      }
       tg.showPopup ? tg.showPopup({title:'Готово', message:'Состав сохранён! Удачи в туре 🏀',
                                    buttons:[{type:'close'}]}, () => tg.close())
                    : tg.close();
