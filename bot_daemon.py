@@ -2426,6 +2426,33 @@ def _ng_preview_screen(draft: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup
         [InlineKeyboardButton("❌ Отмена", callback_data="coach:main")]]))
 
 
+async def _send_game_calendar(bot: Any, gsm: Any, draft: Dict[str, Any],
+                              gid: str) -> bool:
+    """Файл .ics по игре, которую тренер завёл руками.
+
+    Зовём ТУ ЖЕ сборку, что и лиговый путь: вторая реализация ICS разошлась бы
+    с первой на первой же правке. Ошибка здесь не должна ломать создание игры —
+    опрос уже отправлен, и игра существует независимо от календаря."""
+    import game_roster
+    day = draft.get("date")
+    if not day or not draft.get("time"):
+        return False                      # без времени события не построить
+    info = {
+        "game_id": gid,
+        "date": day.strftime("%d.%m.%Y"),
+        "time": draft.get("time", ""),
+        "venue": draft.get("arena", ""),
+    }
+    try:
+        await gsm._send_calendar_event(
+            bot, info, draft.get("our", ""), draft.get("opponent", ""),
+            game_roster.FORMS.get(draft.get("form", ""), ""))
+        return True
+    except Exception as e:
+        log.warning(f"календарь по новой игре {gid} не ушёл: {e}")
+        return False
+
+
 async def _ng_send(query, user) -> None:
     """Отправляет опрос и регистрирует игру — дальше она обычная."""
     import coach_newgame
@@ -2473,9 +2500,14 @@ async def _ng_send(query, user) -> None:
         await asyncio.to_thread(game_roster.set_form, draft["source"], gid,
                                 draft["form"])
     _refresh_poll_cache()
+    # Файл календаря. Лиговые игры получают его автоматически, а заведённые
+    # тренером руками — не получали: путь регистрации у них свой, и вызов
+    # просто некому было сделать.
+    cal = await _send_game_calendar(query.get_bot(), gsm, draft, gid)
     _newgame.pop(user.id, None)
     await query.edit_message_text(
-        f"✅ Игра создана, опрос отправлен ({len(sent)} чат(а)).\n\n"
+        f"✅ Игра создана, опрос отправлен ({len(sent)} чат(а))."
+        + ("\n📆 Календарь отправлен." if cal else "") + "\n\n"
         f"{question}\n\nКак проголосуют — собери состав в «👥 Состав на игру».",
         reply_markup=_coach_markup())
 
@@ -5161,6 +5193,7 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         if what == "add":
             await asyncio.to_thread(game_roster.add, source, game_id, row, str(user.id))
             _drop_pending(user.id)
+            await _push_lineup(source, game_id)
         elif what == "gname":
             _clear_pending(user.id)
             _awaiting_guest[user.id] = (source, game_id, row)
@@ -5191,6 +5224,7 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
             hit = await _fantasy_picks_hit(source, game_id, row)
             await asyncio.to_thread(game_roster.remove, source, game_id, row)
             await _warn_fantasy_players(query.get_bot(), source, game_id, hit)
+            await _push_lineup(source, game_id)
         elif what == "paid":
             await asyncio.to_thread(game_roster.mark_paid, row, source, game_id,
                                     str(user.id))
@@ -5314,6 +5348,9 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
     who = f"@{user.username}" if getattr(user, "username", "") else str(user.id)
     if posts:
         await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts)
+    # Публикация — тоже повод отправить заявку: до неё состав мог меняться
+    # молча, а тут он объявлен и точно тот, что будет играть.
+    await _push_lineup(source, game_id)
     # В журнал — с именем: это единственное сообщение бота, которое видит вся
     # команда, и на вопрос «бот сам или человек?» должны отвечать данные.
     log.info(f"Состав {source}:{game_id} отправлен в чат ({len(people)} чел.) "
@@ -7618,6 +7655,18 @@ async def _remind_game_debtors(app: Application, game: Dict[str, Any],
     return stat
 
 
+async def _push_lineup(source: str, game_id: str) -> None:
+    """Заявку тренера — в лига-бот. Молча, если отправка не настроена.
+
+    Зовём при каждом изменении состава, а не только при публикации: заявка там
+    заменяется целиком, и «снял одного» — такое же изменение, как «добавил»."""
+    try:
+        import fantasy_api
+        await fantasy_api.push_lineup(source, str(game_id))
+    except Exception as e:
+        log.warning(f"лига-бот: заявка на {game_id} не ушла: {e}")
+
+
 async def _fantasy_picks_hit(source: str, game_id: str, row: int) -> List[Dict[str, Any]]:
     """Чьи ставки в фэнтези задевает снятие игрока. Пусто — если фэнтези не идёт."""
     try:
@@ -8064,6 +8113,19 @@ async def _background_loop(app: Application) -> None:
     в чате это могло надолго задерживать и их, и (что важнее) вотчер
     результатов игр, которому нужно тикать независимо от чата."""
     log.info(f"Фоновый цикл запущен (тик каждые {BACKGROUND_TICK_SECONDS}с)")
+    # Стучимся к соседу один раз при старте. Связь односторонняя: если токен
+    # не сошёлся или бот не поднят, мы об этом никак иначе не узнаем — составы
+    # будут «уходить» в никуда, и обнаружится это по отсутствию людей в чужом
+    # зачёте, через неделю. Пустой токен — молчим, отправка просто выключена.
+    try:
+        import league_push
+        if league_push.enabled():
+            ok, why = await league_push.ping()
+            log.info("лига-бот: дверь %s (%s)", "открыта" if ok else "ЗАКРЫТА", why)
+        else:
+            log.info("лига-бот: отправка выключена — токен не задан")
+    except Exception as e:
+        log.warning(f"лига-бот: проверку двери не сделал: {e}")
     last_api = fantasy_api.public_api_url()
     while True:
         try:
