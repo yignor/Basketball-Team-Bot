@@ -214,6 +214,26 @@ def alias_of(source: str, league_game_id: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def league_id_of(source: str, coach_game_id: str) -> Optional[str]:
+    """Лиговый id для игры, заведённой тренером. None — связки нет.
+
+    Обратная сторона alias_of: связку пишут по лиговому id (его знает монитор,
+    когда узнаёт в расписании уже заведённый матч), а спрашивают её и с другой
+    стороны — когда на руках только тренерский id. Так составы на такую игру
+    находят дорогу к настоящему номеру лиги.
+
+    Разошедшиеся игры (тренер сказал «это разные») не отдаём: связка снята
+    осознанно, и подставлять её обратно значит спорить с человеком."""
+    _ensure_table()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            """SELECT league_game_id FROM game_aliases
+                WHERE source = ? AND coach_game_id = ? AND state != ?
+                ORDER BY created_at DESC LIMIT 1""",
+            (str(source), str(coach_game_id), SPLIT)).fetchone()
+    return str(row["league_game_id"]) if row else None
+
+
 def already_handled(source: str, league_game_id: str) -> bool:
     """Нужно ли молчать по этой лиговой игре.
 

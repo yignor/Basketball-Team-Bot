@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -55,6 +56,26 @@ def test_manual_games_are_not_sent() -> None:
     check(lp.is_league_game("4558"), "голый номер — тоже")
     check(not lp.is_league_game("slpro-m2608170821"), "заведённая руками — нет")
     check(not lp.is_league_game(""), "пустой id — нет")
+
+    # Но если игра УЖЕ появилась в расписании, связка её находит: тренер
+    # заводит матч раньше лиги, монитор потом узнаёт его и запоминает пару.
+    import tempfile
+    import sheets_cache
+    sheets_cache.DB_PATH = pathlib.Path(tempfile.mkdtemp()) / "t.db"
+    sheets_cache.init_db()
+    import game_link
+    game_link.link("slpro", "slpro-4586", "slpro-m2608170821",
+                   game_link.AUTO, "Резалит 24.08")
+    check(lp.league_game_id("slpro-m2608170821") == "4586",
+          f"по связке нашли номер лиги: {lp.league_game_id('slpro-m2608170821')}")
+    check(lp.league_game_id("slpro-4558") == "4558", "лиговый id не трогаем")
+    check(lp.league_game_id("slpro-m9999999999") == "",
+          "без связки — пусто, слать некуда")
+
+    # Тренер сказал «это разные игры» — связку не подставляем обратно.
+    game_link.split("slpro", "slpro-4586")
+    check(lp.league_game_id("slpro-m2608170821") == "",
+          "разведённые игры связкой не считаем")
 
     os.environ["LEAGUE_INGEST_TOKEN"] = "тест"
     tried: List[str] = []

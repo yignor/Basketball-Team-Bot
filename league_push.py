@@ -52,6 +52,26 @@ def bare_game_id(game_id: Any) -> str:
     return gid.split("-", 1)[1] if gid.startswith("slpro-") else gid
 
 
+def league_game_id(game_id: Any) -> str:
+    """Настоящий id лиги для этой игры. Пусто — такой игры у лиги нет.
+
+    Тренер заводит матч раньше, чем лига кладёт его в расписание, и до тех пор
+    id у игры свой («slpro-m2608170821»). Когда игра появляется в расписании,
+    монитор узнаёт её и запоминает связку — вот её и спрашиваем. Без этого
+    составы на такую игру уезжали бы с придуманным номером и получали
+    `no_game`, хотя игра у лиги давно есть (проверено на боевых 19.08.2026)."""
+    bare = bare_game_id(game_id)
+    if bare.isdigit():
+        return bare
+    try:
+        import game_link
+        found = game_link.league_id_of("slpro", str(game_id))
+    except Exception as exc:
+        logger.warning("лига-бот: связку игры %s не спросил — %s", game_id, exc)
+        return ""
+    return bare_game_id(found) if found else ""
+
+
 def is_league_game(game_id: Any) -> bool:
     """Настоящая ли это игра лиги.
 
@@ -156,13 +176,14 @@ async def send_pick(user_id: Any, nick: str, game_id: Any,
     clean = slpro_refs(refs)
     if not clean:
         return None
-    if not is_league_game(game_id):
-        logger.info("лига-бот: игра %s заведена руками — состав не отправляю, "
-                    "в зеркале лиги её нет", game_id)
+    gid = league_game_id(game_id)
+    if not gid:
+        logger.info("лига-бот: игра %s ещё не появилась в расписании лиги — "
+                    "состав не отправляю", game_id)
         return None
     body = {"origin": ORIGIN, "picks": [{
         "user_id": str(user_id), "nick": nick,
-        "game_id": bare_game_id(game_id), "refs": clean}]}
+        "game_id": gid, "refs": clean}]}
     # Ловим и здесь, а не только внутри _post. Вызывающий — обработчик
     # сохранения состава: человек уже нажал кнопку, и падение отправки копии
     # не должно доехать до него ни при каких обстоятельствах.
@@ -181,11 +202,12 @@ async def send_lineup(game_id: Any, refs: List[str]) -> Optional[Dict[str, Any]]
 
     Пустой список — это «заявку сняли», а не «нечего отправлять»: у лига-бота
     иначе останется висеть вчерашняя."""
-    if not is_league_game(game_id):
-        logger.info("лига-бот: игра %s заведена руками — заявку не отправляю",
-                    game_id)
+    gid = league_game_id(game_id)
+    if not gid:
+        logger.info("лига-бот: игра %s ещё не в расписании лиги — заявку "
+                    "не отправляю", game_id)
         return None
-    body = {"origin": ORIGIN, "game_id": bare_game_id(game_id),
+    body = {"origin": ORIGIN, "game_id": gid,
             "players": players_from_refs(refs)}
     try:
         answer = await _post("/ingest/lineup", body)
