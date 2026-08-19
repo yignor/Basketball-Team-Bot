@@ -625,13 +625,21 @@ def _same_person(a: str, b: str) -> bool:
 
 
 async def game_pool(source: str, game_id: str,
-                    season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                    season: Optional[Dict[str, Any]] = None,
+                    pool: Optional[List[Dict[str, Any]]] = None
+                    ) -> List[Dict[str, Any]]:
     """Пул для ставки на конкретную игру — только заявленные тренером.
 
     Возвращает карточки пула с полем `declared`, плюс тех из состава, кого в
-    пуле не нашли, — с `unlinked` и без ссылок: поставить на них нельзя."""
+    пуле не нашли, — с `unlinked` и без ссылок: поставить на них нельзя.
+
+    `pool` передают уже ОБОГАЩЁННЫМ статистикой: иначе экран матча считал бы
+    агрегаты заново для своих двенадцати человек, хотя те же числа только что
+    посчитаны для полного ростера. Сначала обогащаем целое, потом отбираем
+    часть — не наоборот."""
     declared = _declared_names(source, str(game_id))
-    pool = await build_pool(season=season)
+    if pool is None:
+        pool = await build_pool(season=season)
     # Состава ещё нет — ставят из полного ростера лиги. Пустой список тут
     # означал бы «игры нет», а игра есть: тренер её объявил.
     if not declared:
@@ -730,7 +738,8 @@ def declared_counts(games: List[Dict[str, Any]]) -> Dict[int, int]:
 
 
 async def all_games_pool(games: List[Dict[str, Any]],
-                         season: Optional[Dict[str, Any]] = None
+                         season: Optional[Dict[str, Any]] = None,
+                         pool: Optional[List[Dict[str, Any]]] = None
                          ) -> Tuple[List[Dict[str, Any]], bool]:
     """Пул для ставки СРАЗУ НА ВСЕ игры плюс признак «заявки разные».
 
@@ -739,7 +748,8 @@ async def all_games_pool(games: List[Dict[str, Any]],
     Но разметить обязаны: у кого в каких матчах он заявлен и совпадают ли
     заявки вообще. Иначе человек соберёт состав, половина которого выйдет
     только в одном матче из трёх, и не поймёт, почему очков мало."""
-    pool = await build_pool(season=season)
+    if pool is None:
+        pool = await build_pool(season=season)
     where = declared_where(games)
     if not where:
         return [dict(e) for e in pool], False
@@ -1804,8 +1814,9 @@ async def handle_games(request: web.Request) -> web.Response:
     # где и раньше (недельный состав), поэтому отдельной таблицы не нужно —
     # это ровно то, чем недельный состав и был.
     if want == "all":
-        pool_all, differ = await all_games_pool(games, season)
-        pool_all = await asyncio.to_thread(pool_with_stats_cached, pool_all, season)
+        full = await build_pool(season=season)
+        rich = await asyncio.to_thread(pool_with_stats_cached, full, season)
+        pool_all, differ = await all_games_pool(games, season, rich)
         return web.json_response({
             "games": games, "game": {"game_id": "all", "source": "",
                                      "label": "Все игры"},
@@ -1824,13 +1835,16 @@ async def handle_games(request: web.Request) -> web.Response:
     pool: List[Dict[str, Any]] = []
     pick: List[str] = []
     if chosen:
-        raw = await game_pool(chosen["source"], chosen["game_id"], season)
+        # Статистику считаем для ПОЛНОГО ростера — этот результат уже лежит в
+        # кеше после экрана пула — и только потом отбираем заявленных.
+        full = await build_pool(season=season)
+        rich = await asyncio.to_thread(pool_with_stats_cached, full, season)
+        pool = await game_pool(chosen["source"], chosen["game_id"], season, rich)
         # Значок «играет ещё и там» — только когда состав объявлен: без заявки
         # считать не по чему, и число было бы выдумано.
         if chosen.get("declared"):
-            for entry in raw:
+            for entry in pool:
                 entry["games"] = counts.get(int(entry.get("row") or 0), 1)
-        pool = await asyncio.to_thread(pool_with_stats_cached, raw, season)
         if season:
             saved = await asyncio.to_thread(
                 fantasy.get_game_pick, str(user["id"]), season["id"],
