@@ -685,6 +685,31 @@ def upcoming_games(limit: int = 6) -> List[Dict[str, Any]]:
     return out
 
 
+async def push_lineup(source: str, game_id: str,
+                      season: Optional[Dict[str, Any]] = None) -> None:
+    """Отправляет в лига-бот текущую заявку тренера на игру.
+
+    Зовётся при КАЖДОМ изменении состава: заявка там заменяется целиком, и
+    пустой список означает «сняли», а не «нечего слать». Лига публикует свою
+    заявку только к стартовому свистку, а тренер знает её накануне — этим
+    вызовом фильтр «кто сегодня играет» включается заранее."""
+    if source != "slpro":
+        return
+    try:
+        import league_push
+        if not league_push.enabled():
+            return
+        entries = await game_pool(source, str(game_id), season)
+        refs: List[str] = []
+        for e in entries:
+            if e.get("ref"):
+                refs.append(str(e["ref"]))
+            refs.extend(str(r) for r in (e.get("refs") or []))
+        await league_push.send_lineup(game_id, refs)
+    except Exception as exc:
+        log.warning("лига-бот: заявка на %s не отправлена — %s", game_id, exc)
+
+
 async def picks_hit_by(source: str, game_id: str, player_row: int,
                        season: Optional[Dict[str, Any]] = None
                        ) -> List[Dict[str, Any]]:
@@ -1919,6 +1944,19 @@ async def handle_save_game_pick(request: web.Request) -> web.Response:
 
     await asyncio.to_thread(fantasy.set_game_pick, str(user["id"]), season["id"],
                             source, game_id, refs, body.get("mode") or "")
+
+    # Копия в лига-бот — СРАЗУ, а не пачкой к вечеру: он проверяет своё окно и
+    # откажет по игре, которая уже началась. Только СЛПРО: остальные лиги ему
+    # неинтересны. Ошибка отправки не должна портить сохранение — человек свой
+    # состав сохранил, а то, что копия не уехала, наша забота, не его.
+    if source == "slpro":
+        try:
+            import league_push
+            await league_push.send_pick(user["id"], league_push.nick_of(user),
+                                        game_id, refs)
+        except Exception as exc:
+            log.warning("лига-бот: состав не отправлен — %s", exc)
+
     return web.json_response({"ok": True, "refs": refs})
 
 

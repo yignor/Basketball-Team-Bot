@@ -5193,6 +5193,7 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         if what == "add":
             await asyncio.to_thread(game_roster.add, source, game_id, row, str(user.id))
             _drop_pending(user.id)
+            await _push_lineup(source, game_id)
         elif what == "gname":
             _clear_pending(user.id)
             _awaiting_guest[user.id] = (source, game_id, row)
@@ -5223,6 +5224,7 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
             hit = await _fantasy_picks_hit(source, game_id, row)
             await asyncio.to_thread(game_roster.remove, source, game_id, row)
             await _warn_fantasy_players(query.get_bot(), source, game_id, hit)
+            await _push_lineup(source, game_id)
         elif what == "paid":
             await asyncio.to_thread(game_roster.mark_paid, row, source, game_id,
                                     str(user.id))
@@ -5346,6 +5348,9 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
     who = f"@{user.username}" if getattr(user, "username", "") else str(user.id)
     if posts:
         await asyncio.to_thread(game_roster.mark_posted, source, game_id, posts)
+    # Публикация — тоже повод отправить заявку: до неё состав мог меняться
+    # молча, а тут он объявлен и точно тот, что будет играть.
+    await _push_lineup(source, game_id)
     # В журнал — с именем: это единственное сообщение бота, которое видит вся
     # команда, и на вопрос «бот сам или человек?» должны отвечать данные.
     log.info(f"Состав {source}:{game_id} отправлен в чат ({len(people)} чел.) "
@@ -7648,6 +7653,18 @@ async def _remind_game_debtors(app: Application, game: Dict[str, Any],
             log.info(f"Напоминание об игре в строку {p['row']} не доставлено: {e}")
             stat["failed"].append(p["title"])
     return stat
+
+
+async def _push_lineup(source: str, game_id: str) -> None:
+    """Заявку тренера — в лига-бот. Молча, если отправка не настроена.
+
+    Зовём при каждом изменении состава, а не только при публикации: заявка там
+    заменяется целиком, и «снял одного» — такое же изменение, как «добавил»."""
+    try:
+        import fantasy_api
+        await fantasy_api.push_lineup(source, str(game_id))
+    except Exception as e:
+        log.warning(f"лига-бот: заявка на {game_id} не ушла: {e}")
 
 
 async def _fantasy_picks_hit(source: str, game_id: str, row: int) -> List[Dict[str, Any]]:
