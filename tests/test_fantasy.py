@@ -209,6 +209,31 @@ def test_declared_bridge() -> None:
           "неполное ФИО совпадением не считаем")
 
 
+def test_stats_cache_sees_the_list() -> None:
+    """Кеш обогащённого пула ключуется по СОСТАВУ списка, а не только по сезону.
+
+    Ключом был один сезон — пул считался «одинаковым для всех». С появлением
+    ставок на игру это перестало быть правдой: экран матча передаёт заявку
+    тренера, а получал из кеша полный ростер лиги. Фильтр считался верно и тут
+    же выбрасывался, а снаружи выглядело, будто он не работает."""
+    print("\n=== кеш не подменяет заявку полным ростером ===")
+    import fantasy_api as fa
+    full = [{"ref": f"ib:1:p{i}", "name": f"Игрок{i}"} for i in range(24)]
+    part = full[:12]
+    season = {"id": SEASON}
+
+    got_full = fa.pool_with_stats_cached(full, season)
+    got_part = fa.pool_with_stats_cached(part, season)
+    got_again = fa.pool_with_stats_cached(full, season)
+
+    check(len(got_full) == 24, f"полный пул отдан целиком: {len(got_full)}")
+    check(len(got_part) == 12, f"заявка на игру не подменена: {len(got_part)}")
+    check(len(got_again) == 24, f"полный пул из кеша не испорчен: {len(got_again)}")
+    # Кеш обязан продолжать работать: второй одинаковый запрос — тот же объект.
+    check(got_again is fa.pool_with_stats_cached(full, season),
+          "повторный запрос берётся из кеша, а не считается заново")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -217,6 +242,7 @@ def main() -> int:
     test_prune_keeps_real_zeros()
     test_game_pick_beats_week()
     test_declared_bridge()
+    test_stats_cache_sees_the_list()
 
     print("\n" + "=" * 60)
     if bad:
