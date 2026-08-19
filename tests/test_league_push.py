@@ -43,6 +43,36 @@ def test_game_id_is_bare() -> None:
     check(lp.bare_game_id("") == "", "пустое остаётся пустым")
 
 
+def test_manual_games_are_not_sent() -> None:
+    """Игру, заведённую тренером руками, соседу не шлём.
+
+    У неё метка «m» вместо номера лиги, в зеркале соседа её нет — он вернёт
+    no_game. Проверено на живой отправке 19.08.2026: состав дошёл и был
+    отклонён именно так. Слать заведомо отвергаемое значит забивать журнал
+    предупреждениями и заслонять ими настоящие отказы."""
+    print("\n=== ручные игры не отправляем ===")
+    check(lp.is_league_game("slpro-4558"), "настоящая игра лиги — шлём")
+    check(lp.is_league_game("4558"), "голый номер — тоже")
+    check(not lp.is_league_game("slpro-m2608170821"), "заведённая руками — нет")
+    check(not lp.is_league_game(""), "пустой id — нет")
+
+    os.environ["LEAGUE_INGEST_TOKEN"] = "тест"
+    tried: List[str] = []
+
+    async def spy(path, body):
+        tried.append(path)
+        return {"ok": True, "accepted": 1, "rejected": []}
+
+    real, lp._post = lp._post, spy
+    try:
+        asyncio.run(lp.send_pick("1", "v", "slpro-m2608170821", ["slpro:707:1"]))
+        check(not tried, "по ручной игре запрос вообще не уходит")
+        asyncio.run(lp.send_pick("1", "v", "slpro-4558", ["slpro:707:1"]))
+        check(tried == ["/ingest/picks"], f"по лиговой — уходит: {tried}")
+    finally:
+        lp._post = real
+
+
 def test_refs_are_plain() -> None:
     """Склеенный игрок разбирается, чужая лига отбрасывается.
 
@@ -144,6 +174,7 @@ def test_rejections_are_logged() -> None:
 
 def main() -> int:
     test_game_id_is_bare()
+    test_manual_games_are_not_sent()
     test_refs_are_plain()
     test_lineup_players()
     test_nick_is_one_word()

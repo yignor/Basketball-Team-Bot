@@ -52,6 +52,17 @@ def bare_game_id(game_id: Any) -> str:
     return gid.split("-", 1)[1] if gid.startswith("slpro-") else gid
 
 
+def is_league_game(game_id: Any) -> bool:
+    """Настоящая ли это игра лиги.
+
+    Тренер может завести игру руками — тогда id получает метку «m»
+    («slpro-m2608170821»), а у лиговых id голые цифры. Такой игры в зеркале
+    соседа нет и быть не может: он вернёт `no_game`, и предупреждение об этом
+    падало бы в журнал при каждом сохранении, заслоняя настоящие отказы."""
+    bare = bare_game_id(game_id)
+    return bool(bare) and bare.isdigit()
+
+
 def slpro_refs(refs: List[str]) -> List[str]:
     """Только простые ссылки этой лиги, склейка разобрана.
 
@@ -145,6 +156,10 @@ async def send_pick(user_id: Any, nick: str, game_id: Any,
     clean = slpro_refs(refs)
     if not clean:
         return None
+    if not is_league_game(game_id):
+        logger.info("лига-бот: игра %s заведена руками — состав не отправляю, "
+                    "в зеркале лиги её нет", game_id)
+        return None
     body = {"origin": ORIGIN, "picks": [{
         "user_id": str(user_id), "nick": nick,
         "game_id": bare_game_id(game_id), "refs": clean}]}
@@ -166,6 +181,10 @@ async def send_lineup(game_id: Any, refs: List[str]) -> Optional[Dict[str, Any]]
 
     Пустой список — это «заявку сняли», а не «нечего отправлять»: у лига-бота
     иначе останется висеть вчерашняя."""
+    if not is_league_game(game_id):
+        logger.info("лига-бот: игра %s заведена руками — заявку не отправляю",
+                    game_id)
+        return None
     body = {"origin": ORIGIN, "game_id": bare_game_id(game_id),
             "players": players_from_refs(refs)}
     try:
