@@ -5186,7 +5186,11 @@ async def handle_roster_callback(update: Update, context: ContextTypes.DEFAULT_T
         elif what == "skip":
             _drop_pending(user.id)
         elif what == "del":
+            # Кого задело — считаем ДО удаления: после него человека уже не
+            # найти в заявке, а ставки на него остались.
+            hit = await _fantasy_picks_hit(source, game_id, row)
             await asyncio.to_thread(game_roster.remove, source, game_id, row)
+            await _warn_fantasy_players(query.get_bot(), source, game_id, hit)
         elif what == "paid":
             await asyncio.to_thread(game_roster.mark_paid, row, source, game_id,
                                     str(user.id))
@@ -7612,6 +7616,46 @@ async def _remind_game_debtors(app: Application, game: Dict[str, Any],
             log.info(f"Напоминание об игре в строку {p['row']} не доставлено: {e}")
             stat["failed"].append(p["title"])
     return stat
+
+
+async def _fantasy_picks_hit(source: str, game_id: str, row: int) -> List[Dict[str, Any]]:
+    """Чьи ставки в фэнтези задевает снятие игрока. Пусто — если фэнтези не идёт."""
+    try:
+        import fantasy_api
+        return await fantasy_api.picks_hit_by(source, game_id, int(row))
+    except Exception as e:
+        log.warning(f"фэнтези: кого задело снятие из состава — не посчитал: {e}")
+        return []
+
+
+async def _warn_fantasy_players(bot: Any, source: str, game_id: str,
+                                hit: List[Dict[str, Any]]) -> int:
+    """Говорит участникам фэнтези, что их игрока сняли с состава.
+
+    Ставку за человека не переделываем: это его выбор, и менять чужой состав
+    молча нельзя. Но и промолчать нельзя — он узнал бы об этом только по нулю
+    в таблице, когда менять уже поздно."""
+    if not hit:
+        return 0
+    import game_roster
+    game = next((g for g in game_roster.games()
+                 if g["source"] == source and g["game_id"] == str(game_id)), None)
+    label = game_roster.game_label(game) if game else "ближайшую игру"
+    sent = 0
+    for one in hit:
+        try:
+            await bot.send_message(
+                chat_id=int(one["user_id"]),
+                text=(f"⚠️ {one['name']} снят с состава на игру {label}.\n\n"
+                      "Он в твоей ставке — очков за него не будет. Поменять "
+                      "состав можно до стартового свистка."))
+            sent += 1
+        except Exception as e:
+            log.info(f"фэнтези: не доставил предупреждение о снятии: {e}")
+    if sent:
+        log.info(f"фэнтези: о снятии из состава {source}:{game_id} "
+                 f"предупреждено участников — {sent}")
+    return sent
 
 
 async def _tell_coaches(app: Application, text: str,

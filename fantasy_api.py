@@ -677,6 +677,40 @@ def upcoming_games(limit: int = 6) -> List[Dict[str, Any]]:
     return out
 
 
+async def picks_hit_by(source: str, game_id: str, player_row: int,
+                       season: Optional[Dict[str, Any]] = None
+                       ) -> List[Dict[str, Any]]:
+    """Чьи ставки задевает снятие этого человека с игры: [{user_id, name}].
+
+    Тренер снимает игрока строкой листа, а ставка адресуется id лиги — сводим
+    по ФИО тем же способом, что и заявку. Никого не нашли (человека нет в
+    лиге) — значит и в ставках его быть не могло, отвечаем пустым списком."""
+    import coach_payments
+    import fantasy
+    if season is None:
+        season = fantasy.get_active_season()
+    if not season:
+        return []
+    person = coach_payments.player_by_row(int(player_row))
+    title = str((person or {}).get("title") or "").strip()
+    if not title:
+        return []
+
+    pool = await build_pool(season=season)
+    hit = next((e for e in pool if _same_person(e["name"], title)), None)
+    if not hit:
+        return []
+    refs = set(hit.get("refs") or ([hit["ref"]] if hit.get("ref") else []))
+    if not refs:
+        return []
+
+    picks = await asyncio.to_thread(fantasy.game_picks_by_user, season["id"],
+                                    source, str(game_id))
+    return [{"user_id": uid, "name": hit["name"]}
+            for uid, entry in picks.items()
+            if refs & set(entry.get("refs") or [])]
+
+
 def declared_where(games: List[Dict[str, Any]]) -> Dict[int, List[str]]:
     """{строка листа: в каких из этих игр человек заявлен} — подписи игр.
 

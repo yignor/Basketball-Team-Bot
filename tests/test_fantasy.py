@@ -234,6 +234,50 @@ def test_stats_cache_sees_the_list() -> None:
           "повторный запрос берётся из кеша, а не считается заново")
 
 
+def test_removal_hits_picks() -> None:
+    """Снятие игрока с состава находит тех, у кого он в ставке.
+
+    Тренер снимает человека строкой листа, а ставка адресуется id лиги —
+    сводим по ФИО. Ставку при этом не переделываем: это выбор участника, и
+    менять чужой состав молча нельзя. Но и молчать нельзя — он узнал бы о
+    снятии только по нулю в таблице, когда менять уже поздно."""
+    print("\n=== снятие из состава находит задетые ставки ===")
+    import asyncio as _aio
+    import fantasy_api as fa
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO players (row_index, surname, name, "
+                     "synced_at) VALUES (77, 'Шлепикас', 'Роман', ?)", (now,))
+        conn.commit()
+    # Пул подменяем: проверяем сведение ФИО и пересечение со ставками, а не
+    # сборку пула из заявок лиг — она своя история и требует всего зеркала.
+    async def fake_pool(season=None, force=False):
+        return [{"refs": ["ib:1:p1"], "ref": "ib:1:p1", "name": "Шлепикас Роман"},
+                {"refs": ["ib:1:p2"], "ref": "ib:1:p2", "name": "Иванов Иван"}]
+    real_pool, fa.build_pool = fa.build_pool, fake_pool
+
+    # Двое: у первого снятый в ставке, у второго нет.
+    fantasy.set_game_pick("aaa", SEASON, "infobasket", "our", ["ib:1:p1", "ib:1:p2"])
+    fantasy.set_game_pick("bbb", SEASON, "infobasket", "our", ["ib:1:p2"])
+
+    season = fantasy._get_season(SEASON)
+    hit = _aio.run(fa.picks_hit_by("infobasket", "our", 77, season))
+    ids = sorted(h["user_id"] for h in hit)
+    check(ids == ["aaa"], f"задет только тот, у кого он в ставке: {ids}")
+    check(hit and hit[0]["name"] == "Шлепикас Роман",
+          f"имя для сообщения человеческое: {hit and hit[0]['name']}")
+
+    # Человека нет в лиге — и в ставках его быть не могло.
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO players (row_index, surname, name, "
+                     "synced_at) VALUES (78, 'Никого', 'Нет', ?)", (now,))
+        conn.commit()
+    check(_aio.run(fa.picks_hit_by("infobasket", "our", 78, season)) == [],
+          "несведённый с лигой никого не задевает")
+    fa.build_pool = real_pool
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -243,6 +287,7 @@ def main() -> int:
     test_game_pick_beats_week()
     test_declared_bridge()
     test_stats_cache_sees_the_list()
+    test_removal_hits_picks()
 
     print("\n" + "=" * 60)
     if bad:
