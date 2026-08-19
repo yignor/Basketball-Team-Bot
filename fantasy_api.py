@@ -1896,8 +1896,18 @@ async def handle_save_game_pick(request: web.Request) -> web.Response:
 
     # Ставить можно только на заявленных: список в приложении мог устареть,
     # пока человек его листал, а тренер тем временем поправил состав.
-    allowed = {r for e in await game_pool(source, game_id, season)
-               for r in (e.get("refs") or [])}
+    #
+    # Берём и `ref`, и `refs`. Один человек, играющий в двух лигах, склеен в
+    # одну карточку с СОСТАВНОЙ ссылкой («slpro:..+ib:..»), и списка `refs` у
+    # неё уже нет — приложение присылает именно составную. Пока здесь стоял
+    # только `refs`, разрешённое множество выходило пустым и не сохранялся
+    # вообще никакой состав.
+    allowed = set()
+    for e in await game_pool(source, game_id, season):
+        if e.get("ref"):
+            allowed.add(str(e["ref"]))
+        for r in (e.get("refs") or []):
+            allowed.add(str(r))
     bad = [r for r in refs if r not in allowed]
     if bad:
         return web.json_response({"error": "not_declared", "refs": bad}, status=400)

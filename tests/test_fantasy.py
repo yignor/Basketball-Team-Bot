@@ -278,6 +278,48 @@ def test_removal_hits_picks() -> None:
     fa.build_pool = real_pool
 
 
+def test_save_accepts_merged_refs() -> None:
+    """Сохранение принимает СОСТАВНУЮ ссылку склеенного игрока.
+
+    Один человек, играющий в двух лигах, склеен в одну карточку с ссылкой
+    «slpro:..+ib:..», и списка refs у неё уже нет — приложение присылает
+    именно составную. Пока проверка смотрела только в refs, разрешённое
+    множество выходило пустым, и не сохранялся вообще никакой состав:
+    «Не удалось сохранить» на любой попытке."""
+    print("\n=== сохранение принимает склеенного игрока ===")
+    import asyncio as _aio
+    import fantasy_api as fa
+
+    # Так выглядит карточка ПОСЛЕ склейки: ref составной, refs нет.
+    merged = [{"ref": "slpro:707:1+infobasket:36502:9", "name": "Шлепикас Роман"},
+              {"ref": "infobasket:36502:5", "name": "Иванов Иван"}]
+
+    async def fake_pool(season=None, force=False):
+        return merged
+    real, fa.build_pool = fa.build_pool, fake_pool
+    try:
+        got = _aio.run(fa.game_pool("infobasket", "нет-заявки", None))
+        allowed = set()
+        for e in got:
+            if e.get("ref"):
+                allowed.add(str(e["ref"]))
+            for r in (e.get("refs") or []):
+                allowed.add(str(r))
+    finally:
+        fa.build_pool = real
+
+    check("slpro:707:1+infobasket:36502:9" in allowed,
+          f"составная ссылка разрешена: {sorted(allowed)}")
+    check(len(allowed) == 2, f"разрешены оба игрока: {len(allowed)}")
+
+    # И сам код проверки в обработчике должен смотреть в оба поля.
+    src = (ROOT / "fantasy_api.py").read_text()
+    at = src.index("async def handle_save_game_pick")
+    body = src[at:at + 2600]
+    check('e.get("ref")' in body and 'e.get("refs")' in body,
+          "проверка сохранения смотрит и в ref, и в refs")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -288,6 +330,7 @@ def main() -> int:
     test_declared_bridge()
     test_stats_cache_sees_the_list()
     test_removal_hits_picks()
+    test_save_accepts_merged_refs()
 
     print("\n" + "=" * 60)
     if bad:
