@@ -156,6 +156,31 @@ def test_rename_guest() -> None:
           "чужой номер не переименовать")
 
 
+def test_roster_reads_sheet_once() -> None:
+    """Состав не перечитывает лист на каждого человека.
+
+    Здесь стоял player_by_row() в цикле, а он читает лист целиком: двенадцать
+    человек в заявке — двенадцать полных чтений. На экранах фэнтези эта
+    функция зовётся по разу на игру, и ожидание складывалось в паузу при
+    открытии приложения."""
+    print("\n=== состав читает лист один раз ===")
+    import coach_payments
+    calls = {"n": 0}
+    real = coach_payments.players
+
+    def counted():
+        calls["n"] += 1
+        return real()
+
+    coach_payments.players = counted
+    try:
+        rows = game_roster.roster(SRC, GID)
+    finally:
+        coach_payments.players = real
+    check(calls["n"] <= 1, f"лист прочитан не больше одного раза: {calls['n']}")
+    check(len(rows) > 0, f"состав при этом собран: {len(rows)}")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -164,6 +189,7 @@ def main() -> int:
     test_guest_to_start()
     test_rename_guest()
     test_start_counts_only_live()
+    test_roster_reads_sheet_once()
 
     print("\n" + "=" * 60)
     if bad:

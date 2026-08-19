@@ -625,13 +625,21 @@ def _same_person(a: str, b: str) -> bool:
 
 
 async def game_pool(source: str, game_id: str,
-                    season: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+                    season: Optional[Dict[str, Any]] = None,
+                    pool: Optional[List[Dict[str, Any]]] = None
+                    ) -> List[Dict[str, Any]]:
     """Пул для ставки на конкретную игру — только заявленные тренером.
 
     Возвращает карточки пула с полем `declared`, плюс тех из состава, кого в
-    пуле не нашли, — с `unlinked` и без ссылок: поставить на них нельзя."""
+    пуле не нашли, — с `unlinked` и без ссылок: поставить на них нельзя.
+
+    `pool` передают уже ОБОГАЩЁННЫМ статистикой: иначе экран матча считал бы
+    агрегаты заново для своих двенадцати человек, хотя те же числа только что
+    посчитаны для полного ростера. Сначала обогащаем целое, потом отбираем
+    часть — не наоборот."""
     declared = _declared_names(source, str(game_id))
-    pool = await build_pool(season=season)
+    if pool is None:
+        pool = await build_pool(season=season)
     # Состава ещё нет — ставят из полного ростера лиги. Пустой список тут
     # означал бы «игры нет», а игра есть: тренер её объявил.
     if not declared:
@@ -677,6 +685,40 @@ def upcoming_games(limit: int = 6) -> List[Dict[str, Any]]:
     return out
 
 
+async def picks_hit_by(source: str, game_id: str, player_row: int,
+                       season: Optional[Dict[str, Any]] = None
+                       ) -> List[Dict[str, Any]]:
+    """Чьи ставки задевает снятие этого человека с игры: [{user_id, name}].
+
+    Тренер снимает игрока строкой листа, а ставка адресуется id лиги — сводим
+    по ФИО тем же способом, что и заявку. Никого не нашли (человека нет в
+    лиге) — значит и в ставках его быть не могло, отвечаем пустым списком."""
+    import coach_payments
+    import fantasy
+    if season is None:
+        season = fantasy.get_active_season()
+    if not season:
+        return []
+    person = coach_payments.player_by_row(int(player_row))
+    title = str((person or {}).get("title") or "").strip()
+    if not title:
+        return []
+
+    pool = await build_pool(season=season)
+    hit = next((e for e in pool if _same_person(e["name"], title)), None)
+    if not hit:
+        return []
+    refs = set(hit.get("refs") or ([hit["ref"]] if hit.get("ref") else []))
+    if not refs:
+        return []
+
+    picks = await asyncio.to_thread(fantasy.game_picks_by_user, season["id"],
+                                    source, str(game_id))
+    return [{"user_id": uid, "name": hit["name"]}
+            for uid, entry in picks.items()
+            if refs & set(entry.get("refs") or [])]
+
+
 def declared_where(games: List[Dict[str, Any]]) -> Dict[int, List[str]]:
     """{строка листа: в каких из этих игр человек заявлен} — подписи игр.
 
@@ -696,7 +738,8 @@ def declared_counts(games: List[Dict[str, Any]]) -> Dict[int, int]:
 
 
 async def all_games_pool(games: List[Dict[str, Any]],
-                         season: Optional[Dict[str, Any]] = None
+                         season: Optional[Dict[str, Any]] = None,
+                         pool: Optional[List[Dict[str, Any]]] = None
                          ) -> Tuple[List[Dict[str, Any]], bool]:
     """Пул для ставки СРАЗУ НА ВСЕ игры плюс признак «заявки разные».
 
@@ -705,7 +748,8 @@ async def all_games_pool(games: List[Dict[str, Any]],
     Но разметить обязаны: у кого в каких матчах он заявлен и совпадают ли
     заявки вообще. Иначе человек соберёт состав, половина которого выйдет
     только в одном матче из трёх, и не поймёт, почему очков мало."""
-    pool = await build_pool(season=season)
+    if pool is None:
+        pool = await build_pool(season=season)
     where = declared_where(games)
     if not where:
         return [dict(e) for e in pool], False
@@ -1060,9 +1104,19 @@ def pool_with_stats_cached(pool: List[Dict[str, Any]],
     """Тот же обогащённый пул, но не пересобираемый на каждый запрос.
 
     Приложение открывает три экрана разом (пул, состав, таблица), и каждый
-    заново считал агрегаты по всей статистике. Пул одинаков для всех, поэтому
-    минуты жизни кеша достаточно, а ожидание у человека сокращается кратно."""
-    key = str((season or {}).get("id", ""))
+    заново считал агрегаты по всей статистике. Минуты жизни кеша достаточно, а
+    ожидание у человека сокращается кратно.
+
+    Ключ — сезон И СОСТАВ ПЕРЕДАННОГО СПИСКА. Раньше ключом был только сезон,
+    и пул считался «одинаковым для всех» — это перестало быть правдой, когда
+    появились ставки на игру: экран матча передаёт сюда заявку тренера (12
+    человек), а получал из кеша полный ростер лиги (24). Фильтр считался
+    верно и тут же выбрасывался — снаружи это выглядело как «фильтр не
+    работает»."""
+    refs = "|".join(sorted(str(e.get("ref") or ",".join(e.get("refs") or []))
+                           for e in pool))
+    key = str((season or {}).get("id", "")) + ":" + hashlib.md5(
+        refs.encode("utf-8")).hexdigest()[:12]
     hit = _stats_cache.get(key)
     now = time.time()
     if hit and now - hit["at"] < STATS_TTL:
@@ -1760,8 +1814,9 @@ async def handle_games(request: web.Request) -> web.Response:
     # где и раньше (недельный состав), поэтому отдельной таблицы не нужно —
     # это ровно то, чем недельный состав и был.
     if want == "all":
-        pool_all, differ = await all_games_pool(games, season)
-        pool_all = await asyncio.to_thread(pool_with_stats_cached, pool_all, season)
+        full = await build_pool(season=season)
+        rich = await asyncio.to_thread(pool_with_stats_cached, full, season)
+        pool_all, differ = await all_games_pool(games, season, rich)
         return web.json_response({
             "games": games, "game": {"game_id": "all", "source": "",
                                      "label": "Все игры"},
@@ -1780,13 +1835,16 @@ async def handle_games(request: web.Request) -> web.Response:
     pool: List[Dict[str, Any]] = []
     pick: List[str] = []
     if chosen:
-        raw = await game_pool(chosen["source"], chosen["game_id"], season)
+        # Статистику считаем для ПОЛНОГО ростера — этот результат уже лежит в
+        # кеше после экрана пула — и только потом отбираем заявленных.
+        full = await build_pool(season=season)
+        rich = await asyncio.to_thread(pool_with_stats_cached, full, season)
+        pool = await game_pool(chosen["source"], chosen["game_id"], season, rich)
         # Значок «играет ещё и там» — только когда состав объявлен: без заявки
         # считать не по чему, и число было бы выдумано.
         if chosen.get("declared"):
-            for entry in raw:
+            for entry in pool:
                 entry["games"] = counts.get(int(entry.get("row") or 0), 1)
-        pool = await asyncio.to_thread(pool_with_stats_cached, raw, season)
         if season:
             saved = await asyncio.to_thread(
                 fantasy.get_game_pick, str(user["id"]), season["id"],
@@ -1838,8 +1896,18 @@ async def handle_save_game_pick(request: web.Request) -> web.Response:
 
     # Ставить можно только на заявленных: список в приложении мог устареть,
     # пока человек его листал, а тренер тем временем поправил состав.
-    allowed = {r for e in await game_pool(source, game_id, season)
-               for r in (e.get("refs") or [])}
+    #
+    # Берём и `ref`, и `refs`. Один человек, играющий в двух лигах, склеен в
+    # одну карточку с СОСТАВНОЙ ссылкой («slpro:..+ib:..»), и списка `refs` у
+    # неё уже нет — приложение присылает именно составную. Пока здесь стоял
+    # только `refs`, разрешённое множество выходило пустым и не сохранялся
+    # вообще никакой состав.
+    allowed = set()
+    for e in await game_pool(source, game_id, season):
+        if e.get("ref"):
+            allowed.add(str(e["ref"]))
+        for r in (e.get("refs") or []):
+            allowed.add(str(r))
     bad = [r for r in refs if r not in allowed]
     if bad:
         return web.json_response({"error": "not_declared", "refs": bad}, status=400)

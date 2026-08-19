@@ -209,6 +209,117 @@ def test_declared_bridge() -> None:
           "неполное ФИО совпадением не считаем")
 
 
+def test_stats_cache_sees_the_list() -> None:
+    """Кеш обогащённого пула ключуется по СОСТАВУ списка, а не только по сезону.
+
+    Ключом был один сезон — пул считался «одинаковым для всех». С появлением
+    ставок на игру это перестало быть правдой: экран матча передаёт заявку
+    тренера, а получал из кеша полный ростер лиги. Фильтр считался верно и тут
+    же выбрасывался, а снаружи выглядело, будто он не работает."""
+    print("\n=== кеш не подменяет заявку полным ростером ===")
+    import fantasy_api as fa
+    full = [{"ref": f"ib:1:p{i}", "name": f"Игрок{i}"} for i in range(24)]
+    part = full[:12]
+    season = {"id": SEASON}
+
+    got_full = fa.pool_with_stats_cached(full, season)
+    got_part = fa.pool_with_stats_cached(part, season)
+    got_again = fa.pool_with_stats_cached(full, season)
+
+    check(len(got_full) == 24, f"полный пул отдан целиком: {len(got_full)}")
+    check(len(got_part) == 12, f"заявка на игру не подменена: {len(got_part)}")
+    check(len(got_again) == 24, f"полный пул из кеша не испорчен: {len(got_again)}")
+    # Кеш обязан продолжать работать: второй одинаковый запрос — тот же объект.
+    check(got_again is fa.pool_with_stats_cached(full, season),
+          "повторный запрос берётся из кеша, а не считается заново")
+
+
+def test_removal_hits_picks() -> None:
+    """Снятие игрока с состава находит тех, у кого он в ставке.
+
+    Тренер снимает человека строкой листа, а ставка адресуется id лиги —
+    сводим по ФИО. Ставку при этом не переделываем: это выбор участника, и
+    менять чужой состав молча нельзя. Но и молчать нельзя — он узнал бы о
+    снятии только по нулю в таблице, когда менять уже поздно."""
+    print("\n=== снятие из состава находит задетые ставки ===")
+    import asyncio as _aio
+    import fantasy_api as fa
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO players (row_index, surname, name, "
+                     "synced_at) VALUES (77, 'Шлепикас', 'Роман', ?)", (now,))
+        conn.commit()
+    # Пул подменяем: проверяем сведение ФИО и пересечение со ставками, а не
+    # сборку пула из заявок лиг — она своя история и требует всего зеркала.
+    async def fake_pool(season=None, force=False):
+        return [{"refs": ["ib:1:p1"], "ref": "ib:1:p1", "name": "Шлепикас Роман"},
+                {"refs": ["ib:1:p2"], "ref": "ib:1:p2", "name": "Иванов Иван"}]
+    real_pool, fa.build_pool = fa.build_pool, fake_pool
+
+    # Двое: у первого снятый в ставке, у второго нет.
+    fantasy.set_game_pick("aaa", SEASON, "infobasket", "our", ["ib:1:p1", "ib:1:p2"])
+    fantasy.set_game_pick("bbb", SEASON, "infobasket", "our", ["ib:1:p2"])
+
+    season = fantasy._get_season(SEASON)
+    hit = _aio.run(fa.picks_hit_by("infobasket", "our", 77, season))
+    ids = sorted(h["user_id"] for h in hit)
+    check(ids == ["aaa"], f"задет только тот, у кого он в ставке: {ids}")
+    check(hit and hit[0]["name"] == "Шлепикас Роман",
+          f"имя для сообщения человеческое: {hit and hit[0]['name']}")
+
+    # Человека нет в лиге — и в ставках его быть не могло.
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO players (row_index, surname, name, "
+                     "synced_at) VALUES (78, 'Никого', 'Нет', ?)", (now,))
+        conn.commit()
+    check(_aio.run(fa.picks_hit_by("infobasket", "our", 78, season)) == [],
+          "несведённый с лигой никого не задевает")
+    fa.build_pool = real_pool
+
+
+def test_save_accepts_merged_refs() -> None:
+    """Сохранение принимает СОСТАВНУЮ ссылку склеенного игрока.
+
+    Один человек, играющий в двух лигах, склеен в одну карточку с ссылкой
+    «slpro:..+ib:..», и списка refs у неё уже нет — приложение присылает
+    именно составную. Пока проверка смотрела только в refs, разрешённое
+    множество выходило пустым, и не сохранялся вообще никакой состав:
+    «Не удалось сохранить» на любой попытке."""
+    print("\n=== сохранение принимает склеенного игрока ===")
+    import asyncio as _aio
+    import fantasy_api as fa
+
+    # Так выглядит карточка ПОСЛЕ склейки: ref составной, refs нет.
+    merged = [{"ref": "slpro:707:1+infobasket:36502:9", "name": "Шлепикас Роман"},
+              {"ref": "infobasket:36502:5", "name": "Иванов Иван"}]
+
+    async def fake_pool(season=None, force=False):
+        return merged
+    real, fa.build_pool = fa.build_pool, fake_pool
+    try:
+        got = _aio.run(fa.game_pool("infobasket", "нет-заявки", None))
+        allowed = set()
+        for e in got:
+            if e.get("ref"):
+                allowed.add(str(e["ref"]))
+            for r in (e.get("refs") or []):
+                allowed.add(str(r))
+    finally:
+        fa.build_pool = real
+
+    check("slpro:707:1+infobasket:36502:9" in allowed,
+          f"составная ссылка разрешена: {sorted(allowed)}")
+    check(len(allowed) == 2, f"разрешены оба игрока: {len(allowed)}")
+
+    # И сам код проверки в обработчике должен смотреть в оба поля.
+    src = (ROOT / "fantasy_api.py").read_text()
+    at = src.index("async def handle_save_game_pick")
+    body = src[at:at + 2600]
+    check('e.get("ref")' in body and 'e.get("refs")' in body,
+          "проверка сохранения смотрит и в ref, и в refs")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
@@ -217,6 +328,9 @@ def main() -> int:
     test_prune_keeps_real_zeros()
     test_game_pick_beats_week()
     test_declared_bridge()
+    test_stats_cache_sees_the_list()
+    test_removal_hits_picks()
+    test_save_accepts_merged_refs()
 
     print("\n" + "=" * 60)
     if bad:

@@ -232,11 +232,17 @@ def roster(source: str, game_id: str) -> List[Dict[str, Any]]:
         rows = conn.execute(
             "SELECT player_row FROM game_rosters WHERE source = ? AND game_id = ?",
             (source, str(game_id))).fetchall()
+    # Лист читаем ОДИН раз и раскладываем по строкам. Раньше здесь стоял
+    # coach_payments.player_by_row() на каждого, а он перечитывает весь лист
+    # целиком: двенадцать человек в заявке — двенадцать полных чтений, 27 мс
+    # вместо трёх. На экранах фэнтези эта функция зовётся по разу на игру, и
+    # ожидание складывалось в заметную паузу при открытии.
+    wanted = [int(r["player_row"]) for r in rows]
+    by_row = {int(p["row"]): p for p in coach_payments.players()
+              if int(p["row"]) in set(wanted)}
     out = []
-    for r in rows:
-        row = int(r["player_row"])
-        player = (guest_card(source, game_id, row) if row < 0
-                  else coach_payments.player_by_row(row))
+    for row in wanted:
+        player = guest_card(source, game_id, row) if row < 0 else by_row.get(row)
         if player:
             out.append(player)
     out.sort(key=_by_surname)
