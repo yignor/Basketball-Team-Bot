@@ -243,6 +243,15 @@
   .sortchip select { background: transparent; padding: 8px 2px; font-size: 13px;
                      border-radius: 0; max-width: 132px; }
   .sorticon { opacity: .55; font-size: 13px; }
+  /* Блок переноса состава. Своих полей у него не было, и он прилипал к левому
+     краю, пока соседние экраны отбиты на 16px. Баннеру внутри поля гасим —
+     иначе они складываются с полями блока и получается двойной отступ. */
+  #copyBox { padding: 6px 16px 16px; }
+  #copyBox .banner { margin: 10px 0 0; }
+  #copyBox .gs-card { margin-bottom: 8px; }
+  .copydone { display: block; width: 100%; margin-top: 4px; padding: 11px;
+              border-radius: 12px; border: 1px solid var(--sep, #2a2a2a);
+              background: transparent; color: inherit; font-size: 15px; }
   </style>
 </head>
 <body>
@@ -312,7 +321,7 @@
          матчам. Значок «×2» говорит, что человек играет ещё где-то, но ставку
          туда всё равно надо сделать — раньше это приходилось делать руками. -->
     <div id="copyBox" class="hidden">
-      <div class="gs-title" id="copyTitle">Применить этот состав и к другой игре?</div>
+      <div class="gs-title" id="copyTitle" style="margin-top:10px">Применить этот состав и к другой игре?</div>
       <div id="copyList"></div>
       <div id="copyDone" class="banner hidden"></div>
     </div>
@@ -1328,7 +1337,7 @@
       list.appendChild(card);
     }
     const done = document.createElement('button');
-    done.className = 'chip';
+    done.className = 'copydone';
     done.textContent = 'Готово';
     done.onclick = () => (tg.close ? tg.close() : showGames());
     list.appendChild(done);
