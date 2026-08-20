@@ -2269,6 +2269,7 @@ def _clear_pending(uid: int) -> None:
     _awaiting_field.pop(uid, None)
     _awaiting_newplayer.pop(uid, None)
     _awaiting_search.pop(uid, None)
+    _awaiting_tpl.pop(uid, None)
     _awaiting_money.pop(uid, None)
     _newgame.pop(uid, None)
     _roster_focus.pop(uid, None)
@@ -2528,6 +2529,8 @@ _awaiting_field: Dict[int, str] = {}
 _awaiting_newplayer: Dict[int, str] = {}
 # Кто сейчас вводит поиск: id -> префикс экранов.
 _awaiting_search: Dict[int, str] = {}
+# Кто переписывает текст письма: id -> ключ шаблона.
+_awaiting_tpl: Dict[int, str] = {}
 # Что ищет каждый: id -> кусок фамилии. Держим в памяти, а не в callback_data:
 # туда кириллица не влезет — 64 байта, по два на букву.
 _player_search: Dict[int, str] = {}
@@ -2697,6 +2700,22 @@ async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     msg, user = update.effective_message, update.effective_user
     if not msg or not user:
         return
+    if user.id in _awaiting_tpl:
+        key = _awaiting_tpl.pop(user.id)
+        if not (_is_admin(user) or _can_see_reports(user)):
+            raise ApplicationHandlerStop
+        import message_templates
+        ok, why = await asyncio.to_thread(message_templates.save, key,
+                                          msg.text or "")
+        if not ok:
+            # Оставляем человека в режиме ввода: он только что писал текст, и
+            # заставлять начинать с кнопки из-за забытой подстановки — грубо.
+            _awaiting_tpl[user.id] = key
+            await msg.reply_text(f"⚠️ {why}")
+            raise ApplicationHandlerStop
+        text, markup = await asyncio.to_thread(_tpl_screen, key)
+        await msg.reply_text(f"{why}\n\n{text}", reply_markup=markup)
+        raise ApplicationHandlerStop
     if user.id in _awaiting_search:
         prefix = _awaiting_search.pop(user.id)
         if not (_is_admin(user) or _can_see_reports(user)):
@@ -4592,12 +4611,66 @@ def _offline_screen() -> Tuple[str, InlineKeyboardMarkup]:
 
 
 def _preview_menu(prefix: str = "coach") -> Tuple[str, InlineKeyboardMarkup]:
-    rows = [[InlineKeyboardButton(label, callback_data=f"{prefix}:prev:{key}")]
-            for key, label in PREVIEWS]
+    import message_templates
+    rows = []
+    for key, label in PREVIEWS:
+        line = [InlineKeyboardButton(label, callback_data=f"{prefix}:prev:{key}")]
+        # Править можно не всё: отчёты тренеру — это списки, собираемые строкой
+        # на человека, и свободным текстом они не задаются.
+        tpl = _TPL_OF.get(key)
+        if tpl:
+            mark = "✏️" if message_templates.custom(tpl) else "✎"
+            line.append(InlineKeyboardButton(
+                mark, callback_data=f"{prefix}:tpl:{tpl}"))
+        rows.append(line)
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")])
     return ("👁 Предпросмотр писем\n\n"
-            "Покажу, что получит человек. Никому, кроме тебя, не уйдёт.",
+            "Покажу, что получит человек. Никому, кроме тебя, не уйдёт.\n\n"
+            "✎ рядом — текст можно переписать. ✏️ значит, что он уже свой.",
             InlineKeyboardMarkup(rows))
+
+
+# Какое письмо предпросмотра каким шаблоном правится. Ключи предпросмотра и
+# шаблонов совпадают не везде: «debt» показывает напоминание за тренировки,
+# а шаблон у него называется «dues» — по смыслу, а не по кнопке.
+_TPL_OF = {"ask": "ask", "debt": "dues",
+           "gameahead": "gameahead", "gamedebt": "gamedebt"}
+
+
+def _tpl_screen(key: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Экран одного письма: текущий текст, подстановки и что можно сделать."""
+    import message_templates
+    meta = message_templates.TEMPLATES.get(key)
+    if not meta:
+        return "Такого письма нет.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="coach:prev")]])
+    own = message_templates.custom(key)
+    need = ", ".join("{" + f + "}" for f in meta["required"])
+    opt = ", ".join("{" + f + "}" for f in meta.get("optional", ()))
+    lines = [f"✎ {meta['title']}", ""]
+    lines.append("Свой текст:" if own else "Сейчас стоит встроенный текст.")
+    if own:
+        lines += ["———", own, "———"]
+    lines += ["", f"Обязательные подстановки: {need}"]
+    if opt:
+        lines.append(f"Необязательные: {opt}")
+    if meta.get("note"):
+        lines += ["", meta["note"]]
+    lines += ["", "Без обязательной подстановки не сохраню: письмо ушло бы без "
+                  "суммы или без месяца."]
+    rows = [[InlineKeyboardButton("✏️ Написать свой текст",
+                                  callback_data=f"coach:tplset:{key}")],
+            [InlineKeyboardButton("👁 Посмотреть, как выйдет",
+                                  callback_data=f"coach:prev:{_PREV_OF.get(key, key)}")]]
+    if own:
+        rows.append([InlineKeyboardButton("↩️ Вернуть встроенный",
+                                          callback_data=f"coach:tplreset:{key}")])
+    rows.append([InlineKeyboardButton("⬅️ К предпросмотру",
+                                      callback_data="coach:prev")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+_PREV_OF = {v: k for k, v in _TPL_OF.items()}
 
 
 # Подпись кнопки под отчётом тренеру. Константа, а не строка в двух местах:
@@ -5845,6 +5918,28 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if what == "offline":
         text, markup = await asyncio.to_thread(_offline_screen)
         await query.edit_message_text(text, reply_markup=markup)
+        return
+    if what == "tpl":
+        text, markup = await asyncio.to_thread(_tpl_screen, parts[2] if len(parts) > 2 else "")
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+    if what == "tplset" and len(parts) > 2:
+        import message_templates
+        _clear_pending(user.id)
+        _awaiting_tpl[user.id] = parts[2]
+        meta = message_templates.TEMPLATES.get(parts[2], {})
+        need = ", ".join("{" + f + "}" for f in meta.get("required", ()))
+        await query.edit_message_text(
+            f"✏️ Пришли новый текст письма «{meta.get('title', parts[2])}».\n\n"
+            f"Обязательно оставь в нём: {need}\n\n"
+            "Перенос строки — просто новой строкой. Передумал — /start.")
+        return
+    if what == "tplreset" and len(parts) > 2:
+        import message_templates
+        await asyncio.to_thread(message_templates.reset, parts[2])
+        text, markup = await asyncio.to_thread(_tpl_screen, parts[2])
+        await query.edit_message_text(f"↩️ Вернул встроенный текст.\n\n{text}",
+                                      reply_markup=markup)
         return
     if what == "prev":
         key = parts[2] if len(parts) > 2 else ""

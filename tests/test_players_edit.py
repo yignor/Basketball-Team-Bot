@@ -179,7 +179,10 @@ def test_name_cannot_be_emptied() -> None:
     print("\n=== ФИО пустым не оставляем ===")
     src = (ROOT / "bot_daemon.py").read_text()
     at = src.index("async def handle_field_text")
-    body = src[at:at + 3000]
+    # Границу берём по следующей функции, а не по числу знаков: обработчик
+    # растёт, и срез «первые 3000» однажды отрезал проверку от глаз теста.
+    nxt = src.index("\nasync def ", at + 10)
+    body = src[at:nxt]
     check("NAME_FIELDS" in body, "обработчик знает про поля-якоря")
     check("пустыми не оставляю" in body, "и отказывается их чистить")
 
