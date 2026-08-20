@@ -277,6 +277,73 @@ def test_search_by_surname_part() -> None:
     check("coach:field:find" in data, "а «Поиск» есть всегда")
 
 
+def test_question_goes_to_everyone() -> None:
+    """Вопрос «будешь заниматься?» уходит всему листу, а не только активным.
+
+    Иначе человек, который сейчас не ходит, может вернуться только через
+    тренера — а вопрос ровно про то, будет ли он заниматься. Долги при этом
+    по-прежнему считаются только с тех, с кого взнос ждём."""
+    print("\n=== вопрос уходит всем ===")
+    import training_dues as td
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players")
+        conn.execute("INSERT INTO players (row_index, surname, name, pay_season, "
+                     "active_mark, synced_at) VALUES (2,'Иванов','Иван',5500,'+',?)", (now,))
+        conn.execute("INSERT INTO players (row_index, surname, name, pay_season, "
+                     "active_mark, synced_at) VALUES (3,'Петров','Пётр',5500,'',?)", (now,))
+        conn.commit()
+
+    period = "2026-09"
+    check(len(td.status(period, True)) == 2, "весь лист — двое")
+    check(len(td.status(period)) == 1, "с кого ждём взнос — один")
+    check(len(td.debtors(period)) <= 1, "долги считаем по-прежнему только с активных")
+
+    # Предупреждение тренеру обязано совпадать с рассылкой.
+    plan = td.plan_text(period)
+    check("у 2 человек" in plan, f"тренеру обещаем те же двое: {plan.splitlines()[0]}")
+    check("Иванов" in plan and "Петров" in plan, "оба названы поимённо")
+
+    src = (ROOT / "bot_daemon.py").read_text()
+    at = src.index("async def _ask_next_month")
+    check("training_dues.status, period, True" in src[at:at + 900],
+          "рассылка спрашивает весь лист")
+
+
+def test_preview_uses_real_builders() -> None:
+    """Предпросмотр собирается ТЕМИ ЖЕ функциями, что и рассылка.
+
+    Копия текста в предпросмотре разошлась бы с настоящим письмом на первой же
+    правке — и тренер утверждал бы одно, а команда получала другое."""
+    print("\n=== предпросмотр показывает настоящее письмо ===")
+    import bot_daemon as bd
+    import training_dues as td
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players")
+        conn.execute("INSERT INTO players (row_index, surname, name, pay_season, "
+                     "pay_game, active_mark, synced_at) "
+                     "VALUES (2,'Иванов','Иван',5500,900,'+',?)", (now,))
+        conn.commit()
+
+    keys = [k for k, _ in bd.PREVIEWS]
+    check("ask" in keys and "debt" in keys, "есть письма игрокам")
+    check("plan" in keys and "report" in keys, "и письма тренеру")
+
+    ask = bd._preview_text("ask")
+    period = td.next_period(td.period_of(__import__("datetime").date.today()))
+    rows = td.status(period, True)
+    check(ask == td.ask_text(period, rows[0], 0),
+          "предпросмотр вопроса совпадает с рассылкой знак в знак")
+
+    check(bd._preview_text("plan") == td.plan_text(period),
+          "и письмо тренеру тоже")
+    check(bd._preview_text("несуществующее") == "",
+          "неизвестное письмо — пусто, а не выдумка")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -287,6 +354,8 @@ def main() -> int:
     test_name_cannot_be_emptied()
     test_coach_has_the_same_editor()
     test_search_by_surname_part()
+    test_question_goes_to_everyone()
+    test_preview_uses_real_builders()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

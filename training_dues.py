@@ -133,12 +133,16 @@ def _paid_map(period: str) -> Dict[int, int]:
     return {int(r["player_row"]): int(r["amount"] or 0) for r in rows}
 
 
-def status(period: str) -> List[Dict[str, Any]]:
-    """Кто сколько внёс за месяц. Только те, с кого взнос ждём."""
+def status(period: str, everyone: bool = False) -> List[Dict[str, Any]]:
+    """Кто сколько внёс за месяц. По умолчанию — только те, с кого взнос ждём.
+
+    everyone=True — весь лист. Нужно для вопроса «будешь заниматься?»: его
+    задают и тем, кто сейчас неактивен, иначе вернуться в группу можно только
+    через тренера. Долги по такому списку не считают — для них фильтр остаётся."""
     paid = _paid_map(period)
     out = []
     for p in coach_payments.players():
-        if not p["pays_season"]:
+        if not everyone and not p["pays_season"]:
             continue
         need = int(p["pay_season"] or 0)
         got = paid.get(p["row"], 0)
@@ -237,11 +241,13 @@ def plan_text(period: str) -> str:
     Смысл предупреждения — дать день на правку. Ушёл человек из команды или
     вернулся, поменялась сумма — поправить надо ДО того, как бот спросит
     двадцать человек, будут ли они заниматься."""
-    rows = status(period)
+    # Спрашиваем ВЕСЬ лист, значит и предупреждение должно быть про весь лист:
+    # обещать тренеру «спрошу у одного», а спросить у двадцати — хуже, чем не
+    # предупреждать вовсе.
+    rows = status(period, True)
     title = month_title(period)
     if not rows:
-        return (f"🗓 {title}: ждать взносы не с кого — в листе «Игроки» ни у "
-                "кого не стоит отметка активности.")
+        return f"🗓 {title}: спрашивать некого — лист «Игроки» пуст."
     total = sum(int(r["need"] or 0) for r in rows)
     days = day("dues_ahead_day") - day("dues_plan_day")
     lines = [f"🗓 {title}: через "
@@ -251,8 +257,9 @@ def plan_text(period: str) -> str:
     for r in rows:
         lines.append(f"• {r['title']} — {r['need']} ₽")
     lines += ["", f"Всего ожидаем: {total} ₽.", "",
-              "Если кто-то уже не в команде — сними отметку активности в листе "
-              "«Игроки», и вопрос ему не уйдёт."]
+              "Вопрос уходит всем из листа, включая неактивных: человек может "
+              "вернуться, и решать это ему, а не отметке. Кого спрашивать не "
+              "надо совсем — убери из листа."]
     return "\n".join(lines)
 
 
@@ -336,15 +343,19 @@ def last_call_text(row: Dict[str, Any], period: str) -> str:
 
 
 def delivery_report(period: str, sent: List[str], failed: List[str],
-                    unknown: List[str]) -> str:
-    """Отбивка тренеру: кому дошло, кому нет и почему."""
+                    unknown: List[str], what: str = "Напоминание") -> str:
+    """Отбивка тренеру: кому дошло, кому нет и почему.
+
+    `what` — что именно рассылали. Вопрос «будешь заниматься?» и долговое
+    напоминание уходят в разные дни разным людям, и одинаковая отбивка по ним
+    не даёт понять, о чём речь."""
     # Каждый с новой строки: список из двадцати фамилий в одну строку телефон
     # переносит как попало, и глазами по нему не пройтись.
     def block(names: List[str]) -> List[str]:
         return [f"  • {n}" for n in names]
 
     title = month_title(period)
-    lines = [f"📨 Напоминание про {title} разослано.", ""]
+    lines = [f"📨 {what} про {title} разослано.", ""]
     lines.append(f"Дошло: {len(sent)}")
     lines += block(sent)
     if failed:
