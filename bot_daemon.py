@@ -2267,7 +2267,7 @@ def _clear_pending(uid: int) -> None:
     _pay_draft.pop(uid, None)
     _awaiting_video.pop(uid, None)
     _awaiting_field.pop(uid, None)
-    _awaiting_newplayer.discard(uid)
+    _awaiting_newplayer.pop(uid, None)
     _awaiting_money.pop(uid, None)
     _newgame.pop(uid, None)
     _roster_focus.pop(uid, None)
@@ -2522,32 +2522,38 @@ async def _ng_send(query, user) -> None:
 
 # Кто из админов что сейчас правит: id → "строка:поле".
 _awaiting_field: Dict[int, str] = {}
-# Кто заводит нового игрока: id админа. Значение неважно — ждём одну строку ФИО.
-_awaiting_newplayer: set = set()
+# Кто заводит нового игрока: id -> префикс экранов («coach:field»/«admin:field»),
+# чтобы вернуть человека туда, откуда он пришёл.
+_awaiting_newplayer: Dict[int, str] = {}
 
 
-def _fields_screen(offset: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+def _fields_screen(offset: int = 0,
+                   prefix: str = "admin:field") -> Tuple[str, InlineKeyboardMarkup]:
+    """Лист «Игроки» списком. Экран общий для тренера и админа: две копии
+    разъехались бы при первой же правке, а правят они один и тот же лист."""
     import coach_payments
     people = coach_payments.players()
     page = people[offset:offset + PLAYERS_PER_PAGE]
     shown_to = min(offset + len(page), len(people))
     no_bd = sum(1 for p in people if not p.get("birthday"))
     no_nick = sum(1 for p in people if not p.get("nickname"))
-    lines = [f"🎂 Дни рождения и ники ({offset + 1}-{shown_to} из {len(people)})", "",
-             f"Без даты рождения: {no_bd} · без ника: {no_nick}", ""]
+    lines = [f"👥 Игроки ({offset + 1}-{shown_to} из {len(people)})", "",
+             f"Без даты рождения: {no_bd} · без ника: {no_nick}", "",
+             "Открой человека — правится любое поле листа.", ""]
     rows = []
     for p in page:
         bd = p.get("birthday") or "—"
         nick = p.get("nickname") or "—"
         lines.append(f"• {p['title']}: {bd} · {nick}")
         rows.append([InlineKeyboardButton(f"{p['title']}"[:BTN_TEXT],
-                                          callback_data=f"admin:field:pick:{p['row']}")])
-    nav = _pagination_row("admin:field:list", offset, PLAYERS_PER_PAGE, len(people))
+                                          callback_data=f"{prefix}:pick:{p['row']}")])
+    nav = _pagination_row(f"{prefix}:list", offset, PLAYERS_PER_PAGE, len(people))
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("➕ Завести игрока",
-                                      callback_data="admin:field:new")])
-    rows.append(_back_button())
+                                      callback_data=f"{prefix}:new")])
+    rows.append(_back_button("coach:main" if prefix.startswith("coach") else
+                             "admin:menu:main"))
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -2572,12 +2578,12 @@ FIELD_ORDER = ("surname", "name", "nick", "bd", "role", "team",
                "status", "active", "season", "game", "price", "tier")
 
 
-def _field_card(row: int) -> Tuple[str, InlineKeyboardMarkup]:
+def _field_card(row: int, prefix: str = "admin:field") -> Tuple[str, InlineKeyboardMarkup]:
     import coach_payments
     p = coach_payments.player_by_row(int(row))
     if not p:
         return "Не нашёл этого игрока в листе.", InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")]])
+            [[InlineKeyboardButton("⬅️ К списку", callback_data=f"{prefix}:list:0")]])
     lines = [f"👤 {p['title']}", ""]
     for key in FIELD_ORDER:
         header, column, label = sheets_cache.PLAYER_FIELDS[key]
@@ -2591,12 +2597,12 @@ def _field_card(row: int) -> Tuple[str, InlineKeyboardMarkup]:
     for key in FIELD_ORDER:
         label = sheets_cache.PLAYER_FIELDS[key][2]
         pair.append(InlineKeyboardButton(
-            label, callback_data=f"admin:field:set:{row}:{key}"))
+            label, callback_data=f"{prefix}:set:{row}:{key}"))
         if len(pair) == 2:
             rows.append(pair); pair = []
     if pair:
         rows.append(pair)
-    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")])
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data=f"{prefix}:list:0")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -2626,8 +2632,8 @@ def _norm_birthday(text: str) -> Optional[str]:
 
 async def _create_player(msg, user) -> None:
     """Заводит игрока по присланной строке «Фамилия Имя»."""
-    _awaiting_newplayer.discard(user.id)
-    if not _is_admin(user):
+    prefix = _awaiting_newplayer.pop(user.id, "admin:field")
+    if not (_is_admin(user) or _can_see_reports(user)):
         return
     parts = (msg.text or "").split()
     if len(parts) < 2:
@@ -2650,7 +2656,7 @@ async def _create_player(msg, user) -> None:
     # Зеркало подтянется ближайшей синхронизацией, но карточку тренер хочет
     # видеть сейчас — обновляем сразу, иначе он решит, что запись не прошла.
     await asyncio.to_thread(_refresh_db_cache)
-    text, markup = await asyncio.to_thread(_field_card, int(row))
+    text, markup = await asyncio.to_thread(_field_card, int(row), prefix)
     await msg.reply_text(f"✅ Завёл. Заполни остальное.\n\n{text}",
                          reply_markup=markup)
 
@@ -2665,10 +2671,12 @@ async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         raise ApplicationHandlerStop
     if user.id not in _awaiting_field:
         return
-    if not _is_admin(user):
+    if not (_is_admin(user) or _can_see_reports(user)):
         _awaiting_field.pop(user.id, None)
         return
-    row, field = _awaiting_field[user.id].split(":", 1)
+    # Разделитель «|», а не «:»: префикс экранов сам содержит двоеточие
+    # («coach:field»), и split(":") разрезал бы его пополам.
+    row, field, prefix = (_awaiting_field[user.id].split("|") + ["admin:field"])[:3]
     value = (msg.text or "").strip()
     if value == "-":
         value = ""                    # так поле очищают: пустое сообщение не придёт
@@ -2707,7 +2715,7 @@ async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await msg.reply_text("Таблица не приняла запись — проверь доступ бота "
                              "к листу «Игроки».")
         raise ApplicationHandlerStop
-    text, markup = await asyncio.to_thread(_field_card, int(row))
+    text, markup = await asyncio.to_thread(_field_card, int(row), prefix)
     await msg.reply_text(f"Записал.\n\n{text}", reply_markup=markup)
     raise ApplicationHandlerStop
 
@@ -4477,6 +4485,7 @@ def _coach_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 Оплата", callback_data="coach:money")],
         [InlineKeyboardButton("🏀 Игры", callback_data="coach:play")],
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
+        [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
         # Частные занятия к команде отношения не имеют, но живут там же, где
         # тренер: заводить ради них отдельную кнопку под чатом — засорять
@@ -5590,6 +5599,37 @@ async def handle_roster_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     raise ApplicationHandlerStop
 
 
+async def _players_editor(query, user, parts: List[str], prefix: str) -> None:
+    """Экраны листа «Игроки»: список, карточка, запрос значения, заведение.
+
+    Один обработчик на тренера и админа. Развести их на два значило бы завести
+    вторую копию правил (что нельзя опустошать, что число) и однажды разойтись."""
+    what = parts[2] if len(parts) > 2 else "list"
+    if what == "pick" and len(parts) > 3:
+        text, markup = await asyncio.to_thread(_field_card, int(parts[3]), prefix)
+        await query.edit_message_text(text, reply_markup=markup)
+    elif what == "new":
+        _clear_pending(user.id)
+        _awaiting_newplayer[user.id] = prefix
+        await query.edit_message_text(
+            "➕ Пришли фамилию и имя нового игрока одной строкой: «Иванов Иван».\n\n"
+            "Остальное заполнишь на карточке — подставлять умолчания за тебя "
+            "не буду.\n\nПередумал — /start.")
+    elif what == "set" and len(parts) > 4:
+        _clear_pending(user.id)
+        _awaiting_field[user.id] = f"{parts[3]}|{parts[4]}|{prefix}"
+        ask = _FIELD_ASK.get(parts[4]) or (
+            f"Пришли новое значение: "
+            f"{sheets_cache.PLAYER_FIELDS.get(parts[4], ('', '', parts[4]))[2]}.")
+        await query.edit_message_text(
+            f"{ask}\n\nОчистить поле — пришли «-». Передумал — /start.")
+    else:
+        _awaiting_field.pop(user.id, None)
+        off = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        text, markup = await asyncio.to_thread(_fields_screen, off, prefix)
+        await query.edit_message_text(text, reply_markup=markup)
+
+
 async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     import coach_payments
     query = update.callback_query
@@ -5601,6 +5641,11 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     parts = (query.data or "").split(":")
     what = parts[1] if len(parts) > 1 else "main"
+    # Лист «Игроки» правит и тренер: это его команда и его таблица. Экраны те
+    # же, что в админке, отличается только адрес возврата.
+    if what == "field":
+        await _players_editor(query, user, parts, "coach:field")
+        return
     back = [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]
     # «Назад» обязано вернуть на шаг назад, а не на главную: экраны второго
     # этажа оплат открывают из «📊 Сводки и правки», туда же и возвращаемся.
@@ -6996,31 +7041,8 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             text, markup = await _doors_screen()
             await query.edit_message_text(text, reply_markup=markup)
         elif parts[1] == "field":
-            what = parts[2] if len(parts) > 2 else "list"
-            if what == "pick" and len(parts) > 3:
-                text, markup = await asyncio.to_thread(_field_card, int(parts[3]))
-                await query.edit_message_text(text, reply_markup=markup)
-            elif what == "new":
-                _clear_pending(user.id)
-                _awaiting_newplayer.add(user.id)
-                await query.edit_message_text(
-                    "➕ Пришли фамилию и имя нового игрока одной строкой: "
-                    "«Иванов Иван».\n\nОстальное заполнишь на карточке — "
-                    "подставлять умолчания за тебя не буду.\n\n"
-                    "Передумал — /start.")
-            elif what == "set" and len(parts) > 4:
-                _clear_pending(user.id)
-                _awaiting_field[user.id] = f"{parts[3]}:{parts[4]}"
-                ask = _FIELD_ASK.get(parts[4]) or (
-                    f"Пришли новое значение: "
-                    f"{sheets_cache.PLAYER_FIELDS.get(parts[4], ('', '', parts[4]))[2]}.")
-                await query.edit_message_text(
-                    f"{ask}\n\nОчистить поле — пришли «-». Передумал — /start.")
-            else:
-                _awaiting_field.pop(user.id, None)
-                off = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-                text, markup = await asyncio.to_thread(_fields_screen, off)
-                await query.edit_message_text(text, reply_markup=markup)
+            await _players_editor(query, user, parts, "admin:field")
+            return
         elif parts[1] == "video":
             what = parts[2] if len(parts) > 2 else "list"
             if what == "auto" and len(parts) > 4:
