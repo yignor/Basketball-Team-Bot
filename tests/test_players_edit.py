@@ -184,6 +184,46 @@ def test_name_cannot_be_emptied() -> None:
     check("пустыми не оставляю" in body, "и отказывается их чистить")
 
 
+def test_coach_has_the_same_editor() -> None:
+    """Правит лист ТРЕНЕР, а не только админ.
+
+    Первая версия жила в админ-панели, и тренер её просто не видел: раздел
+    закрыт проверкой на админа. Экраны при этом общие — две копии разъехались
+    бы при первой правке, а лист они правят один."""
+    print("\n=== тренер видит тот же редактор ===")
+    import bot_daemon as bd
+    src = (ROOT / "bot_daemon.py").read_text()
+
+    check('"👥 Игроки", callback_data="coach:field:list:0"' in src,
+          "в разделе тренера есть вход")
+    check("_players_editor" in src, "обработчик экранов общий")
+    check(src.count("async def _players_editor") == 1,
+          "и он ровно один, а не две копии")
+
+    # Экраны умеют возвращать человека туда, откуда он пришёл.
+    _, markup = bd._fields_screen(0, "coach:field")
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    check(any(d.startswith("coach:field:") for d in data),
+          f"кнопки списка ведут в раздел тренера: {data[:3]}")
+    check("coach:main" in data, "и «Назад» возвращает к тренеру, а не в админку")
+
+    _, card = bd._field_card(2, "coach:field")
+    cdata = [b.callback_data for row in card.inline_keyboard for b in row]
+    check(all(d.startswith("coach:field:") for d in cdata),
+          "на карточке тоже свой префикс")
+
+    # А админский путь не сломан.
+    _, adm = bd._fields_screen(0, "admin:field")
+    adata = [b.callback_data for row in adm.inline_keyboard for b in row]
+    check(any(d.startswith("admin:field:") for d in adata), "админский вход цел")
+    check("admin:menu:main" in adata, "и возвращает в админку")
+
+    # Правку принимаем и от тренера: раньше стояла проверка только на админа.
+    at = src.index("async def handle_field_text")
+    body = src[at:at + 1200]
+    check("_can_see_reports" in body, "текст поля принимается и от тренера")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -192,6 +232,7 @@ def main() -> int:
     test_add_player()
     test_twin_is_refused()
     test_name_cannot_be_emptied()
+    test_coach_has_the_same_editor()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
