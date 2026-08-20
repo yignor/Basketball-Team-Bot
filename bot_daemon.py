@@ -4516,6 +4516,71 @@ PLAYERS_PER_PAGE = 8
 BTN_TEXT = 38
 
 
+# Предпросмотр писем. Тексты собираем ТЕМИ ЖЕ функциями, что и рассылка: копия
+# текста в предпросмотре разошлась бы с настоящим письмом на первой же правке —
+# и тренер утверждал бы одно, а команда получала другое.
+#
+# Данные подставляем свои, но настоящей формы: сумма и дата берутся у первого
+# человека из листа и ближайшей игры, иначе предпросмотр показывает шаблон, а
+# не письмо.
+PREVIEWS = (
+    ("ask", "🏋️ Вопрос про следующий месяц"),
+    ("debt", "💰 Напоминание должнику (тренировки)"),
+    ("gameahead", "🏀 Завтра игра — про оплату"),
+    ("gamedebt", "💸 Оплата игры после матча"),
+    ("plan", "📋 Тренеру: кому уйдёт вопрос"),
+    ("report", "📊 Тренеру: долги за месяц"),
+)
+
+
+def _preview_menu(prefix: str = "coach") -> Tuple[str, InlineKeyboardMarkup]:
+    rows = [[InlineKeyboardButton(label, callback_data=f"{prefix}:prev:{key}")]
+            for key, label in PREVIEWS]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")])
+    return ("👁 Предпросмотр писем\n\n"
+            "Покажу, что получит человек. Никому, кроме тебя, не уйдёт.",
+            InlineKeyboardMarkup(rows))
+
+
+def _preview_text(key: str) -> str:
+    """Настоящее письмо на настоящих данных. Пусто — если показывать нечего."""
+    import coach_payments
+    import game_roster
+    import training_dues
+    from datetime import date as _date
+
+    period = training_dues.next_period(training_dues.period_of(_date.today()))
+    people = coach_payments.players()
+    who = people[0] if people else {"row": 0, "title": "Иванов Иван",
+                                    "pay_season": 0, "pay_game": 0}
+
+    if key == "ask":
+        rows = training_dues.status(period, True)
+        row = rows[0] if rows else {**who, "need": int(who.get("pay_season") or 0)}
+        return training_dues.ask_text(period, row, 0)
+    if key == "debt":
+        cur = training_dues.period_of(_date.today())
+        rows = training_dues.debtors(cur) or training_dues.status(cur, True)
+        if not rows:
+            return ""
+        return training_dues.player_reminder(rows[0], False)
+    if key in ("gameahead", "gamedebt"):
+        games = game_roster.games(from_day=_date.today())
+        if not games:
+            games = game_roster.games()
+        if not games:
+            return ""
+        game = games[0]
+        person = {**who, "need": int(who.get("pay_game") or 0)}
+        return game_roster.player_debt_text(game, person,
+                                            ahead=(key == "gameahead"))
+    if key == "plan":
+        return training_dues.plan_text(period)
+    if key == "report":
+        return training_dues.coach_report(training_dues.period_of(_date.today()), "end")
+    return ""
+
+
 def _coach_markup() -> InlineKeyboardMarkup:
     """Корень раздела: два больших входа и разбор игр.
 
@@ -4526,6 +4591,7 @@ def _coach_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Игры", callback_data="coach:play")],
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
+        [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
         # Частные занятия к команде отношения не имеют, но живут там же, где
         # тренер: заводить ради них отдельную кнопку под чатом — засорять
@@ -5696,6 +5762,23 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     # же, что в админке, отличается только адрес возврата.
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
+        return
+    if what == "prev":
+        key = parts[2] if len(parts) > 2 else ""
+        if not key:
+            text, markup = _preview_menu()
+            await query.edit_message_text(text, reply_markup=markup)
+            return
+        body = await asyncio.to_thread(_preview_text, key)
+        label = dict(PREVIEWS).get(key, key)
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ К предпросмотру", callback_data="coach:prev")]])
+        await query.edit_message_text(
+            (f"👁 {label}\n\n———\n{body}\n———\n\nТак это увидит человек."
+             if body else
+             f"👁 {label}\n\nПоказывать нечего: нет данных для такого письма "
+             f"(ни игры, ни суммы)."),
+            reply_markup=back)
         return
     back = [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]
     # «Назад» обязано вернуть на шаг назад, а не на главную: экраны второго
@@ -7698,7 +7781,7 @@ async def _pay_schedule(app: Application) -> None:
                 stat = await _ask_next_month(app, period)
                 await _tell_coaches(app, await asyncio.to_thread(
                     training_dues.delivery_report, period, stat["sent"],
-                    stat["failed"], stat["unknown"]))
+                    stat["failed"], stat["unknown"], "Вопрос"))
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"спросили {len(stat['sent'])}")
 
@@ -7923,7 +8006,10 @@ async def _ask_next_month(app: Application, period: str) -> Dict[str, List[str]]
     перестаёт считать взнос и требовать долг, пока тренер не вернёт её сам."""
     import training_dues
     stat: Dict[str, List[str]] = {"sent": [], "failed": [], "unknown": []}
-    people = await asyncio.to_thread(training_dues.status, period)
+    # Спрашиваем ВЕСЬ лист, а не только активных: человек, который сейчас не
+    # ходит, иначе вернуться может только через тренера — а вопрос ровно про
+    # то, будет ли он заниматься.
+    people = await asyncio.to_thread(training_dues.status, period, True)
     # Долг за ТЕКУЩИЙ месяц дописываем в тот же вопрос, вторым сообщением не шлём.
     cur = training_dues.period_of(date.today())
     debts = {r["row"]: int(r["debt"] or 0)
