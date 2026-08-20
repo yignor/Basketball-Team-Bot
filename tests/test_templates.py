@@ -126,6 +126,63 @@ def test_reports_are_not_editable() -> None:
           f"каждая кнопка правки ведёт к существующему шаблону: {editable}")
 
 
+def test_yes_sets_active_no_drops_it() -> None:
+    """Цикл целиком: ответил «буду» — отметка встала, «не буду» — снялась.
+
+    Пока вопрос уходил только активным, ставить отметку на «буду» было незачем
+    — она уже стояла. С рассылкой всему листу без этого человек говорил «буду»,
+    а напоминание об оплате ему не приходило: взносы ждут по отметке."""
+    print("\n=== ответ меняет отметку активности ===")
+    src = (ROOT / "bot_daemon.py").read_text()
+    at = src.index("async def handle_next_month")
+    body = src[at:src.index("\ndef _set_active", at)]
+    check("_set_active" in body, "на «буду» отметка ставится")
+    check("_drop_active" in body, "на «не буду» снимается")
+
+    # Первая отметка в листе меняет правило для ВСЕХ — об этом должно быть
+    # сказано вслух.
+    check("первая отметка активности" in body.lower(),
+          "про первую отметку тренера предупреждают")
+    check("не вышло" in body, "и про неудачную запись тоже")
+
+    # Отметка пишется тем значением, которое лист считает активным.
+    setter = src[src.index("def _set_active"):src.index("def _drop_active")]
+    check("PLAYERS_ACTIVE_MARK" in setter,
+          "пишем ровно то значение, которое лист признаёт активностью")
+    check(sheets_cache.is_active_mark(sheets_cache.PLAYERS_ACTIVE_MARK),
+          "и оно действительно им признаётся")
+
+
+def test_reminder_follows_the_mark() -> None:
+    """Напоминание об оплате идёт по отметке активности, а не всем подряд."""
+    print("\n=== напоминание зависит от отметки ===")
+    import coach_payments
+    import training_dues as td
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players")
+        conn.execute("DELETE FROM payments")
+        conn.execute("INSERT INTO players (row_index, surname, name, pay_season, "
+                     "active_mark, synced_at) VALUES (2,'Иванов','Иван',5500,?,?)",
+                     (sheets_cache.PLAYERS_ACTIVE_MARK, now))
+        conn.execute("INSERT INTO players (row_index, surname, name, pay_season, "
+                     "active_mark, synced_at) VALUES (3,'Петров','Пётр',5500,'',?)",
+                     (now,))
+        conn.commit()
+
+    people = {p["title"]: p["pays_season"] for p in coach_payments.players()}
+    check(people.get("Иванов Иван") is True, "с отмеченного взнос ждут")
+    check(people.get("Петров Пётр") is False, "с неотмеченного — нет")
+
+    debtors = [r["title"] for r in td.debtors("2026-09")]
+    check(debtors == ["Иванов Иван"],
+          f"напоминание уйдёт только отмеченному: {debtors}")
+
+    # А вопрос «будешь заниматься?» — по-прежнему обоим.
+    check(len(td.status("2026-09", True)) == 2, "вопрос уходит и тому, и другому")
+
+
 def main() -> int:
     test_default_until_changed()
     test_required_fields_guarded()
@@ -133,6 +190,8 @@ def main() -> int:
     test_reset_returns_builtin()
     test_real_messages_use_templates()
     test_reports_are_not_editable()
+    test_yes_sets_active_no_drops_it()
+    test_reminder_follows_the_mark()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
