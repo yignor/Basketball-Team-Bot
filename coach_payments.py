@@ -247,7 +247,7 @@ def players() -> List[Dict[str, Any]]:
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
             "SELECT row_index, surname, name, nickname, birthday, role, status, "
-            "team, pay_season, pay_game, active_mark FROM players "
+            "team, pay_season, pay_game, active_mark, price, tier FROM players "
             "ORDER BY surname, name").fetchall()
     people = [r for r in rows if (r["surname"] or "").strip()
               or (r["name"] or "").strip()]
@@ -275,6 +275,11 @@ def players() -> List[Dict[str, Any]]:
             "pay_season": int(r["pay_season"] or 0),
             "pay_game": int(r["pay_game"] or 0),
             "active_mark": mark,
+            # Цена и уровень — фэнтезийные, но живут в том же листе, и карточка
+            # игрока показывает лист целиком. Без них два поля из двенадцати
+            # всегда стояли бы прочерком, что бы ни было в таблице.
+            "price": int(r["price"] or 0),
+            "tier": (r["tier"] or "").strip(),
             # Ждём ли с человека взнос за сезон (он же за тренировки). К оплате
             # игр отношения не имеет: за игры платят те, кто был в составе.
             "pays_season": sheets_cache.is_active_mark(mark) if column_in_use
