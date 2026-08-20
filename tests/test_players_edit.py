@@ -360,6 +360,56 @@ def test_preview_uses_real_builders() -> None:
           "и предпросмотр кнопок ему не рисует")
 
 
+def test_offline_players() -> None:
+    """Кому рассылка не дойдёт — видно ЗАРАНЕЕ, а не из отбивки постфактум.
+
+    Причины разные, и делать с ними надо разное: одного попросить нажать
+    «Старт», другому сперва вписать ник в лист. Одним списком это неотличимо."""
+    print("\n=== видно, кто вне бота ===")
+    import bot_daemon as bd
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players")
+        conn.execute("DELETE FROM player_links")
+        conn.execute("INSERT INTO players (row_index, surname, name, nickname, "
+                     "tg_user_id, synced_at) VALUES (2,'Иванов','Иван','vanya','12345',?)",
+                     (now,))
+        conn.execute("INSERT INTO players (row_index, surname, name, nickname, "
+                     "synced_at) VALUES (3,'Петров','Пётр','petya',?)", (now,))
+        conn.execute("INSERT INTO players (row_index, surname, name, synced_at) "
+                     "VALUES (4,'Сидоров','Сидор',?)", (now,))
+        conn.commit()
+
+    groups = bd._offline_players()
+    check([p["title"] for p in groups["ok"]] == ["Иванов Иван"],
+          f"на связи только тот, у кого есть числовой id: {groups['ok']}")
+    check([p["title"] for p in groups["no_start"]] == ["Петров Пётр"],
+          "ник известен, но бота не запускал — своя группа")
+    check([p["title"] for p in groups["unknown"]] == ["Сидоров Сидор"],
+          "без ника и id — другая группа")
+
+    text, markup = bd._offline_screen()
+    check("Вне бота: 2 из 3" in text, f"счётчик честный: {text.splitlines()[0]}")
+    check("@petya" in text, "у кого есть ник — показываем, чтобы было кого просить")
+    check("нажал «Старт»" in text,
+          "объяснено, почему бот не может написать первым")
+    check("Иванов" not in text.split("✅ На связи")[0],
+          "тех, кто на связи, в списках проблем нет")
+    check(any("coach:field:list:0" == b.callback_data
+              for r in markup.inline_keyboard for b in r),
+          "отсюда можно уйти править лист")
+
+    # Привязка по /start сильнее листа: человек мог сменить ник.
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT INTO player_links (player_row, tg_user_id, username, "
+                     "linked_at) VALUES (3,'999','petya',?)", (now,))
+        conn.commit()
+    groups = bd._offline_players()
+    check([p["title"] for p in groups["ok"]] == ["Иванов Иван", "Петров Пётр"],
+          f"после /start человек уходит из проблемных: {groups['no_start']}")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -372,6 +422,7 @@ def main() -> int:
     test_search_by_surname_part()
     test_question_goes_to_everyone()
     test_preview_uses_real_builders()
+    test_offline_players()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
