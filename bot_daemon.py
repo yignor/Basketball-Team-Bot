@@ -4533,6 +4533,64 @@ PREVIEWS = (
 )
 
 
+def _offline_players() -> Dict[str, List[Dict[str, Any]]]:
+    """Кому бот написать НЕ сможет, разложенные по причине.
+
+    Причины разные, и делать с ними надо разное:
+
+    * `no_start` — человека знаем по нику, но он не запускал бота. Телеграм не
+      даёт написать первым: пока он сам не нажмёт «Старт», личка закрыта.
+      Лечится только просьбой лично.
+    * `unknown` — в листе нет ни числового id, ни ника. Бот не знает, кто это,
+      и даже попросить некого: сперва нужен ник в листе.
+
+    Список нужен тренеру заранее: в отбивке после рассылки он узнаёт об этом,
+    когда письмо уже не ушло."""
+    import coach_payments
+    import training_dues
+    out: Dict[str, List[Dict[str, Any]]] = {"ok": [], "no_start": [], "unknown": []}
+    for p in coach_payments.players():
+        if training_dues.chat_id_of(p["row"]):
+            out["ok"].append(p)
+        elif str(p.get("nickname") or "").strip():
+            out["no_start"].append(p)
+        else:
+            out["unknown"].append(p)
+    return out
+
+
+def _offline_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Экран «кто вне бота»: кому рассылка не дойдёт и что с этим делать."""
+    groups = _offline_players()
+    total = sum(len(v) for v in groups.values())
+    lost = len(groups["no_start"]) + len(groups["unknown"])
+    lines = [f"🔕 Вне бота: {lost} из {total}", ""]
+    if not lost:
+        lines.append("Все на связи — рассылка дойдёт до каждого.")
+    else:
+        lines.append("До этих людей рассылка НЕ дойдёт. Бот не может написать "
+                     "первым: пока человек сам не нажал «Старт», личка закрыта.")
+        lines.append("")
+    if groups["no_start"]:
+        lines.append(f"🙈 Не запускали бота — {len(groups['no_start'])}:")
+        for p in groups["no_start"]:
+            nick = str(p.get("nickname") or "").lstrip("@")
+            lines.append(f"  • {p['title']} (@{nick})")
+        lines += ["", "Попроси их открыть бота и нажать «Старт» — больше "
+                      "ничего не нужно.", ""]
+    if groups["unknown"]:
+        lines.append(f"❓ Бот не знает, кто это — {len(groups['unknown'])}:")
+        for p in groups["unknown"]:
+            lines.append(f"  • {p['title']}")
+        lines += ["", "У них в листе нет ни ника, ни числового id. Впиши ник "
+                      "в «👥 Игроки», а дальше как выше.", ""]
+    if groups["ok"]:
+        lines.append(f"✅ На связи: {len(groups['ok'])}.")
+    rows = [[InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 def _preview_menu(prefix: str = "coach") -> Tuple[str, InlineKeyboardMarkup]:
     rows = [[InlineKeyboardButton(label, callback_data=f"{prefix}:prev:{key}")]
             for key, label in PREVIEWS]
@@ -4612,6 +4670,7 @@ def _coach_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
         [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
+        [InlineKeyboardButton("🔕 Кто вне бота", callback_data="coach:offline")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
         # Частные занятия к команде отношения не имеют, но живут там же, где
         # тренер: заводить ради них отдельную кнопку под чатом — засорять
@@ -5782,6 +5841,10 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     # же, что в админке, отличается только адрес возврата.
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
+        return
+    if what == "offline":
+        text, markup = await asyncio.to_thread(_offline_screen)
+        await query.edit_message_text(text, reply_markup=markup)
         return
     if what == "prev":
         key = parts[2] if len(parts) > 2 else ""
