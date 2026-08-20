@@ -343,6 +343,22 @@ def test_preview_uses_real_builders() -> None:
     check(bd._preview_text("несуществующее") == "",
           "неизвестное письмо — пусто, а не выдумка")
 
+    # Кнопки показываем ПОДПИСЯМИ: живые нажались бы на самого тренера —
+    # «буду заниматься» за него или отметка оплаты. Предпросмотр не меняет
+    # данных, иначе это уже не просмотр.
+    real = [b.text for r in bd._ask_markup("2026-09", 2).inline_keyboard for b in r]
+    check(bd._preview_buttons("ask") == real,
+          f"подписи взяты из настоящей клавиатуры рассылки: {real}")
+    check(bd._preview_buttons("report") == [bd.MARK_TRAIN_PAID],
+          "у отчёта тренеру — та же кнопка, что придёт")
+    # У писем игрокам про игру клавиатуры нет — приписать её значило бы соврать.
+    src = (ROOT / "bot_daemon.py").read_text()
+    at = src.index("async def _remind_game_debtors")
+    check("reply_markup" not in src[at:at + 1200],
+          "письмо игроку про игру идёт без кнопок")
+    check(bd._preview_buttons("gamedebt") == [],
+          "и предпросмотр кнопок ему не рисует")
+
 
 def main() -> int:
     test_all_columns_editable()

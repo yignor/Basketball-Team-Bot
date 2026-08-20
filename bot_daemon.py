@@ -4542,6 +4542,26 @@ def _preview_menu(prefix: str = "coach") -> Tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardMarkup(rows))
 
 
+# Подпись кнопки под отчётом тренеру. Константа, а не строка в двух местах:
+# предпросмотр обязан показывать ту же кнопку, что придёт на самом деле.
+MARK_TRAIN_PAID = "🏋️ Отметить оплату"
+
+
+def _preview_buttons(key: str) -> List[str]:
+    """Подписи кнопок, которые придут вместе с письмом.
+
+    Показываем ПОДПИСЯМИ, а не настоящей клавиатурой: нажатие в предпросмотре
+    записало бы ответ на самого тренера — «буду заниматься» за него или
+    отметку оплаты. Предпросмотр не должен ничего менять."""
+    if key == "ask":
+        return [b.text for row in _ask_markup("", 0).inline_keyboard for b in row]
+    if key == "report":
+        return [MARK_TRAIN_PAID]
+    # У писем игрокам про игру клавиатуры нет: там нечего нажимать, оплату
+    # отмечает тренер у себя. Приписать сюда кнопку значит соврать.
+    return []
+
+
 def _preview_text(key: str) -> str:
     """Настоящее письмо на настоящих данных. Пусто — если показывать нечего."""
     import coach_payments
@@ -5773,12 +5793,18 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         label = dict(PREVIEWS).get(key, key)
         back = InlineKeyboardMarkup([[InlineKeyboardButton(
             "⬅️ К предпросмотру", callback_data="coach:prev")]])
-        await query.edit_message_text(
-            (f"👁 {label}\n\n———\n{body}\n———\n\nТак это увидит человек."
-             if body else
-             f"👁 {label}\n\nПоказывать нечего: нет данных для такого письма "
-             f"(ни игры, ни суммы)."),
-            reply_markup=back)
+        if body:
+            keys = _preview_buttons(key)
+            tail = ("\n\nКнопки под письмом: "
+                    + " · ".join(f"[ {k} ]" for k in keys)) if keys else \
+                   "\n\nКнопок под письмом нет."
+            shown = (f"👁 {label}\n\n———\n{body}\n———{tail}\n\n"
+                     "Так это увидит человек. Кнопки показаны подписями: "
+                     "живые нажались бы на тебя.")
+        else:
+            shown = (f"👁 {label}\n\nПоказывать нечего: нет данных для такого "
+                     f"письма (ни игры, ни суммы).")
+        await query.edit_message_text(shown, reply_markup=back)
         return
     back = [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]
     # «Назад» обязано вернуть на шаг назад, а не на главную: экраны второго
@@ -7788,7 +7814,7 @@ async def _pay_schedule(app: Application) -> None:
             elif kind in ("coach_end", "coach_debt"):
                 text = await asyncio.to_thread(training_dues.coach_report, period, "end")
                 markup = InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "🏋️ Отметить оплату", callback_data=f"coach:train:{period}")]])
+                    MARK_TRAIN_PAID, callback_data=f"coach:train:{period}")]])
                 sent = await _tell_coaches(app, text, markup)
                 await asyncio.to_thread(training_dues.mark_event, key,
                                         f"тренерам: {sent}")
@@ -7998,6 +8024,18 @@ async def _remind_players(app: Application, period: str,
     return stat
 
 
+def _ask_markup(period: str, row: Any) -> InlineKeyboardMarkup:
+    """Две кнопки под вопросом про следующий месяц.
+
+    Отдельной функцией, потому что их перечисляет ещё и предпросмотр. Второй
+    список подписей разошёлся бы с этим при первой же правке."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Буду заниматься",
+                              callback_data=f"nm:yes:{period}:{row}")],
+        [InlineKeyboardButton("🙅 Не буду",
+                              callback_data=f"nm:no:{period}:{row}")]])
+
+
 async def _ask_next_month(app: Application, period: str) -> Dict[str, List[str]]:
     """25-го: «будешь заниматься в следующем месяце?» — двумя кнопками.
 
@@ -8019,11 +8057,7 @@ async def _ask_next_month(app: Application, period: str) -> Dict[str, List[str]]
         if not uid:
             stat["unknown"].append(row["title"])
             continue
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Буду заниматься",
-                                  callback_data=f"nm:yes:{period}:{row['row']}")],
-            [InlineKeyboardButton("🙅 Не буду",
-                                  callback_data=f"nm:no:{period}:{row['row']}")]])
+        markup = _ask_markup(period, row["row"])
         try:
             await app.bot.send_message(
                 chat_id=int(uid),
