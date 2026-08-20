@@ -2268,6 +2268,7 @@ def _clear_pending(uid: int) -> None:
     _awaiting_video.pop(uid, None)
     _awaiting_field.pop(uid, None)
     _awaiting_newplayer.pop(uid, None)
+    _awaiting_search.pop(uid, None)
     _awaiting_money.pop(uid, None)
     _newgame.pop(uid, None)
     _roster_focus.pop(uid, None)
@@ -2525,21 +2526,46 @@ _awaiting_field: Dict[int, str] = {}
 # Кто заводит нового игрока: id -> префикс экранов («coach:field»/«admin:field»),
 # чтобы вернуть человека туда, откуда он пришёл.
 _awaiting_newplayer: Dict[int, str] = {}
+# Кто сейчас вводит поиск: id -> префикс экранов.
+_awaiting_search: Dict[int, str] = {}
+# Что ищет каждый: id -> кусок фамилии. Держим в памяти, а не в callback_data:
+# туда кириллица не влезет — 64 байта, по два на букву.
+_player_search: Dict[int, str] = {}
 
 
-def _fields_screen(offset: int = 0,
-                   prefix: str = "admin:field") -> Tuple[str, InlineKeyboardMarkup]:
+def _search_norm(text: Any) -> str:
+    """К сравнимому виду: регистр и «ё». Сравниваем в Python, а не в SQL —
+    у SQLite lower() кириллицу не трогает, и «ИВАНОВ» не нашёлся бы по «иванов»."""
+    return str(text or "").strip().lower().replace("ё", "е")
+
+
+def _fields_screen(offset: int = 0, prefix: str = "admin:field",
+                   query: str = "") -> Tuple[str, InlineKeyboardMarkup]:
     """Лист «Игроки» списком. Экран общий для тренера и админа: две копии
     разъехались бы при первой же правке, а правят они один и тот же лист."""
     import coach_payments
-    people = coach_payments.players()
+    everyone = coach_payments.players()
+    want = _search_norm(query)
+    # Ищем по любой части фамилии ИЛИ имени: тренер помнит человека по-разному,
+    # а заставлять набирать с первой буквы — лишний повод не пользоваться.
+    people = [p for p in everyone
+              if not want or want in _search_norm(p.get("title"))] \
+        if want else everyone
     page = people[offset:offset + PLAYERS_PER_PAGE]
     shown_to = min(offset + len(page), len(people))
     no_bd = sum(1 for p in people if not p.get("birthday"))
     no_nick = sum(1 for p in people if not p.get("nickname"))
-    lines = [f"👥 Игроки ({offset + 1}-{shown_to} из {len(people)})", "",
+    if want:
+        head = f"🔍 «{query}» — нашлось {len(people)}"
+        if not people:
+            head += f" из {len(everyone)}"
+    else:
+        head = f"👥 Игроки ({offset + 1}-{shown_to} из {len(people)})"
+    lines = [head, "",
              f"Без даты рождения: {no_bd} · без ника: {no_nick}", "",
              "Открой человека — правится любое поле листа.", ""]
+    if want and not people:
+        lines = [head, "", "Никого не нашёл. Проверь написание или сбрось поиск.", ""]
     rows = []
     for p in page:
         bd = p.get("birthday") or "—"
@@ -2550,6 +2576,11 @@ def _fields_screen(offset: int = 0,
     nav = _pagination_row(f"{prefix}:list", offset, PLAYERS_PER_PAGE, len(people))
     if nav:
         rows.append(nav)
+    find = [InlineKeyboardButton("🔍 Поиск", callback_data=f"{prefix}:find")]
+    if want:
+        find.append(InlineKeyboardButton("✖️ Сбросить",
+                                         callback_data=f"{prefix}:clear"))
+    rows.append(find)
     rows.append([InlineKeyboardButton("➕ Завести игрока",
                                       callback_data=f"{prefix}:new")])
     rows.append(_back_button("coach:main" if prefix.startswith("coach") else
@@ -2666,6 +2697,15 @@ async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     msg, user = update.effective_message, update.effective_user
     if not msg or not user:
         return
+    if user.id in _awaiting_search:
+        prefix = _awaiting_search.pop(user.id)
+        if not (_is_admin(user) or _can_see_reports(user)):
+            raise ApplicationHandlerStop
+        query = (msg.text or "").strip()
+        _player_search[user.id] = query
+        text, markup = await asyncio.to_thread(_fields_screen, 0, prefix, query)
+        await msg.reply_text(text, reply_markup=markup)
+        raise ApplicationHandlerStop
     if user.id in _awaiting_newplayer:
         await _create_player(msg, user)
         raise ApplicationHandlerStop
@@ -5608,6 +5648,16 @@ async def _players_editor(query, user, parts: List[str], prefix: str) -> None:
     if what == "pick" and len(parts) > 3:
         text, markup = await asyncio.to_thread(_field_card, int(parts[3]), prefix)
         await query.edit_message_text(text, reply_markup=markup)
+    elif what == "find":
+        _clear_pending(user.id)
+        _awaiting_search[user.id] = prefix
+        await query.edit_message_text(
+            "🔍 Пришли фамилию или её часть — покажу подходящих.\n\n"
+            "Передумал — /start.")
+    elif what == "clear":
+        _player_search.pop(user.id, None)
+        text, markup = await asyncio.to_thread(_fields_screen, 0, prefix, "")
+        await query.edit_message_text(text, reply_markup=markup)
     elif what == "new":
         _clear_pending(user.id)
         _awaiting_newplayer[user.id] = prefix
@@ -5626,7 +5676,8 @@ async def _players_editor(query, user, parts: List[str], prefix: str) -> None:
     else:
         _awaiting_field.pop(user.id, None)
         off = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-        text, markup = await asyncio.to_thread(_fields_screen, off, prefix)
+        text, markup = await asyncio.to_thread(
+            _fields_screen, off, prefix, _player_search.get(user.id, ""))
         await query.edit_message_text(text, reply_markup=markup)
 
 

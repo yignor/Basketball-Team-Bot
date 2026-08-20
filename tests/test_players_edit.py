@@ -224,6 +224,59 @@ def test_coach_has_the_same_editor() -> None:
     check("_can_see_reports" in body, "текст поля принимается и от тренера")
 
 
+def test_search_by_surname_part() -> None:
+    """Поиск по куску фамилии или имени.
+
+    Сравниваем в Python, а не в SQL: у SQLite lower() кириллицу не трогает, и
+    «КАТЮРГИН» не нашёлся бы по «катюрг» — на этом проект уже спотыкался при
+    дедупликации гостей."""
+    print("\n=== поиск по части фамилии ===")
+    import bot_daemon as bd
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players")
+        for i, (sur, nm) in enumerate([("Абрамов", "Платон"), ("Шлепикас", "Роман"),
+                                       ("Катюргин", "Даниил"), ("Лысюк", "Денис"),
+                                       ("КАТЮРГИН", "Пётр")]):
+            conn.execute("INSERT INTO players (row_index, surname, name, synced_at) "
+                         "VALUES (?,?,?,?)", (i + 2, sur, nm, now))
+        conn.commit()
+
+    def found(q):
+        text, markup = bd._fields_screen(0, "coach:field", q)
+        picks = [b.callback_data for row in markup.inline_keyboard for b in row
+                 if b.callback_data.startswith("coach:field:pick:")]
+        return text, picks
+
+    text, picks = found("катюрг")
+    check(len(picks) == 2, f"часть фамилии находит обоих Катюргиных: {len(picks)}")
+    check("нашлось 2" in text, f"счётчик в заголовке: {text.splitlines()[0]}")
+
+    _, picks = found("КАТЮРГ")
+    check(len(picks) == 2, "регистр не мешает — сравниваем не через SQL")
+
+    _, picks = found("роман")
+    check(len(picks) == 1, f"по имени тоже ищет: {len(picks)}")
+
+    text, picks = found("неттакого")
+    check(not picks, "чужого не выдумывает")
+    check("Никого не нашёл" in text, f"и говорит об этом: {text.splitlines()[2]}")
+
+    text, picks = found("")
+    check(len(picks) == 5, f"пустой запрос — весь список: {len(picks)}")
+    check("👥 Игроки" in text, "и обычный заголовок")
+
+    # Кнопка сброса появляется только когда есть что сбрасывать.
+    _, m = bd._fields_screen(0, "coach:field", "катюрг")
+    data = [b.callback_data for r in m.inline_keyboard for b in r]
+    check("coach:field:clear" in data, "при поиске есть «Сбросить»")
+    _, m = bd._fields_screen(0, "coach:field", "")
+    data = [b.callback_data for r in m.inline_keyboard for b in r]
+    check("coach:field:clear" not in data, "без поиска лишней кнопки нет")
+    check("coach:field:find" in data, "а «Поиск» есть всегда")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -233,6 +286,7 @@ def main() -> int:
     test_twin_is_refused()
     test_name_cannot_be_emptied()
     test_coach_has_the_same_editor()
+    test_search_by_surname_part()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
