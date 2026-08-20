@@ -92,6 +92,34 @@ def test_all_columns_editable() -> None:
           f"карточка не знает лишних полей: {set(bd.FIELD_ORDER) - keys}")
 
 
+def test_card_shows_every_field() -> None:
+    """Карточка показывает ЗНАЧЕНИЯ всех полей, а не только их названия.
+
+    Проверка на боевых 20.08.2026 поймала: «Стоимость» и «Уровень» стояли
+    прочерком при любом содержимом листа — список игроков этих двух колонок
+    просто не читал. Кнопка правки при этом работала, и дефект был незаметен."""
+    print("\n=== на карточке видно значения, а не прочерки ===")
+    import bot_daemon as bd
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players")
+        conn.execute(
+            "INSERT INTO players (row_index, surname, name, nickname, birthday, "
+            "role, status, team, active_mark, pay_season, pay_game, price, tier, "
+            "synced_at) VALUES (2,'Абрамов','Платон','plat','2001-09-22','центровой',"
+            "'основа','Farm','+',5500,900,55,'Золото',?)", (now,))
+        conn.commit()
+
+    text, markup = bd._field_card(2)
+    for value in ("plat", "2001-09-22", "центровой", "основа", "Farm",
+                  "5500", "900", "55", "Золото"):
+        check(value in text, f"«{value}» видно на карточке")
+    check(text.count("—") == 0, f"прочерков нет ни у одного заполненного поля:\n{text}")
+    check(sum(len(r) for r in markup.inline_keyboard) == len(bd.FIELD_ORDER) + 1,
+          "кнопок по числу полей плюс возврат")
+
+
 def test_write_goes_to_sheet_and_mirror() -> None:
     print("\n=== запись доходит и в лист, и в зеркало ===")
     seed_mirror()
@@ -158,6 +186,7 @@ def test_name_cannot_be_emptied() -> None:
 
 def main() -> int:
     test_all_columns_editable()
+    test_card_shows_every_field()
     test_write_goes_to_sheet_and_mirror()
     test_numbers_stay_numbers()
     test_add_player()
