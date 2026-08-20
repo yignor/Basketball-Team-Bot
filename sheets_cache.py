@@ -1378,7 +1378,61 @@ PLAYER_FIELDS = {
     # лезть в таблицу ради одной цифры.
     "season": (PLAYERS_PAY_SEASON_HEADER, "pay_season", "🏋️ Взнос за тренировки"),
     "game": (PLAYERS_PAY_GAME_HEADER, "pay_game", "🏀 Оплата игры"),
+    # Остальные колонки листа — чтобы тренеру не приходилось открывать таблицу
+    # ради строчки. ФИО тоже правится: люди меняют фамилии, и опечатки бывают.
+    "surname": ("Фамилия", "surname", "👤 Фамилия"),
+    "name": ("Имя", "name", "👤 Имя"),
+    "status": ("Статус", "status", "📋 Статус"),
+    "team": ("Команда", "team", "🏳️ Команда"),
+    "active": (PLAYERS_ACTIVE_HEADER, "active_mark", "✅ Активность"),
+    "price": (PLAYERS_PRICE_HEADER, "price", "💎 Стоимость"),
+    "tier": (PLAYERS_TIER_HEADER, "tier", "🏅 Уровень"),
 }
+
+# ФИО — якорь, по которому строка ищется в листе перед записью. Меняя его, надо
+# сверяться со СТАРЫМ значением, иначе проверка не найдёт строку и правка молча
+# не пройдёт.
+NAME_FIELDS = ("surname", "name")
+
+
+def add_player(spreadsheet, surname: str, name: str) -> Optional[int]:
+    """Заводит игрока в листе «Игроки». Возвращает номер строки.
+
+    Пишем ТОЛЬКО фамилию и имя: остальное тренер заполняет полями на карточке,
+    и подставлять туда умолчания опаснее, чем оставить пусто — «Активность» по
+    умолчанию означала бы взнос со всей команды.
+
+    Тёзку не заводим: две одинаковые строки в листе — это разъехавшиеся
+    посещаемость и оплаты, а понять потом, где чей платёж, невозможно."""
+    surname, name = str(surname or "").strip(), str(name or "").strip()
+    if not surname and not name:
+        return None
+    ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)
+    head = ws.row_values(1)
+    for need in ("Фамилия", "Имя"):
+        if need not in head:
+            logger.warning("В листе «Игроки» нет столбца «%s»", need)
+            return None
+
+    want = f"{surname} {name}".strip().lower().replace("ё", "е")
+    values = ws.get_all_values()
+    i_sur, i_name = head.index("Фамилия"), head.index("Имя")
+    for row in values[1:]:
+        got = f"{_cell(row, i_sur)} {_cell(row, i_name)}".strip().lower().replace("ё", "е")
+        if got and got == want:
+            logger.info("Игрок «%s %s» в листе уже есть", surname, name)
+            return None
+
+    line = [""] * len(head)
+    line[i_sur], line[i_name] = surname, name
+    ws.append_row(line, value_input_option="USER_ENTERED")
+    row_no = len(values) + 1
+    logger.info("В лист «Игроки» добавлен игрок, строка %s", row_no)
+    return row_no
+
+
+def _cell(row: List[str], idx: int) -> str:
+    return str(row[idx]).strip() if idx < len(row) else ""
 
 
 def write_player_field(spreadsheet, player_row: int, field: str, value: str,
@@ -1404,7 +1458,18 @@ def write_player_field(spreadsheet, player_row: int, field: str, value: str,
     with _connection() as conn:
         # Денежные колонки в зеркале числовые: строкой туда попадёт «5500» и
         # сравнения «сколько должен» начнут врать.
-        stored = int(value) if column in ("pay_season", "pay_game") else str(value)
+        # Числовые колонки зеркала: строкой туда попадёт «5500», и сравнения
+        # «сколько должен» начнут врать. «Стоимость» — из той же породы: по ней
+        # считается бюджет фэнтези.
+        if column in ("pay_season", "pay_game", "price"):
+            try:
+                stored = int(str(value).strip() or 0)
+            except ValueError:
+                logger.warning("Поле %s: «%s» — не число, в зеркало не пишу",
+                               column, value)
+                return False
+        else:
+            stored = str(value)
         conn.execute(f"UPDATE players SET {column} = ? WHERE row_index = ?",
                      (stored, int(row_no)))
         conn.commit()

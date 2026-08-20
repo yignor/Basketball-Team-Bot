@@ -2267,6 +2267,7 @@ def _clear_pending(uid: int) -> None:
     _pay_draft.pop(uid, None)
     _awaiting_video.pop(uid, None)
     _awaiting_field.pop(uid, None)
+    _awaiting_newplayer.discard(uid)
     _awaiting_money.pop(uid, None)
     _newgame.pop(uid, None)
     _roster_focus.pop(uid, None)
@@ -2521,6 +2522,8 @@ async def _ng_send(query, user) -> None:
 
 # Кто из админов что сейчас правит: id → "строка:поле".
 _awaiting_field: Dict[int, str] = {}
+# Кто заводит нового игрока: id админа. Значение неважно — ждём одну строку ФИО.
+_awaiting_newplayer: set = set()
 
 
 def _fields_screen(offset: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
@@ -2542,8 +2545,31 @@ def _fields_screen(offset: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
     nav = _pagination_row("admin:field:list", offset, PLAYERS_PER_PAGE, len(people))
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton("➕ Завести игрока",
+                                      callback_data="admin:field:new")])
     rows.append(_back_button())
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+# Порядок полей на карточке: сначала то, чем человека узнают, потом команда и
+# состояние, в конце деньги и фэнтези. Ключи — из sheets_cache.PLAYER_FIELDS,
+# второй список названий заводить нельзя: разъедется при первой же правке.
+# Подсказки к полям, где формат неочевиден. Остальным хватает названия самой
+# кнопки — писать «Пришли команду» под кнопкой «Команда» незачем.
+_FIELD_ASK = {
+    "bd": "🎂 Пришли дату рождения: «22.09.2001» или без года «22.09».",
+    "nick": "✏️ Пришли ник — как к человеку обращаются в команде.",
+    "role": "🎽 Пришли амплуа: разыгрывающий, атакующий, лёгкий, тяжёлый, центровой.",
+    "active": "✅ Поставь «+», если человек занимается и с него ждём взнос. "
+              "Пусто — не ждём.",
+    "season": "🏋️ Пришли сумму взноса за тренировки числом, например «3000».",
+    "game": "🏀 Пришли цену одной игры числом, например «500».",
+    "price": "💎 Пришли стоимость для фэнтези числом.",
+    "tier": "🏅 Пришли уровень: Платина, Золото, Серебро, Бронза.",
+}
+
+FIELD_ORDER = ("surname", "name", "nick", "bd", "role", "team",
+               "status", "active", "season", "game", "price", "tier")
 
 
 def _field_card(row: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -2552,14 +2578,26 @@ def _field_card(row: int) -> Tuple[str, InlineKeyboardMarkup]:
     if not p:
         return "Не нашёл этого игрока в листе.", InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")]])
-    lines = [f"👤 {p['title']}", "",
-             f"🎂 Дата рождения: {p.get('birthday') or 'не указана'}",
-             f"✏️ Ник: {p.get('nickname') or 'не указан'}", "",
-             "Что поправить?"]
-    return "\n".join(lines), InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎂 Дата рожд.", callback_data=f"admin:field:set:{row}:bd"),
-         InlineKeyboardButton("✏️ Ник", callback_data=f"admin:field:set:{row}:nick")],
-        [InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")]])
+    lines = [f"👤 {p['title']}", ""]
+    for key in FIELD_ORDER:
+        header, column, label = sheets_cache.PLAYER_FIELDS[key]
+        got = p.get(column)
+        got = "" if got in (None, "") else str(got)
+        lines.append(f"{label}: {got or '—'}")
+    lines += ["", "Что поправить?"]
+
+    rows: List[List[InlineKeyboardButton]] = []
+    pair: List[InlineKeyboardButton] = []
+    for key in FIELD_ORDER:
+        label = sheets_cache.PLAYER_FIELDS[key][2]
+        pair.append(InlineKeyboardButton(
+            label, callback_data=f"admin:field:set:{row}:{key}"))
+        if len(pair) == 2:
+            rows.append(pair); pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:field:list:0")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _norm_birthday(text: str) -> Optional[str]:
@@ -2586,24 +2624,71 @@ def _norm_birthday(text: str) -> Optional[str]:
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
+async def _create_player(msg, user) -> None:
+    """Заводит игрока по присланной строке «Фамилия Имя»."""
+    _awaiting_newplayer.discard(user.id)
+    if not _is_admin(user):
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.reply_text("Нужны фамилия и имя одной строкой: «Иванов Иван». "
+                             "Передумал — /start.")
+        return
+    surname, name = parts[0], " ".join(parts[1:])
+    try:
+        import report_common
+        book = await asyncio.to_thread(report_common.init_sheets)
+        row = await asyncio.to_thread(sheets_cache.add_player, book, surname, name)
+    except Exception as e:
+        log.warning(f"Заведение игрока: {e}")
+        row = None
+    if not row:
+        await msg.reply_text(
+            "Не завёл. Либо такой игрок в листе уже есть, либо у бота нет "
+            "доступа к листу «Игроки».")
+        return
+    # Зеркало подтянется ближайшей синхронизацией, но карточку тренер хочет
+    # видеть сейчас — обновляем сразу, иначе он решит, что запись не прошла.
+    await asyncio.to_thread(_refresh_db_cache)
+    text, markup = await asyncio.to_thread(_field_card, int(row))
+    await msg.reply_text(f"✅ Завёл. Заполни остальное.\n\n{text}",
+                         reply_markup=markup)
+
+
 async def handle_field_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Новое значение дня рождения или ника, присланное админом."""
+    """Новое значение поля игрока или ФИО нового — присланное админом."""
     msg, user = update.effective_message, update.effective_user
-    if not msg or not user or user.id not in _awaiting_field:
+    if not msg or not user:
+        return
+    if user.id in _awaiting_newplayer:
+        await _create_player(msg, user)
+        raise ApplicationHandlerStop
+    if user.id not in _awaiting_field:
         return
     if not _is_admin(user):
         _awaiting_field.pop(user.id, None)
         return
     row, field = _awaiting_field[user.id].split(":", 1)
     value = (msg.text or "").strip()
-    if field == "bd":
+    if value == "-":
+        value = ""                    # так поле очищают: пустое сообщение не придёт
+    if field == "bd" and value:
         value = _norm_birthday(value)
         if not value:
             await msg.reply_text("Не понял дату. Как в паспорте: «22.09.2001» "
                                  "или без года «22.09». Передумал — /start.")
             raise ApplicationHandlerStop
-    elif not value:
-        await msg.reply_text("Пустой ник не записываю. Передумал — /start.")
+    elif field in ("season", "game", "price"):
+        if value and not value.isdigit():
+            await msg.reply_text("Здесь нужно число — например «3000». "
+                                 "Передумал — /start.")
+            raise ApplicationHandlerStop
+        value = value or "0"
+    elif field in sheets_cache.NAME_FIELDS and not value:
+        # ФИО — якорь, по которому строка ищется в листе. Опустошить его значит
+        # потерять человека для всех последующих правок.
+        await msg.reply_text("Фамилию и имя пустыми не оставляю: по ним строка "
+                             "и находится в листе. Передумал — /start.")
         raise ApplicationHandlerStop
 
     _awaiting_field.pop(user.id, None)
@@ -6915,13 +7000,22 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             if what == "pick" and len(parts) > 3:
                 text, markup = await asyncio.to_thread(_field_card, int(parts[3]))
                 await query.edit_message_text(text, reply_markup=markup)
+            elif what == "new":
+                _clear_pending(user.id)
+                _awaiting_newplayer.add(user.id)
+                await query.edit_message_text(
+                    "➕ Пришли фамилию и имя нового игрока одной строкой: "
+                    "«Иванов Иван».\n\nОстальное заполнишь на карточке — "
+                    "подставлять умолчания за тебя не буду.\n\n"
+                    "Передумал — /start.")
             elif what == "set" and len(parts) > 4:
                 _clear_pending(user.id)
                 _awaiting_field[user.id] = f"{parts[3]}:{parts[4]}"
-                ask = ("🎂 Пришли дату рождения: «22.09.2001» или без года «22.09»."
-                       if parts[4] == "bd" else
-                       "✏️ Пришли ник — как к человеку обращаются в команде.")
-                await query.edit_message_text(f"{ask}\n\nПередумал — /start.")
+                ask = _FIELD_ASK.get(parts[4]) or (
+                    f"Пришли новое значение: "
+                    f"{sheets_cache.PLAYER_FIELDS.get(parts[4], ('', '', parts[4]))[2]}.")
+                await query.edit_message_text(
+                    f"{ask}\n\nОчистить поле — пришли «-». Передумал — /start.")
             else:
                 _awaiting_field.pop(user.id, None)
                 off = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
