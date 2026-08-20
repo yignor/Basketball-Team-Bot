@@ -211,6 +211,8 @@ CHECKS = """
        'после сохранения предлагается перенос');
     const items = document.getElementById('copyList').children;
     ok(items.length === 2, 'один другой матч плюс кнопка «Готово»: ' + items.length);
+    ok(items[1].className === 'copydone',
+       'кнопка «Готово» своей строкой, а не в потоке карточек: ' + items[1].className);
     ok(/Резалит</.test(items[0].innerHTML) || /Резалит/.test(items[0].innerHTML),
        'матч назван без скобок с турниром');
     ok(items[0].innerHTML.indexOf('(') < 0, 'скобок в подписи нет');
