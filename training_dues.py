@@ -226,13 +226,18 @@ def player_reminder(row: Dict[str, Any], ahead: bool = False) -> str:
     money = int(row.get("need") or row.get("pay_season") or 0)
     sum_part = f" — {money} ₽" if money else ""
     if ahead:
-        return (f"🏋️ Взнос за тренировки на {month_title(row['period'])}"
-                f"{sum_part}.\n\n"
-                f"Напоминаю заранее: за зал платим вперёд, до начала месяца. "
-                f"Реквизиты у тренера.")
-    return (f"🏋️ Взнос за тренировки за {month_title(row['period'])}"
-            f"{sum_part}.\n\n"
-            f"Если уже переводил — просто скажи тренеру, отмечу.")
+        built = (f"🏋️ Взнос за тренировки на {month_title(row['period'])}"
+                 f"{sum_part}.\n\n"
+                 f"Напоминаю заранее: за зал платим вперёд, до начала месяца. "
+                 f"Реквизиты у тренера.")
+    else:
+        built = (f"🏋️ Взнос за тренировки за {month_title(row['period'])}"
+                 f"{sum_part}.\n\n"
+                 f"Если уже переводил — просто скажи тренеру, отмечу.")
+    import message_templates
+    return message_templates.render("dues", built,
+                                    месяц=month_title(row["period"]),
+                                    сумма=(money or ""))
 
 
 def plan_text(period: str) -> str:
@@ -277,7 +282,10 @@ def ask_text(period: str, row: Dict[str, Any], debt: int = 0) -> str:
                       f"за тобой {debt} ₽."]
     lines += ["", "Ответь кнопкой — тренеру нужно понимать, на сколько человек "
               "брать зал."]
-    return "\n".join(lines)
+    import message_templates
+    return message_templates.render(
+        "ask", "\n".join(lines), месяц=title, сумма=row.get("need") or "",
+        долг=(f"{debt}" if debt else ""))
 
 
 def rub(amount: int) -> str:

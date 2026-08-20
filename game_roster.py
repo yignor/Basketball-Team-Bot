@@ -739,12 +739,16 @@ def player_debt_text(game: Dict[str, Any], player: Dict[str, Any],
     везут с собой, поэтому и напоминаем заранее."""
     price = coach_payments.game_price(player)
     if ahead:
-        return (f"🏀 Завтра игра: {game_label(game)}.\n\n"
-                f"Не забудь оплату — {price} ₽. Возьми с собой или переведи "
-                "тренеру заранее.")
-    return (f"💰 Оплата игры: {game_label(game)} — {price} ₽.\n\n"
-            "Переведи, пожалуйста, тренеру и скинь ему чек — он отметит. "
-            "Если уже оплатил, ничего делать не надо.")
+        built = (f"🏀 Завтра игра: {game_label(game)}.\n\n"
+                 f"Не забудь оплату — {price} ₽. Возьми с собой или переведи "
+                 "тренеру заранее.")
+    else:
+        built = (f"💰 Оплата игры: {game_label(game)} — {price} ₽.\n\n"
+                 "Переведи, пожалуйста, тренеру и скинь ему чек — он отметит. "
+                 "Если уже оплатил, ничего делать не надо.")
+    import message_templates
+    return message_templates.render("gameahead" if ahead else "gamedebt", built,
+                                    игра=game_label(game), сумма=price)
 
 
 # ─────────────────────── Что пора сделать сейчас ───────────────────────────
