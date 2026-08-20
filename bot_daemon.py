@@ -8249,11 +8249,28 @@ async def handle_next_month(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     title = (person or {}).get("title", "")
     await query.answer()
     if answer == "yes":
+        # Ставим отметку активности. Раньше этого не требовалось — вопрос
+        # уходил только тем, у кого она уже стояла. Теперь спрашиваем весь
+        # лист, и без этой строки человек говорил «буду», а напоминание об
+        # оплате ему не приходило: взносы ждут по отметке.
+        put, first = await asyncio.to_thread(_set_active, row)
         text = await asyncio.to_thread(training_dues.confirmed_text, period, row)
         await query.edit_message_text(text)
-        await _tell_coaches(context.application,
-                            f"✅ {title} подтвердил тренировки в "
-                            f"{training_dues.month_title(period)}.")
+        note = (f"✅ {title} подтвердил тренировки в "
+                f"{training_dues.month_title(period)}.")
+        if not put:
+            note += ("\n\n⚠️ Отметку активности проставить не вышло — поставь "
+                     "руками в «👥 Игроки», иначе напоминание об оплате ему "
+                     "не придёт.")
+        elif first:
+            # Пока отметки нет НИ У КОГО, взносы ждут со всех. Первая отметка
+            # включает столбец, и остальные разом выпадают из ожидания — про
+            # это надо сказать вслух, а не поставить молча.
+            note += ("\n\n⚠️ Это первая отметка активности в листе. Теперь "
+                     "взносы ждём ТОЛЬКО с отмеченных — остальным напоминания "
+                     "приходить перестанут. Проставь отметки всем, кто "
+                     "занимается.")
+        await _tell_coaches(context.application, note)
         return
     ok = await asyncio.to_thread(_drop_active, row)
     await query.edit_message_text(
@@ -8266,6 +8283,28 @@ async def handle_next_month(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         + ("\n\nОтметку активности снял — взносы с него больше не жду."
            if ok else "\n\n⚠️ Отметку активности снять не вышло, сними руками "
                       "в листе «Игроки»."))
+
+
+def _set_active(row: int) -> Tuple[bool, bool]:
+    """Ставит отметку активности. (получилось, была ли она первой в листе).
+
+    «Первая» важна: пока отметки нет ни у кого, столбцом не пользуются и взнос
+    ждут со всех. Появление одной включает правило буквально, и все неотмеченные
+    разом перестают считаться занимающимися."""
+    import coach_payments
+    try:
+        import report_common
+        book = report_common.init_sheets()
+    except Exception as exc:
+        log.warning(f"Отметка активности: таблица недоступна: {exc}")
+        return False, False
+    people = coach_payments.players()
+    first = not any(str(p.get("active_mark") or "").strip() for p in people)
+    person = next((p for p in people if int(p["row"]) == int(row)), {})
+    ok = sheets_cache.write_player_field(
+        book, int(row), "active", sheets_cache.PLAYERS_ACTIVE_MARK,
+        person.get("title", ""))
+    return ok, (ok and first)
 
 
 def _drop_active(row: int) -> bool:
