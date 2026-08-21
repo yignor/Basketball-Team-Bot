@@ -24,6 +24,8 @@ TMP = Path(tempfile.mkdtemp(prefix="debts-test-")) / "bot.db"
 os.environ.setdefault("BOT_TOKEN", "0:test")
 os.environ["GOOGLE_SHEETS_CREDENTIALS"] = ""
 os.environ["SPREADSHEET_ID"] = ""
+os.environ.setdefault("BOT_TOKEN", "0:test")
+os.environ.setdefault("DAEMON_LOG_PATH", str(ROOT / "tests" / "test.log"))
 
 import sheets_cache                                            # noqa: E402
 sheets_cache.DB_PATH = TMP
@@ -371,6 +373,43 @@ def test_edit_manual_debt() -> None:
           "погашённый долг править нельзя — история не переписывается")
 
 
+def test_debt_names_the_game() -> None:
+    """Долг называет конкретные игры, а не «за 2 игры».
+
+    Общая формулировка человеку непроверяема: какие именно — неизвестно, и он
+    идёт спрашивать тренера. Это ровно тот разговор, который бот и должен был
+    снять."""
+    print("\n=== в долге видно, за какую игру ===")
+    import bot_daemon as bd
+
+    one = bd._game_debt_note({"games": 1, "amount": 900, "price": 900,
+                              "titles": ["Кирпичный Завод · 22.08, 14:00"]})
+    check("Кирпичный Завод" in one, f"игра названа: {one.splitlines()[0]}")
+    check("900" in one, "сумма на месте")
+
+    two = bd._game_debt_note({"games": 2, "amount": 1800, "price": 900,
+                              "titles": ["Кирпичный Завод · 22.08",
+                                         "Резалит · 24.08"]})
+    check("Кирпичный Завод" in two and "Резалит" in two, "обе игры перечислены")
+    check("Итого 1800" in two, f"и подведён итог:\n{two}")
+
+    # Названий не нашлось — прежняя общая формулировка лучше пустого списка.
+    none = bd._game_debt_note({"games": 2, "amount": 1800, "price": 900,
+                               "titles": []})
+    check("За 2 игры" in none, f"запасной текст цел: {none.splitlines()[0]}")
+    check("Реквизиты у тренера" in none, "и хвост на месте")
+
+
+def test_debt_title_without_tournament() -> None:
+    """В письме про деньги турнир в скобках только мешает: человек узнаёт игру
+    по сопернику и дате."""
+    print("\n=== название команды без турнира ===")
+    check(game_roster._team_only("Балтика (Летний Кубок Дивизион C)") == "Балтика",
+          "скобки срезаны")
+    check(game_roster._team_only("Резалит") == "Резалит", "простое имя не трогаем")
+    check(game_roster._team_only(None) == "", "пустое не роняет")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     test_posted_roster_counts()
@@ -384,6 +423,8 @@ def main() -> int:
     test_mark_paid_is_idempotent()
     test_confirmed_text()
     test_grouping()
+    test_debt_names_the_game()
+    test_debt_title_without_tournament()
 
     print("\n" + "=" * 60)
     if bad:

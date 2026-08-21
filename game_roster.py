@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -618,6 +619,41 @@ def debtors(source: str, game_id: str) -> List[Dict[str, Any]]:
     return out
 
 
+def game_titles(refs: List[Tuple[str, str, str]]) -> List[str]:
+    """Подписи игр по ссылкам «источник:id»: «Кирпичный Завод · 22.08».
+
+    Опрос и состав лежат в разных таблицах, и игра, заведённая без опроса, из
+    подписи выпала бы. Поэтому смотрим и туда, и в состояние игры — тем же
+    способом, что и разбивка долгов по играм."""
+    if not refs:
+        return []
+    known = {f"{g['source']}:{g['game_id']}": g
+             for g in games(from_day=date.fromisoformat(PAY_SINCE))}
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        states = {f"{r['source']}:{r['game_id']}": dict(r) for r in conn.execute(
+            "SELECT source, game_id, game_date, opponent FROM game_roster_state")}
+    out = []
+    for src, gid, when in refs:
+        ref = f"{src}:{gid}"
+        game = known.get(ref)
+        if not game:
+            st = states.get(ref)
+            game = {"date": _parse_date((st or {}).get("game_date")) or
+                    _parse_date(when) or date.today(),
+                    "time": "", "opponent": str((st or {}).get("opponent") or "")}
+        # «Балтика (Летний Кубок Дивизион C)» — в письме про деньги турнир
+        # только мешает: человек узнаёт игру по сопернику и дате.
+        game = {**game, "opponent": _team_only(game.get("opponent"))}
+        out.append(game_label(game))
+    return out
+
+
+def _team_only(name: Any) -> str:
+    """Название команды без уточнения турнира в скобках."""
+    return re.sub(r"\s*\([^)]*\)\s*$", "", str(name or "")).strip()
+
+
 def game_debts() -> List[Dict[str, Any]]:
     """Кто и за сколько игр должен — по всем объявленным составам.
 
@@ -637,7 +673,12 @@ def game_debts() -> List[Dict[str, Any]]:
         price = coach_payments.game_price(player)
         out.append({"row": row, "title": player.get("title") or f"строка {row}",
                     "games": owed, "amount": owed * price,
-                    "last": owed_games[-1][2]})
+                    "last": owed_games[-1][2],
+                    # Какие именно игры не закрыты. «Должен за две игры» без
+                    # названий человек проверить не может и идёт спрашивать
+                    # тренера — а это ровно тот разговор, который бот и должен
+                    # был снять.
+                    "titles": game_titles(owed_games), "price": price})
     out.sort(key=lambda x: -x["amount"])
     return out
 

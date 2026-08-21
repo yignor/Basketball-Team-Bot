@@ -2245,6 +2245,30 @@ def _remind_ago(kind: str) -> Optional[str]:
     return "только что" if mins < 1 else f"{mins} мин назад"
 
 
+def _game_debt_note(debt: Dict[str, Any]) -> str:
+    """Напоминание об оплате игр с НАЗВАНИЯМИ матчей.
+
+    «За 2 игры не закрыта оплата» человек проверить не может: какие именно —
+    неизвестно, и он идёт спрашивать тренера. Это ровно тот разговор, который
+    бот и должен был снять."""
+    titles = debt.get("titles") or []
+    price = int(debt.get("price") or 0)
+    if not titles:
+        # Названий не нашлось (игру завели без опроса и без состояния) — лучше
+        # прежняя общая формулировка, чем пустой список.
+        word = _plural(debt["games"], "игру", "игры", "игр")
+        return (f"🏀 За {debt['games']} {word} не закрыта оплата — "
+                f"{debt['amount']} ₽.\n\nРеквизиты у тренера.")
+    if len(titles) == 1:
+        head = f"🏀 Не закрыта оплата за игру {titles[0]} — {debt['amount']} ₽."
+        return head + "\n\nРеквизиты у тренера."
+    lines = [f"🏀 Не закрыта оплата за {len(titles)} "
+             f"{_plural(len(titles), 'игру', 'игры', 'игр')}:", ""]
+    lines += [f"• {t}" + (f" — {price} ₽" if price else "") for t in titles]
+    lines += ["", f"Итого {debt['amount']} ₽.", "", "Реквизиты у тренера."]
+    return "\n".join(lines)
+
+
 async def _remind_debtors(query, kind: str) -> Tuple[int, int]:
     """Ручная рассылка должникам: тренировки или игры. (дошло, не дошло).
 
@@ -2260,10 +2284,7 @@ async def _remind_debtors(query, kind: str) -> Tuple[int, int]:
             targets.append((row["row"], training_dues.player_reminder(row)))
     else:
         for d in await asyncio.to_thread(game_roster.game_debts):
-            games_word = _plural(d["games"], "игру", "игры", "игр")
-            targets.append((d["row"],
-                            f"🏀 За {d['games']} {games_word} не закрыта оплата — "
-                            f"{d['amount']} ₽.\n\nРеквизиты у тренера."))
+            targets.append((d["row"], _game_debt_note(d)))
     sent = skipped = 0
     for row, text in targets:
         uid = await asyncio.to_thread(training_dues.chat_id_of, row)
