@@ -2222,6 +2222,29 @@ def _api_port_alive() -> bool:
         return sock.connect_ex(("127.0.0.1", FANTASY_API_PORT)) == 0
 
 
+# Когда в последний раз рассылали напоминание руками: вид -> момент. В памяти,
+# а не в базе: защита нужна от случайного двойного нажатия, а не на века.
+_remind_at: Dict[str, float] = {}
+REMIND_QUIET_MINUTES = 30
+
+
+def _remind_mark(kind: str) -> None:
+    import time as _time
+    _remind_at[kind] = _time.time()
+
+
+def _remind_ago(kind: str) -> Optional[str]:
+    """Как давно рассылали, если это было недавно. None — можно слать молча."""
+    import time as _time
+    was = _remind_at.get(kind)
+    if not was:
+        return None
+    mins = int((_time.time() - was) // 60)
+    if mins >= REMIND_QUIET_MINUTES:
+        return None
+    return "только что" if mins < 1 else f"{mins} мин назад"
+
+
 async def _remind_debtors(query, kind: str) -> Tuple[int, int]:
     """Ручная рассылка должникам: тренировки или игры. (дошло, не дошло).
 
@@ -6125,7 +6148,27 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif what == "remind" and len(parts) > 2:
             kind = parts[2]
+            again = len(parts) > 3 and parts[3] == "yes"
+            # Второе нажатие подряд — почти всегда случайное: пока бот обходит
+            # десяток человек, экран не меняется, и рука жмёт ещё раз. Люди
+            # получают одно и то же требование денег дважды.
+            ago = _remind_ago(kind)
+            if ago is not None and not again:
+                await query.edit_message_text(
+                    f"📨 Это напоминание уже уходило {ago}.\n\n"
+                    "Отправить ещё раз? Люди получат его повторно.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "📨 Да, отправить снова",
+                            callback_data=f"coach:remind:{kind}:yes")],
+                        [InlineKeyboardButton("⬅️ Не надо",
+                                              callback_data="coach:money")]]))
+                return
+            # Убираем кнопку ДО рассылки: она длится секунды, и всё это время
+            # человек смотрит на неизменившийся экран.
+            await query.edit_message_text("📨 Рассылаю…")
             sent, skipped = await _remind_debtors(query, kind)
+            _remind_mark(kind)
             what_title = "за тренировки" if kind == "season" else "за игры"
             if not sent and not skipped:
                 await query.answer("Должников нет", show_alert=True)
