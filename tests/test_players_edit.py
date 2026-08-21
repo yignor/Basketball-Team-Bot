@@ -413,6 +413,39 @@ def test_offline_players() -> None:
           f"после /start человек уходит из проблемных: {groups['no_start']}")
 
 
+def test_manual_reminder_asks_before_repeat() -> None:
+    """Повторная ручная рассылка требует подтверждения.
+
+    21.08.2026 команда получила требование оплаты дважды за 19 секунд: пока
+    бот обходит десяток человек, экран не меняется, и рука жмёт кнопку ещё раз.
+    Деньги — не та тема, где стоит дублировать сообщение молча."""
+    print("\n=== повтор рассылки переспрашивает ===")
+    import bot_daemon as bd
+
+    bd._remind_at.clear()
+    check(bd._remind_ago("game") is None, "первый раз — шлём без вопросов")
+
+    bd._remind_mark("game")
+    check(bd._remind_ago("game") == "только что",
+          f"сразу после — «только что»: {bd._remind_ago('game')}")
+    check(bd._remind_ago("season") is None,
+          "тренировки и игры считаются отдельно")
+
+    # Через положенное время вопрос снимается сам.
+    import time as _t
+    bd._remind_at["game"] = _t.time() - (bd.REMIND_QUIET_MINUTES + 1) * 60
+    check(bd._remind_ago("game") is None,
+          f"через {bd.REMIND_QUIET_MINUTES} мин снова молча")
+
+    src = (ROOT / "bot_daemon.py").read_text()
+    at = src.index('elif what == "remind"')
+    body = src[at:at + 1600]
+    check("Рассылаю…" in body, "кнопка убирается ДО рассылки, а не после")
+    check("coach:remind:{kind}:yes" in body, "у повтора есть явное подтверждение")
+    check("Люди получат его повторно" in body,
+          "и сказано, чем это обернётся для команды")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -426,6 +459,7 @@ def main() -> int:
     test_question_goes_to_everyone()
     test_preview_uses_real_builders()
     test_offline_players()
+    test_manual_reminder_asks_before_repeat()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
