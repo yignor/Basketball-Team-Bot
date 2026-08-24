@@ -375,6 +375,41 @@ def test_republish_asks_first(bd) -> bool:
     return listed and fell_back and titled and warned and confirms and quiet
 
 
+def test_team_is_named_by_the_league(bd) -> bool:
+    """Свою команду называем так, как её зовёт лига, а не «Конфиг».
+
+    В колонке D листа «Конфиг» стоит название ТУРНИРА («Как показывать турнир
+    в боте и админке»), а читается оно в alt_name команды. Пока конфиг был
+    главнее имени лиги, в общий чат уходило «ПОРАЖЕНИЕ: Летняя лига · Группа 4
+    против Кирпичный Завод» — вместо имени своей же команды."""
+    print("\n=== команду называет лига ===")
+    from enhanced_game_parser import team_display_name
+    from game_system_manager import GameSystemManager
+
+    tournament = {"alt_name": "Летняя лига · Группа 4", "metadata": {}}
+    named = team_display_name("PULL UP", tournament)
+    right = named == "PULL UP"
+    print(("  ✅ " if right else "  ❌ ") + f"имя лиги главнее конфига: {named}")
+
+    spare = team_display_name("", tournament)
+    kept = spare == "Летняя лига · Группа 4"
+    print(("  ✅ " if kept else "  ❌ ")
+          + f"но когда лига молчит, конфиг выручает: {spare}")
+
+    alias = team_display_name(None, {"alt_name": "",
+                                     "metadata": {"display_name": "PullUp Farm"}})
+    fell = alias == "PullUp Farm"
+    print(("  ✅ " if fell else "  ❌ ") + f"и display_name тоже: {alias}")
+
+    # То же правило в менеджере игр — оно там появилось раньше, и разъезжаться
+    # им нельзя: сообщения собираются из обоих источников.
+    gsm = GameSystemManager()
+    gsm.team_configs = {36502: dict(tournament)}
+    same = gsm._resolve_team_name(36502, "PULL UP") == "PULL UP"
+    print(("  ✅ " if same else "  ❌ ") + "менеджер игр держится того же правила")
+    return right and kept and fell and same
+
+
 async def main() -> int:
     db = _prepare_db()
     os.environ.setdefault("BOT_TOKEN", "0:test")
@@ -448,6 +483,8 @@ async def main() -> int:
 
     if not test_coach_root_stays_short(bd):
         total_problems.append({"data": "корень раздела тренера"})
+    if not test_team_is_named_by_the_league(bd):
+        total_problems.append({"data": "имя команды"})
     if not test_republish_asks_first(bd):
         total_problems.append({"data": "объявление результата"})
     if not test_same_message_is_not_an_error(bd):

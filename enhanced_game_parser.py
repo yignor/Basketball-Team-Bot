@@ -14,6 +14,39 @@ from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
 from datetime_utils import get_moscow_time
 
+
+def team_display_name(league_name: Optional[str],
+                      *config_sources: Optional[Dict[str, Any]]) -> str:
+    """Как называется команда в сообщениях.
+
+    Имя от лиги главнее всего: она знает, как команда называется. «Конфиг» —
+    только запасной вариант, на случай, когда лига имени не дала.
+
+    Почему это важно: в колонке D листа «Конфиг» стоит название ТУРНИРА («Как
+    показывать турнир в боте и админке»), а читается оно в alt_name команды.
+    Пока конфиг был главнее, в общий чат уходило «ПОРАЖЕНИЕ: Летняя лига ·
+    Группа 4 против Кирпичный Завод» — вместо имени своей же команды. В
+    game_system_manager это правило уже действовало (_resolve_team_name),
+    здесь его не хватало."""
+    def clean(value: Any) -> str:
+        return value.strip() if isinstance(value, str) and value.strip() else ""
+
+    got = clean(league_name)
+    if got:
+        return got
+    for source in config_sources:
+        if not isinstance(source, dict):
+            continue
+        alt = clean(source.get("alt_name"))
+        if alt:
+            return alt
+        meta = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+        shown = clean(meta.get("display_name"))
+        if shown:
+            return shown
+    return ""
+
+
 class EnhancedGameParser:
     """Улучшенный парсер игр, работающий с API"""
     
@@ -423,7 +456,19 @@ class EnhancedGameParser:
                         potential_configs.append(our_config_data)
                     opponent_config_data = _get_config_for_team(opponent_team_id_value)
 
-                    our_display_name = _normalize_name_value(our_team_entry.get('name'))
+                    # Как называется команда, знает лига. Из «Конфига» имя
+                    # берём ТОЛЬКО когда лига его не дала: в колонке D там
+                    # стоит название турнира («Как показывать турнир в боте»),
+                    # и раньше оно перебивало настоящее имя — в чат уходило
+                    # «ПОРАЖЕНИЕ: Летняя лига · Группа 4 против Кирпичный
+                    # Завод». В game_system_manager это правило уже действует
+                    # (_resolve_team_name), здесь его не хватало.
+                    #
+                    # В список кандидатов конфиг всё равно кладём: по нему
+                    # ищут наших игроков в протоколе, и лишний синоним там не
+                    # мешает, а иногда и выручает.
+                    our_display_name = team_display_name(
+                        our_team_entry.get('name'), *potential_configs) or None
                     if our_display_name:
                         our_team_name_candidates.add(our_display_name)
 
@@ -432,12 +477,10 @@ class EnhancedGameParser:
                             continue
                         alt_name = _normalize_name_value(config_source.get('alt_name'))
                         if alt_name:
-                            our_display_name = alt_name
                             our_team_name_candidates.add(alt_name)
                         metadata_source = config_source.get('metadata') if isinstance(config_source.get('metadata'), dict) else {}
                         display_name = _normalize_name_value(metadata_source.get('display_name'))
                         if display_name:
-                            our_display_name = display_name
                             our_team_name_candidates.add(display_name)
                         aliases = metadata_source.get('aliases') if isinstance(metadata_source.get('aliases'), list) else []
                         for alias in aliases:
@@ -445,11 +488,8 @@ class EnhancedGameParser:
                             if alias_name:
                                 our_team_name_candidates.add(alias_name)
 
-                    opponent_display_name = _normalize_name_value(opponent_entry.get('name'))
-                    if isinstance(opponent_config_data, dict):
-                        alt_name = _normalize_name_value(opponent_config_data.get('alt_name'))
-                        if alt_name:
-                            opponent_display_name = alt_name
+                    opponent_display_name = team_display_name(
+                        opponent_entry.get('name'), opponent_config_data) or None
 
                     resolved_our_name = our_display_name or _normalize_name_value(our_team_entry.get('name')) or our_team_entry.get('name')
                     resolved_opponent_name = opponent_display_name or _normalize_name_value(opponent_entry.get('name')) or opponent_entry.get('name')
