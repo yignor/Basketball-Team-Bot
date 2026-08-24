@@ -8411,6 +8411,178 @@ async def _send_starting_lineups(app: Application) -> None:
         log.info(f"Стартовый состав по игре {g['game_id']} ушёл тренерам ({sent})")
 
 
+# Разобранные протоколы, ждущие подтверждения: id тренера -> что понял бот.
+# В памяти: между «прислал файл» и «нажал опубликовать» проходят секунды, а
+# переживать перезапуск такому нечего.
+_pdf_ready: Dict[int, Dict[str, Any]] = {}
+
+
+async def handle_protocol_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Тренер прислал протокол матча в PDF — разбираем и предлагаем опубликовать.
+
+    Нужно, когда лига не отдала счёт вовремя: протокол у тренера на руках в тот
+    же вечер, а в чате пусто. Публикуем НЕ сразу: сначала показываем, что бот
+    понял, и ждём подтверждения — сообщение уходит всей команде, и ошибка
+    разбора там дороже лишнего нажатия."""
+    msg = update.effective_message
+    user = update.effective_user
+    chat = update.effective_chat
+    if not msg or not user or not chat or chat.type != "private":
+        return
+    doc = msg.document
+    if not doc or not str(doc.file_name or "").lower().endswith(".pdf"):
+        return
+    if not (_is_admin(user) or _can_see_reports(user)):
+        return
+
+    import protocol_pdf
+    await msg.reply_text("📄 Читаю протокол…")
+    try:
+        handle = await context.bot.get_file(doc.file_id)
+        data = bytes(await handle.download_as_bytearray())
+        got = await asyncio.to_thread(protocol_pdf.parse, data)
+    except protocol_pdf.NotAvailable:
+        await msg.reply_text(
+            "На сервере нет библиотеки для чтения PDF. Поставить:\n\n"
+            "sudo -u botuser /opt/basketball-bot/venv/bin/pip install pypdf")
+        raise ApplicationHandlerStop
+    except Exception as e:
+        log.warning(f"Протокол PDF: не разобрал: {e}")
+        await msg.reply_text("Не смог прочитать этот файл. Нужен статистический "
+                             "отчёт матча в PDF.")
+        raise ApplicationHandlerStop
+
+    text = protocol_pdf.summary(got)
+    if not got.get("score"):
+        await msg.reply_text(text)
+        raise ApplicationHandlerStop
+
+    _pdf_ready[user.id] = got
+    await msg.reply_text(
+        text + "\n\nОпубликовать итог в чат команды?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📣 Опубликовать", callback_data="pdf:post")],
+            [InlineKeyboardButton("Не надо", callback_data="pdf:no")]]))
+    raise ApplicationHandlerStop
+
+
+async def handle_protocol_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Подтверждение публикации разобранного протокола."""
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not user:
+        return
+    await query.answer()
+    got = _pdf_ready.pop(user.id, None)
+    if (query.data or "") == "pdf:no" or not got:
+        await query.edit_message_text("Не публикую." if got else
+                                      "Этот разбор уже неактуален — пришли файл заново.")
+        return
+
+    import protocol_pdf
+    text = _protocol_post_text(got)
+    gsm = await asyncio.to_thread(_game_manager)
+    chat_ids = _result_chat_ids(gsm)
+    topic = getattr(gsm, "game_updates_topic_id", None)
+    sent = 0
+    for chat_id in chat_ids:
+        kwargs: Dict[str, Any] = {"chat_id": int(chat_id), "text": text}
+        if topic is not None:
+            kwargs["message_thread_id"] = topic
+        try:
+            await query.get_bot().send_message(**kwargs)
+            sent += 1
+        except Exception as e:
+            if topic is not None and "thread not found" in str(e).lower():
+                kwargs.pop("message_thread_id", None)
+                try:
+                    await query.get_bot().send_message(**kwargs)
+                    sent += 1
+                    continue
+                except Exception as e2:
+                    e = e2
+            log.warning(f"Протокол PDF в чат {chat_id}: {e}")
+    await query.edit_message_text(
+        f"📣 Опубликовал ({sent} чат(а))." if sent else
+        "⚠️ Не смог отправить — проверь, что бот в чате команды.")
+    log.info(f"Итог по PDF-протоколу опубликован ({sent}), прислал id {user.id}")
+
+
+def _protocol_post_text(got: Dict[str, Any]) -> str:
+    """Сообщение в чат по разобранному протоколу.
+
+    Своими словами, а не копией отчёта: в чате нужен итог, а не таблица. И без
+    выдумок — только то, что в протоколе написано прямо."""
+    home, guest = got["score"]
+    teams = got.get("teams") or []
+    if len(teams) == 2:
+        head = f"🏀 {teams[0]} {home}:{guest} {teams[1]}"
+    else:
+        head = f"🏀 Итог матча: {home}:{guest}"
+    lines = [head]
+    if got.get("quarters"):
+        lines.append("📊 По четвертям: " + ", ".join(got["quarters"]))
+    if got.get("overtimes"):
+        word = _plural(got["overtimes"], "овертайм", "овертайма", "овертаймов")
+        lines.append(f"⏱ {got['overtimes']} {word}.")
+    if got.get("date"):
+        lines.append(f"📅 {got['date']}")
+    return "\n".join(lines)
+
+
+async def _catch_up_results(app: Application) -> None:
+    """Публикует итоги игр, которые монитор не успел поймать в своё окно.
+
+    22.08.2026 матч с овертаймом попал в базу ночным добором через двое суток —
+    окно слежения (7 часов от начала) к тому времени давно закрылось, и в чат
+    не ушло ничего. Со стороны это выглядит как пропавшая игра.
+
+    Публикуем с пометкой, что задним числом: делать вид, будто всё вовремя,
+    нельзя — люди помнят, что сообщения не было."""
+    import result_catchup
+    try:
+        late = await asyncio.to_thread(result_catchup.pending)
+    except Exception as e:
+        log.warning(f"Догон результатов: список не собрался: {e}")
+        return
+    if not late:
+        return
+    gsm = await asyncio.to_thread(_game_manager)
+    chat_ids = _result_chat_ids(gsm)
+    if not chat_ids:
+        return
+    # Результаты лежат в теме обновлений игры — туда же их кладёт и обычный
+    # путь; отдельной темы под результаты в настройках нет.
+    topic = getattr(gsm, "game_updates_topic_id", None)
+    for game in late:
+        text = await asyncio.to_thread(result_catchup.text, game)
+        sent = 0
+        for chat_id in chat_ids:
+            kwargs = {"chat_id": int(chat_id), "text": text}
+            if topic is not None:
+                kwargs["message_thread_id"] = topic
+            try:
+                await app.bot.send_message(**kwargs)
+                sent += 1
+            except Exception as e:
+                # Топик мог быть удалён — пробуем в общий чат, а не молчим.
+                if topic is not None and "thread not found" in str(e).lower():
+                    kwargs.pop("message_thread_id", None)
+                    try:
+                        await app.bot.send_message(**kwargs)
+                        sent += 1
+                        continue
+                    except Exception as e2:
+                        e = e2
+                log.warning(f"Догон результата в чат {chat_id}: {e}")
+        # Помечаем ТОЛЬКО если дошло: иначе игра молча выпадет из догона и
+        # второго шанса уже не будет.
+        if sent:
+            await asyncio.to_thread(result_catchup.mark_done, game)
+            log.info(f"Догон: итог игры {game['source']}:{game['game_id']} "
+                     f"опубликован ({sent} чат(а))")
+
+
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -8697,6 +8869,7 @@ async def _background_loop(app: Application) -> None:
             except Exception as e:
                 log.warning(f"Уборка доступов: {e}")
             await _catch_up_prices()
+            await _catch_up_results(app)
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.
             try:
@@ -9000,6 +9173,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_gamelink_callback, pattern=r"^gl:"))
     app.add_handler(CallbackQueryHandler(handle_next_month, pattern=r"^nm:"))
+    app.add_handler(CallbackQueryHandler(handle_protocol_callback, pattern=r"^pdf:"))
+    # Протокол матча в PDF — отдельной группой: обработчик смотрит на документ,
+    # а не на текст, и с текстовыми диалогами не пересекается.
+    app.add_handler(MessageHandler(
+        filters.Document.PDF & filters.ChatType.PRIVATE, handle_protocol_pdf),
+        group=13)
     app.add_handler(CallbackQueryHandler(handle_joke_callback, pattern=r"^joke:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
