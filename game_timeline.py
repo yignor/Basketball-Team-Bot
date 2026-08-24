@@ -50,6 +50,18 @@ IB_PLAY_OUT = 9      # уход с площадки
 IB_PERIOD_START = 21  # старт периода — у него всегда есть VideoFrom
 HTTP_TIMEOUT = 25
 
+# Сколько реального времени идёт одна игровая секунда. Десять игровых минут
+# занимают на записи 15–30 реальных, то есть 1.5–3.0; допуск берём шире, чтобы
+# не забраковать живой протокол из-за одного затянутого периода.
+SANE_PACE = (0.8, 5.0)
+# Чем считаем, когда лига не дала годной привязки вовсе.
+MODEL_PACE = 1.8
+# Перерывы между периодами: короткий и большой (после второго).
+BREAK_SECONDS = 120
+HALFTIME_SECONDS = 600
+# На сколько секунд якорь может отстоять от общей линии, оставаясь якорем.
+ANCHOR_JUMP = 180
+
 # Что человек хочет пересмотреть. Ключи — наш общий словарь: у Инфобаскета коды
 # числовые, у SLPRO строковые, и сводить их надо здесь, а не в показе.
 MOMENT_TITLES = {
@@ -142,7 +154,11 @@ MAX_STREAM_LEAD = 6 * 3600
 # Время — UTC, как и fetched_at (сервер живёт в UTC): с московской отметкой
 # условие оставалось бы верным ещё три часа, и каждый прогон ingest
 # перекачивал бы все протоколы заново.
-REDO_BEFORE = "2026-08-17T12:20:00"
+# Разметку, снятую раньше этой отметки, перекладываем заново. Двигаем её,
+# когда меняется сам способ счёта: 24.08.2026 — проверка периодов на
+# здравый темп (см. _timeline), до неё негодные отметки лиги ложились в
+# базу как есть.
+REDO_BEFORE = "2026-08-24T12:00:00"
 
 # Начинаем показывать чуть раньше самого выхода: попасть ровно в секунду
 # замены бесполезно — человек хочет увидеть, как он выходит, а не догонять
@@ -157,6 +173,23 @@ NOTE_GUESS = ("<i>Начало эфира неизвестно, считаем �
               "возможно смещение на минуту-другую.</i>")
 NOTE_HAND = ("<i>Время начала матча выставлено вручную по записи — "
              "если не сходится, поправь кнопкой ниже.</i>")
+# Отдельная оговорка про качество разметки внутри матча. Сдвиг может быть
+# выставлен хоть вручную и точно — но если лига в каком-то периоде дала
+# негодные отметки видео, места внутри игры посчитаны по среднему темпу, и
+# молчать об этом нельзя: человек мотает запись и не понимает, почему мимо.
+NOTE_MODEL = ("<i>В протоколе этой игры лига испортила привязку к видео: "
+              "часть моментов расставлена по среднему темпу матча, "
+              "погрешность — до полуминуты.</i>")
+
+
+def _notes(source: str, game_id: Any) -> List[str]:
+    """Оговорки под тайм-кодами: чем меряли сдвиг и как размечали игру."""
+    kind = offset_kind(source, game_id)
+    out = [NOTE_HAND if kind == "hand"
+           else NOTE_EXACT if kind == "vk" else NOTE_GUESS]
+    if timing_kind(source, game_id) == "model":
+        out.append(NOTE_MODEL)
+    return out
 
 
 # ───────────────────────────── Infobasket ──────────────────────────────────
@@ -237,12 +270,118 @@ def _place(anchors: List[Tuple[float, float]], clock: float) -> float:
     return _interpolate(anchors, clock)
 
 
-def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[int]]:
+def _drop_outliers(items: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Выбрасывает якоря, улетевшие от общей линии периода.
+
+    В овертайме матча 22.08.2026 последняя отметка стояла на восемнадцать часов
+    позже остальных: запись правили на следующий день. Один такой якорь тянул
+    за собой интерполяцию всего периода."""
+    if len(items) < 3:
+        return items
+    steps = [(v2 - v1) / (c2 - c1)
+             for (c1, v1), (c2, v2) in zip(items, items[1:]) if c2 > c1]
+    if not steps:
+        return items
+    steps.sort()
+    step = steps[len(steps) // 2]
+    if step <= 0:
+        return items
+    kept = [items[0]]
+    for clock, video in items[1:]:
+        c0, v0 = kept[-1]
+        expect = v0 + step * (clock - c0)
+        if abs(video - expect) <= ANCHOR_JUMP + step * (clock - c0) * 0.5:
+            kept.append((clock, video))
+    return kept
+
+
+def _pace_of(items: List[Tuple[float, float]]) -> Optional[float]:
+    """Сколько реальных секунд пришлось на игровую по этим якорям."""
+    if len(items) < 2:
+        return None
+    span = items[-1][0] - items[0][0]
+    if span <= 0:
+        return None
+    return (items[-1][1] - items[0][1]) / span
+
+
+def _period_length(period: int, offsets: Dict[int, float]) -> float:
+    got = offsets.get(period + 1, 0.0) - offsets.get(period, 0.0)
+    return got if got > 0 else DEFAULT_PERIOD_SECONDS
+
+
+def _timeline(per_anchors: Dict[int, List[Tuple[float, float]]],
+              offsets: Dict[int, float], zero: float) -> Tuple[Dict[int, Any], bool]:
+    """Как переводить игровые часы в реальное время — по каждому периоду.
+
+    Лига иногда отдаёт негодную привязку. В матче 22.08.2026 отметки видео за
+    весь первый период сдвинулись на одиннадцать секунд: десять минут игры
+    уместились в мгновение, и все моменты периода вставали вплотную к спорному
+    — промах «на табло 3:59» показывался на 3:30 записи, раньше начала игры.
+
+    Поэтому каждый период проверяем на здравый темп. Годный размечаем его
+    собственными якорями. Негодный считаем по среднему темпу этой же игры, а
+    следующие периоды сдвигаем следом — иначе они остались бы приклеены к
+    съеденному времени и всё дальнейшее уехало бы на четверть часа вперёд.
+
+    Возвращаем разметку и признак «всё из протокола»: посчитанное по модели —
+    оценка, и человеку об этом говорят, а не выдают за точность."""
+    periods = sorted(set(list(per_anchors) + list(offsets)))
+    clean = {p: _drop_outliers(sorted(per_anchors.get(p) or []))
+             for p in periods}
+    paces = {p: _pace_of(items) for p, items in clean.items()}
+    good = {p for p, v in paces.items()
+            if v is not None and SANE_PACE[0] <= v <= SANE_PACE[1]}
+    usable = sorted(paces[p] for p in good)
+    model = usable[len(usable) // 2] if usable else MODEL_PACE
+
+    plan: Dict[int, Any] = {}
+    prev_end: Optional[float] = None
+    shift = 0.0
+    trusted = True
+    for period in periods:
+        items = clean.get(period) or []
+        lo = offsets.get(period, 0.0)
+        length = _period_length(period, offsets)
+        gap = HALFTIME_SECONDS if period == 3 else BREAK_SECONDS
+        if period in good and items:
+            start = _interpolate(items, lo)
+            if prev_end is not None and start + shift < prev_end:
+                # Период уехал назад во времени — значит, до него что-то
+                # считали по модели. Подвинем весь его якорный ряд следом.
+                shift = prev_end + gap - start
+                trusted = False
+            plan[period] = ("anchors", items, shift)
+            prev_end = _interpolate(items, lo + length) + shift
+        else:
+            start = zero if prev_end is None else prev_end + gap
+            plan[period] = ("model", start, model, lo)
+            prev_end = start + length * model
+            trusted = False
+    return plan, trusted
+
+
+def _at(plan: Dict[int, Any], period: int, clock: float,
+        every: List[Tuple[float, float]], substitution: bool = False) -> float:
+    """Реальный момент события по игровым часам."""
+    how = plan.get(period)
+    if not how:
+        return _place(every, clock) if substitution else _interpolate(every, clock)
+    if how[0] == "model":
+        _, start, pace, lo = how
+        return start + (clock - lo) * pace
+    _, items, shift = how
+    found = _place(items, clock) if substitution else _interpolate(items, clock)
+    return found + shift
+
+
+def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float],
+                                      Optional[int], List[Dict[str, Any]], bool]:
     data = _ib_fetch(str(game_id))
     plays = data.get("OnlinePlays") or []
     starts = data.get("OnlineStarts") or []
     if not plays:
-        return [], None, None
+        return [], None, None, [], True
 
     # StartID — номер заявки в этой игре; настоящий id игрока лежит в PersonID.
     person = {int(s.get("StartID") or 0): str(s.get("PersonID") or "")
@@ -266,10 +405,14 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Opt
         items.sort()
     if not per_anchors:
         logger.info("Тайм-коды infobasket/%s: в протоколе нет привязки к видео", game_id)
-        return [], None, None
+        return [], None, None, [], True
     every = sorted(a for items in per_anchors.values() for a in items)
     # Ноль — старт первого периода (у него якорь есть всегда, событие типа 21).
     zero = per_anchors.get(1, every)[0][1]
+    plan, trusted = _timeline(per_anchors, offsets, zero)
+    if not trusted:
+        logger.info("Тайм-коды infobasket/%s: привязка лиги местами негодная, "
+                    "часть периодов посчитана по среднему темпу", game_id)
 
     events: List[Dict[str, Any]] = []
     for p in plays:
@@ -292,7 +435,7 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Opt
             # Сколько было на табло: по этому числу человек сверяет ссылку с
             # записью, не зная, кого высматривать среди пяти замен подряд.
             "left": max(0.0, period_len - in_period),
-            "real": _place(per_anchors.get(period) or every, clock) - zero,
+            "real": _at(plan, period, clock, every, substitution=True) - zero,
             "in": kind == IB_PLAY_IN,
             "order": int(p.get("PlaySortOrder") or 0),
         })
@@ -311,11 +454,11 @@ def _ib_shifts(game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Opt
         moments.append({
             "player_id": pid, "kind": what, "period": period,
             "left": max(0.0, period_len - in_period),
-            "real": _place(per_anchors.get(period) or every, clock) - zero,
+            "real": _at(plan, period, clock, every) - zero,
             "order": int(p.get("PlaySortOrder") or 0),
         })
     return (_pair(events), zero,
-            _seconds_of_day(datetime.fromtimestamp(zero, MSK)), moments)
+            _seconds_of_day(datetime.fromtimestamp(zero, MSK)), moments, trusted)
 
 
 # ─────────────────────────────── SLPRO ─────────────────────────────────────
@@ -353,16 +496,18 @@ def _slpro_time(value: Any) -> Optional[float]:
     return naive.replace(tzinfo=MSK).timestamp()
 
 
-async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Optional[float], Optional[int]]:
+async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]],
+                                                       Optional[float], Optional[int],
+                                                       List[Dict[str, Any]], bool]:
     game = await client.get_game(game_id)
     log = (game or {}).get("log") or []
     if not log:
-        return [], None, None
+        return [], None, None, [], True
 
     stamps = [t for t in (_slpro_time(e.get("date_add")) for e in log) if t]
     if not stamps:
         logger.info("Тайм-коды slpro/%s: в протоколе нет времени событий", game_id)
-        return [], None, None
+        return [], None, None, [], True
 
     # game_time у SLPRO идёт на УБЫВАНИЕ (600 → 0) и считается внутри периода.
     per_len = max((float(e.get("game_time") or 0) for e in log),
@@ -442,7 +587,7 @@ async def _slpro_shifts(client, game_id: str) -> Tuple[List[Dict[str, Any]], Opt
             "real": real - zero, "order": idx,
         })
     return (_pair(events), zero,
-            _seconds_of_day(datetime.fromtimestamp(zero, MSK)), moments)
+            _seconds_of_day(datetime.fromtimestamp(zero, MSK)), moments, True)
 
 
 # ──────────────────────────── Общая сборка ─────────────────────────────────
@@ -568,12 +713,13 @@ async def refresh(source: str, game_id: Any, client=None) -> int:
     source = str(source)
     try:
         if source == "infobasket":
-            found, at, tipoff, mom = await asyncio.to_thread(_ib_shifts, str(game_id))
+            found, at, tipoff, mom, exact = await asyncio.to_thread(
+                _ib_shifts, str(game_id))
         elif source == "slpro":
             if client is None:
                 from slpro_client import SlproClient
                 client = SlproClient()
-            found, at, tipoff, mom = await _slpro_shifts(client, str(game_id))
+            found, at, tipoff, mom, exact = await _slpro_shifts(client, str(game_id))
         else:
             return 0
     except Exception as exc:  # сеть/формат — не роняем ingest из-за тайм-кодов
@@ -583,6 +729,7 @@ async def refresh(source: str, game_id: Any, client=None) -> int:
     # отметить ни разу, а броски отмечает всегда.
     if mom:
         store_moments(source, game_id, mom)
+    set_timing(source, game_id, exact)
     n = store(source, game_id, found)
     if n:
         await sync_offset(source, game_id, at, tipoff)
@@ -783,6 +930,31 @@ def _remember_tipoff(source: str, game_id: Any, tipoff_at: float) -> None:
         conn.commit()
 
 
+def set_timing(source: str, game_id: Any, exact: bool) -> None:
+    """Запоминает, целиком ли разметка пришла из протокола.
+
+    Пишем даже когда строки ещё нет: сдвиг могут выставить позже, а знать про
+    качество привязки надо уже сейчас — по ней решается, показывать ли
+    человеку оговорку «время примерное»."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO game_video_sync (source, game_id, timing) VALUES (?, ?, ?) "
+            "ON CONFLICT(source, game_id) DO UPDATE SET timing = excluded.timing",
+            (source, str(game_id), "league" if exact else "model"))
+        conn.commit()
+
+
+def timing_kind(source: str, game_id: Any) -> str:
+    """«league» — всё из протокола, «model» — часть посчитана по темпу."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT timing FROM game_video_sync WHERE source = ? AND game_id = ?",
+            (source, str(game_id))).fetchone()
+    return str(row["timing"] or "league") if row else "league"
+
+
 def drop_offset(source: str, game_id: Any) -> None:
     """Снимает ручную привязку — сдвиг снова посчитает автоматика."""
     sheets_cache.init_db()
@@ -968,10 +1140,7 @@ def format_moments_page(source: str, game_id: Any, player_id: Any,
     head = [_moments_head(source, game_id, player_id, video_url, len(lines))]
     if len(pages) > 1:
         head.append(f"Страница {page + 1} из {len(pages)}")
-    body = head + [""] + pages[page]
-    kind = offset_kind(source, game_id)
-    body.append(NOTE_HAND if kind == "hand"
-                else NOTE_EXACT if kind == "vk" else NOTE_GUESS)
+    body = head + [""] + pages[page] + _notes(source, game_id)
     return "\n".join(body), page, len(pages)
 
 
@@ -1027,7 +1196,5 @@ def format_block(source: str, game_id: Any, player_id: Any,
         lines.append(f"…и ещё {len(shown) - max_items}")
     if total:
         lines.append(f"Итого {total // 60} мин игрового времени")
-    kind = offset_kind(source, game_id)
-    lines.append(NOTE_HAND if kind == "hand"
-                 else NOTE_EXACT if kind == "vk" else NOTE_GUESS)
+    lines += _notes(source, game_id)
     return "\n".join(lines)

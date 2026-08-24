@@ -811,6 +811,9 @@ CREATE TABLE IF NOT EXISTS game_video_sync (
     tipoff_at   INTEGER NOT NULL DEFAULT 0,   -- unix-момент спорного по протоколу
     set_by      TEXT NOT NULL DEFAULT '',
     set_at      TEXT NOT NULL DEFAULT '',
+    -- «league» — разметка целиком из протокола, «model» — часть периодов
+    -- посчитана по среднему темпу, потому что лига дала негодные отметки.
+    timing      TEXT NOT NULL DEFAULT 'league',
     PRIMARY KEY (source, game_id)
 );
 
@@ -959,6 +962,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_meta", "video_started_at", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_meta", "video_seconds", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_video_sync", "tipoff_at", "INTEGER NOT NULL", "0")
+        _ensure_column(conn, "game_video_sync", "timing", "TEXT NOT NULL", "'league'")
         _ensure_column(conn, "game_shifts", "start_left", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_roster_state", "form", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "role", "TEXT NOT NULL", "''")

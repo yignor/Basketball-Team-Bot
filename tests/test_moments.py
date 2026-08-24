@@ -243,9 +243,76 @@ def test_admin_can_show_anyone() -> None:
     check("Твои моменты" in shown, "моменты показаны")
 
 
+def test_broken_anchors_do_not_squash_the_game() -> None:
+    """Негодная привязка лиги не должна сминать период в мгновение.
+
+    В протоколе матча 22.08.2026 отметки видео за весь первый период сдвинулись
+    на одиннадцать секунд: десять минут игры уместились в мгновение. Все моменты
+    периода вставали вплотную к спорному, и промах «на табло 3:59» показывался
+    на 3:30 записи — раньше, чем начался матч. Второй дефект того же протокола:
+    одиночный якорь в овертайме, улетевший на восемнадцать часов вперёд.
+
+    Данные здесь — точная выжимка того протокола, сеть не нужна."""
+    print("\n=== негодная привязка лиги ===")
+    offsets = {1: 0.0, 2: 600.0, 3: 1200.0, 4: 1800.0, 5: 2400.0}
+    zero = 1787398013.0
+
+    # Первый период: часы идут, видео стоит. Остальные — живые.
+    anchors = {1: [(c, zero + c * 0.018) for c in range(0, 601, 60)],
+               2: [(600 + c, zero + 11 + c * 1.35) for c in range(0, 601, 60)],
+               3: [(1200 + c, zero + 1019 + c * 1.64) for c in range(0, 601, 60)],
+               4: [(1800 + c, zero + 2075 + c * 2.55) for c in range(0, 601, 60)]}
+    # Овертайм: нормальный ряд плюс одна отметка на восемнадцать часов позже.
+    anchors[5] = [(2400 + c, zero + 3686 + c * 2.2) for c in range(0, 301, 60)]
+    anchors[5].append((2700.0, zero + 70600.0))
+
+    cleaned = gt._drop_outliers(sorted(anchors[5]))
+    check(len(cleaned) == len(anchors[5]) - 1,
+          f"улетевший якорь выброшен: было {len(anchors[5])}, стало {len(cleaned)}")
+
+    check(not (gt.SANE_PACE[0] <= (gt._pace_of(sorted(anchors[1])) or 0)
+               <= gt.SANE_PACE[1]),
+          "замерший первый период признан негодным")
+
+    plan, trusted = gt._timeline(anchors, offsets, zero)
+    check(not trusted, "игра помечена как посчитанная не целиком по протоколу")
+    check(plan[1][0] == "model", "первый период посчитан по среднему темпу")
+
+    # Ключевое: моменты идут по возрастанию и не налезают на спорный.
+    every = sorted(a for items in anchors.values() for a in items)
+    at_359 = gt._at(plan, 1, 361.0, every) - zero      # на табло 3:59
+    at_322 = gt._at(plan, 1, 398.0, every) - zero      # на табло 3:22
+    check(at_359 > 300, f"момент шестой минуты не у самого начала: {at_359:.0f} с")
+    check(at_322 > at_359, "более поздний момент идёт позже")
+    grew = (at_322 - at_359) / (398.0 - 361.0)
+    check(1.0 <= grew <= 4.0, f"запись идёт быстрее игры, но не втрое: {grew:.2f}")
+
+    # И периоды не наезжают друг на друга.
+    ends = [gt._at(plan, p, offsets[p] + 600.0, every) - zero for p in (1, 2, 3, 4)]
+    starts = [gt._at(plan, p, offsets[p], every) - zero for p in (1, 2, 3, 4, 5)]
+    order = all(starts[i + 1] > ends[i] for i in range(4))
+    check(order, f"периоды идут подряд: {[round(x) for x in starts]}")
+
+
+def test_note_tells_about_modelled_time() -> None:
+    """Про посчитанное по модели человеку говорят прямо."""
+    print("\n=== оговорка про приблизительность ===")
+    gt.set_timing(SOURCE, GAME, False)
+    notes = gt._notes(SOURCE, GAME)
+    check(any("среднему темпу" in n for n in notes),
+          "оговорка появилась: " + " | ".join(n[:40] for n in notes))
+    gt.set_timing(SOURCE, GAME, True)
+    notes = gt._notes(SOURCE, GAME)
+    check(not any("среднему темпу" in n for n in notes),
+          "и пропадает, когда разметка честная")
+    check(len(notes) == 1, "лишних оговорок не добавилось")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
+    test_broken_anchors_do_not_squash_the_game()
+    test_note_tells_about_modelled_time()
     test_only_mine()
     test_link_opens_before_the_action()
     test_bad_goes_after_good()
