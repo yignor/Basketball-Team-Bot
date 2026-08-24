@@ -446,6 +446,36 @@ def test_manual_reminder_asks_before_repeat() -> None:
           "и сказано, чем это обернётся для команды")
 
 
+def test_start_clears_every_dialog() -> None:
+    """/start обещан как выход из ЛЮБОГО незаконченного ввода.
+
+    Чистились шесть словарей из пятнадцати, выписанных руками: гостевой ввод
+    состава переживал /start и потом перехватывал чужой текст — присланное
+    время спорного уходило в поиск игрока по фамилии (24.08.2026)."""
+    print("\n=== /start закрывает все диалоги ===")
+    import bot_daemon as bd
+    src = (ROOT / "bot_daemon.py").read_text()
+
+    at = src.index("async def handle_start")
+    body = src[at:src.index("\nasync def ", at + 10)]
+    check("_clear_pending" in body, "/start зовёт общую чистку")
+
+    # И сама чистка знает про все диалоги, а не про часть.
+    at2 = src.index("def _clear_pending")
+    cleaner = src[at2:src.index("\ndef ", at2 + 10)]
+    dialogs = [n for n in dir(bd)
+               if n.startswith(("_awaiting_", "_roster_focus", "_pay_draft",
+                                "_debt_draft", "_newgame"))
+               and isinstance(getattr(bd, n), (dict, set))]
+    lost = [n for n in dialogs if n not in cleaner]
+    check(not lost, f"в чистке учтены все диалоги, забыты: {lost}")
+
+    # Открытие диалога правки времени тоже закрывает предыдущий.
+    at3 = src.index('parts[1] == "vidt"')
+    check("_clear_pending" in src[at3:at3 + 400],
+          "правка времени спорного закрывает чужой диалог")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -460,6 +490,7 @@ def main() -> int:
     test_preview_uses_real_builders()
     test_offline_players()
     test_manual_reminder_asks_before_repeat()
+    test_start_clears_every_dialog()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
