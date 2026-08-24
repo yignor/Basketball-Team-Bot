@@ -4859,6 +4859,22 @@ def _money2_markup() -> InlineKeyboardMarkup:
     ])
 
 
+def _game_title_of(rec: Dict[str, Any]) -> str:
+    """Соперники из ключа анонса.
+
+    Ключ выглядит как «АНОНС_ИГРА_22.08.2026_14:00_Кирпичный Завод_PULL UP»:
+    подчёркивание в нём и разделитель, и часть самого названия типа записи —
+    делить по первому нельзя, иначе в подпись кнопки уезжает «ИГРА_22.08…».
+    Отрезаем известную голову и две служебные части, остальное — команды."""
+    key = str(rec.get("unique_key") or "")
+    head = "АНОНС_ИГРА_"
+    body = key[len(head):] if key.startswith(head) else key
+    parts = [p for p in body.split("_") if p]
+    teams = parts[2:] if len(parts) > 2 else parts
+    title = " — ".join(teams).strip()
+    return title or str(rec.get("alt_name") or "игра")
+
+
 def _played_games(limit: int = 6) -> List[Dict[str, Any]]:
     """Сыгранные игры со ссылкой на протокол — свежие первыми.
 
@@ -4878,10 +4894,8 @@ def _played_games(limit: int = 6) -> List[Dict[str, Any]]:
             continue
         if day > today:
             continue
-        key = str(rec["unique_key"])
-        title = key.split("_", 1)[1] if "_" in key else key
         out.append({"game_id": str(rec["game_id"]), "date": day,
-                    "title": title.replace("_", " "), "link": rec["link"]})
+                    "title": _game_title_of(rec), "link": rec["link"]})
     out.sort(key=lambda g: g["date"], reverse=True)
     return out[:limit]
 

@@ -355,6 +355,13 @@ def test_republish_asks_first(bd) -> bool:
     print(("  ✅ " if fell_back else "  ❌ ")
           + "неизвестная игра возвращает к списку, а не падает")
 
+    named = bd._game_title_of(
+        {"unique_key": "АНОНС_ИГРА_22.08.2026_14:00_Кирпичный Завод_PULL UP"})
+    # Подчёркивание в ключе — и разделитель, и часть слова «АНОНС_ИГРА»:
+    # деление по первому уводило в подпись «ИГРА_22.08.2026…».
+    titled = named == "Кирпичный Завод — PULL UP"
+    print(("  ✅ " if titled else "  ❌ ") + f"игра подписана соперниками: {named}")
+
     src = (ROOT / "bot_daemon.py").read_text()
     body = src[src.index("def _republish_ask"):src.index("async def _republish_result")]
     warned = "уже объявляли" in body and "общий чат" in body
@@ -365,7 +372,7 @@ def test_republish_asks_first(bd) -> bool:
     sig = inspect.signature(GameResultsMonitorFinal.send_game_result)
     quiet = sig.parameters["force"].default is False
     print(("  ✅ " if quiet else "  ❌ ") + "сам монитор никогда не форсирует")
-    return listed and fell_back and warned and confirms and quiet
+    return listed and fell_back and titled and warned and confirms and quiet
 
 
 async def main() -> int:
