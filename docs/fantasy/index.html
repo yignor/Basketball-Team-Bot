@@ -866,6 +866,9 @@
   // перетирается при каждом входе в матч, а этот нужен, чтобы вернуть человеку
   // его же выбор на экране «Все игры».
   let weekRefs = [];
+  // Скольких из сохранённой ставки тренер снял с игры — про это надо сказать,
+  // иначе человек видит «выбрано 1 из 3» и не понимает, куда делись двое.
+  let droppedCount = 0;
 
   const keyOf = g => g ? g.source + ':' + g.game_id : '';
 
@@ -892,12 +895,21 @@
   // выбора одинаковы везде, и он всегда false — но renderFilterBar его читает.
   let minimalChrome = false;
 
+  // Экран «Состав» — это ДВА вида: список матчей и набор под выбранный. Оба
+  // живут внутри вкладки draft, поэтому переключать их надо ЧЕРЕЗ showTab:
+  // иначе «Таблица» остаётся видимой, и два экрана рисуются друг под другом.
+  // Так и ломалась вёрстка — не стилями, а двумя открытыми экранами сразу.
+  function showDraft(which) {
+    showTab('draft');
+    $('gamesScreen').classList.toggle('hidden', which !== 'games');
+    $('draft').classList.toggle('hidden', which === 'games');
+    const tabs = document.querySelector('.tabs');
+    if (tabs) tabs.classList.toggle('hidden', which !== 'games');
+  }
+
   function showGames() {
     haptic('light');
-    $('gamesScreen').classList.remove('hidden');
-    $('draft').classList.add('hidden');
-    const tabs = document.querySelector('.tabs');
-    if (tabs) tabs.classList.remove('hidden');   // вкладки нужны снаружи матча
+    showDraft('games');
     renderGamesScreen();
   }
   window.showGames = showGames;
@@ -944,11 +956,9 @@
 
   async function openGame(key) {
     haptic('light');
-    $('gamesScreen').classList.add('hidden');
-    $('draft').classList.remove('hidden');
     // Вкладки убираем ДО запроса. Раньше это делал applyGamePool, то есть
     // только после ответа сервера, и секунду они висели на экране матча.
-    trimChrome(true);
+    showDraft('pick');
     await loadGame(key);
   }
 
@@ -991,7 +1001,14 @@
     pool = gamePool;
     counts = {};
     const restore = (r.pick && r.pick.length) ? r.pick : (isAll ? weekRefs : []);
-    for (const ref of restore) counts[ref] = (counts[ref] || 0) + 1;
+    // Берём только тех, кто ЕЩЁ в заявке. Тренер снимает людей с игры уже
+    // после того, как ставки сделаны; снятый оставался в счётчике, но пропадал
+    // из списка — место занято, а убрать некого. Состав становился неизменяемым
+    // до тех пор, пока тренер не вернёт человека в заявку.
+    const known = new Set(gamePool.map(p => p.ref).filter(Boolean));
+    const dropped = restore.filter(ref => !known.has(ref));
+    for (const ref of restore) if (known.has(ref)) counts[ref] = (counts[ref] || 0) + 1;
+    droppedCount = dropped.length;
     // «Состав перенесён с прошлой игры» — про недельный состав. На матче со
     // своей ставкой переносить нечего, а на пустом — тем более: надпись
     // висела над несобранным составом и сбивала с толку.
@@ -1013,7 +1030,12 @@
     $('copyBox').classList.add('hidden');   // новый матч — старое предложение ни к чему
     const note = $('poolNote');
     const lost = gamePool.filter(p => p.unlinked).length;
-    if (!isAll && r.declared === false) {
+    if (droppedCount) {
+      note.classList.remove('hidden');
+      note.textContent = '⚠️ Тренер снял с игры ' + droppedCount
+        + (droppedCount === 1 ? ' игрока из твоего состава.' : ' игроков из твоего состава.')
+        + ' Их место освободилось — добери замену и сохрани заново.';
+    } else if (!isAll && r.declared === false) {
       note.classList.remove('hidden');
       note.textContent = 'ℹ️ Тренер ещё не объявил состав на этот матч — '
         + 'выбирай из всего ростера. Когда состав появится, список сузится.';
@@ -1596,6 +1618,9 @@
       $(t).classList.toggle('hidden', name !== t);
       $('tab-' + t).classList.toggle('active', name === t);
     }
+    // Уходим с «Состава» — прячем и список матчей: он часть той же вкладки, и
+    // без этого оставался висеть под «Таблицей».
+    if (name !== 'draft') $('gamesScreen').classList.add('hidden');
     syncButton();
     if (name === 'table') showTableTab(tableTab);
     if (name === 'history') loadHistory();

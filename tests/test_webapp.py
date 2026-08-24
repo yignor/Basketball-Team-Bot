@@ -224,8 +224,40 @@ CHECKS = """
     ok(document.getElementById('copyBox').classList.contains('hidden'),
        'при входе в матч предложение переноса скрыто');
 
+    // ── снятый тренером игрок не запирает состав ───────────────────────────
+    // 22.08.2026: тренер снял двоих уже после того, как ставка была сделана.
+    // Снятые оставались в счётчике, но пропадали из списка — место занято, а
+    // убрать некого, и состав становился неизменяемым.
+    applyGamePool({ game:{label:'x', date:'2026-08-24', opponent:'Резалит'},
+      declared:true,
+      pool:[{refs:['ib:1:p1'], name:'Остался'}],
+      pick:['ib:1:p1', 'ib:1:СНЯТЫЙ', 'ib:1:ТОЖЕ'] }, 'slpro:4600');
+    ok(counts['ib:1:p1'] === 1, 'оставшийся в составе');
+    ok(counts['ib:1:СНЯТЫЙ'] === undefined, 'снятый в счётчик не попал');
+    ok(Object.keys(counts).length === 1, 'место освободилось: ' + JSON.stringify(counts));
+    ok(!document.getElementById('poolNote').classList.contains('hidden'),
+       'и человеку сказано, что двоих сняли');
+    ok(/снял с игры 2/.test(document.getElementById('poolNote').textContent),
+       'с числом: ' + document.getElementById('poolNote').textContent);
+
+    // ── два экрана не рисуются друг под другом ──────────────────────────────
+    // Вёрстка «слетала» не стилями: вход в матч показывал набор, но не прятал
+    // «Таблицу», и они накладывались.
+    showTab('table');
+    ok(!document.getElementById('table').classList.contains('hidden'), 'таблица открыта');
+    showDraft('pick');
+    ok(document.getElementById('table').classList.contains('hidden'),
+       'вход в матч прячет таблицу');
+    ok(document.getElementById('gamesScreen').classList.contains('hidden'),
+       'и список матчей тоже');
+    showTab('table');
+    ok(document.getElementById('gamesScreen').classList.contains('hidden'),
+       'уход на таблицу прячет список матчей');
+
     showGames();
     ok(!document.getElementById('gamesScreen').classList.contains('hidden'), 'возврат к списку игр');
+    ok(document.getElementById('table').classList.contains('hidden'),
+       'таблица при этом закрыта');
     ok(!document.querySelector('.tabs').classList.contains('hidden'), 'снаружи матча вкладки вернулись');
     ok(document.getElementById('draft').classList.contains('hidden'), 'набор при этом скрыт');
 
