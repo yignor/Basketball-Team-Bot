@@ -2329,6 +2329,8 @@ def _clear_pending(uid: int) -> None:
     # раньше всех остальных — забыть их здесь опаснее прочего.
     _awaiting_coach.pop(uid, None)
     _awaiting_feedback.discard(uid)
+    _awaiting_group.pop(uid, None)
+    _group_letter.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -4795,6 +4797,7 @@ def _coach_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Игры", callback_data="coach:play")],
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
+        [InlineKeyboardButton("👪 Группы и рассылки", callback_data="pg:main")],
         [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🔕 Кто вне бота", callback_data="coach:offline")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
@@ -8622,6 +8625,672 @@ def _protocol_post_text(got: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ─────────────────── группы игроков и рассылки ───────────────────
+
+# Незаконченный ввод в разделе групп: uid -> «что ждём:аргумент».
+_awaiting_group: Dict[int, str] = {}
+# Готовое к отправке письмо: uid -> {"gid", "body"}. Между «показал текст» и
+# «нажал отправить» письмо живёт здесь: рассылка уходит десяткам людей и
+# обязана подтверждаться, а не срываться с первого нажатия.
+_group_letter: Dict[int, Dict[str, Any]] = {}
+
+GROUPS_HEAD = ("👪 Группы\n\nСоставы со своими именами: основа, второй состав, "
+               "кто ездит на кубок. Группе можно назначить лигу и написать "
+               "всем сразу — в личку, в общий чат отсюда не уходит ничего.")
+
+GROUP_ASK_NAME = ("👪 Как назвать группу?\n\nНапример: «Основа», «Второй состав», "
+                  "«Кубок». Имя вольное.\n\nПередумал — /start.")
+
+
+def _pg_main() -> Tuple[str, InlineKeyboardMarkup]:
+    """Корень раздела: список групп и вход в шаблоны."""
+    import player_groups as pg
+    got = pg.groups()
+    rows = []
+    for g in got:
+        mark = f" · {g['league_title']}" if g["league_title"] else ""
+        rows.append([InlineKeyboardButton(
+            f"{g['name']} ({g['size']}){mark}"[:BTN_TEXT],
+            callback_data=f"pg:g:{g['id']}")])
+    rows.append([InlineKeyboardButton("➕ Создать группу", callback_data="pg:new")])
+    rows.append([InlineKeyboardButton("✉️ Шаблоны писем", callback_data="pg:tpl")])
+    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    text = GROUPS_HEAD if got else (
+        GROUPS_HEAD + "\n\nПока ни одной группы нет.")
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _pg_group(gid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    g = pg.group(gid)
+    if not g:
+        return _pg_main()
+    people = pg.members(gid)
+    ready, silent = pg.targets(gid)
+    lines = [f"👪 {g['name']}", ""]
+    lines.append(f"🏆 Лига: {g['league_title'] or 'не привязана'}")
+    lines.append(f"👥 В группе: {len(people)}")
+    if people:
+        lines.append("")
+        lines.append(", ".join(p["title"] for p in people[:12])
+                     + (" и ещё…" if len(people) > 12 else ""))
+    if silent:
+        # Молчуны — это не ошибка, но тренер должен знать заранее, что письмо
+        # дойдёт не до всех: иначе он посчитает, что предупредил команду.
+        lines += ["", f"🔕 Бота не запускали ({len(silent)}): "
+                      + ", ".join(silent[:6]) + (" и др." if len(silent) > 6 else "")]
+    rows = [
+        [InlineKeyboardButton("👥 Состав", callback_data=f"pg:who:{gid}:0")],
+        [InlineKeyboardButton("📨 Написать группе", callback_data=f"pg:send:{gid}")],
+        [InlineKeyboardButton("🔁 Повторяющиеся", callback_data=f"pg:rep:{gid}")],
+        [InlineKeyboardButton("🏆 Лига", callback_data=f"pg:lg:{gid}"),
+         InlineKeyboardButton("✏️ Имя", callback_data=f"pg:ren:{gid}")],
+        [InlineKeyboardButton("🗑 Удалить группу", callback_data=f"pg:del:{gid}")],
+        [InlineKeyboardButton("⬅️ К группам", callback_data="pg:main")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _pg_members(gid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто в группе: весь список игроков с отметками, страницами."""
+    import coach_payments
+    import player_groups as pg
+    g = pg.group(gid)
+    if not g:
+        return _pg_main()
+    inside = set(pg.member_rows(gid))
+    people = coach_payments.players()
+    pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(
+        ("✅ " if int(p["row"]) in inside else "▫️ ") + p["title"][:BTN_TEXT - 3],
+        callback_data=f"pg:t:{gid}:{p['row']}:{page}")] for p in chunk]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "◀️", callback_data=f"pg:who:{gid}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}",
+                                        callback_data="pg:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(
+                "▶️", callback_data=f"pg:who:{gid}:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("✅ Готово", callback_data=f"pg:g:{gid}")])
+    return (f"👥 Состав группы «{g['name']}»\n\nНажми на человека, чтобы "
+            f"добавить или убрать. Сейчас в группе: {len(inside)}.",
+            InlineKeyboardMarkup(rows))
+
+
+def _pg_league(gid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    g = pg.group(gid)
+    if not g:
+        return _pg_main()
+    rows = []
+    for i, item in enumerate(pg.leagues()):
+        here = (item["source"] == g["league_source"]
+                and item["team_id"] == str(g["league_team"]))
+        rows.append([InlineKeyboardButton(
+            ("✅ " if here else "") + item["title"][:BTN_TEXT - 3],
+            callback_data=f"pg:lgset:{gid}:{i}")])
+    rows.append([InlineKeyboardButton("🚫 Без лиги",
+                                      callback_data=f"pg:lgset:{gid}:-1")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:g:{gid}")])
+    text = (f"🏆 Лига группы «{g['name']}»\n\n"
+            f"Сейчас: {g['league_title'] or 'не привязана'}.\n\n"
+            "Привязка ничего не рассылает — она говорит, в каком турнире "
+            "играет этот состав.")
+    if not pg.leagues():
+        text += "\n\n⚠️ Лиги ещё не подтянулись из расписания."
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _pg_send_pick(gid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Чем писать: своим текстом или готовым шаблоном."""
+    import player_groups as pg
+    g = pg.group(gid)
+    if not g:
+        return _pg_main()
+    ready, silent = pg.targets(gid)
+    rows = [[InlineKeyboardButton("✍️ Написать текстом",
+                                  callback_data=f"pg:free:{gid}")]]
+    for t in pg.templates():
+        rows.append([InlineKeyboardButton(
+            f"✉️ {t['name']}"[:BTN_TEXT], callback_data=f"pg:use:{gid}:{t['id']}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:g:{gid}")])
+    text = (f"📨 Письмо группе «{g['name']}»\n\n"
+            f"Дойдёт до {len(ready)} чел."
+            + (f", не дойдёт до {len(silent)} (бота не запускали)." if silent else ".")
+            + "\n\nВыбери готовый текст или напиши свой.")
+    if not ready:
+        text = (f"📨 Письмо группе «{g['name']}»\n\n⚠️ Писать некому: никто из "
+                "группы не запускал бота в личке.")
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _pg_letter_preview(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Показ письма перед отправкой. Отсюда — только осознанное нажатие."""
+    import player_groups as pg
+    draft = _group_letter.get(uid) or {}
+    gid = int(draft.get("gid") or 0)
+    g = pg.group(gid)
+    if not g or not draft.get("body"):
+        return _pg_main()
+    ready, silent = pg.targets(gid)
+    lines = [f"📨 Письмо группе «{g['name']}»", "",
+             "———", draft["body"], "———", "",
+             f"Уйдёт в личку: {len(ready)} чел."]
+    if silent:
+        lines.append(f"Не дойдёт: {len(silent)} — бота не запускали.")
+    rows = [[InlineKeyboardButton(f"📨 Отправить ({len(ready)})",
+                                  callback_data=f"pg:go:{gid}")],
+            [InlineKeyboardButton("💾 Сохранить как шаблон",
+                                  callback_data=f"pg:keep:{gid}")],
+            [InlineKeyboardButton("⬅️ Отмена", callback_data=f"pg:g:{gid}")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _pg_broadcast(bot, uid: int) -> str:
+    """Собственно рассылка. Возвращает отбивку для тренера."""
+    import player_groups as pg
+    draft = _group_letter.pop(uid, None) or {}
+    gid = int(draft.get("gid") or 0)
+    body = str(draft.get("body") or "")
+    if not gid or not body:
+        return "Письмо потерялось — набери заново."
+    ready, silent = await asyncio.to_thread(pg.targets, gid)
+    sent = failed = 0
+    for chat_id, title in ready:
+        try:
+            await bot.send_message(chat_id=chat_id, text=body)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            log.info(f"Письмо группе {gid}: строке не доставлено: {e}")
+    out = f"📨 Отправлено: {sent}."
+    if failed:
+        out += f" Не дошло: {failed} (заблокировали бота)."
+    if silent:
+        out += f" Не запускали бота: {len(silent)}."
+    return out
+
+
+def _pg_templates() -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    got = pg.templates()
+    rows = [[InlineKeyboardButton(t["name"][:BTN_TEXT],
+                                  callback_data=f"pg:t1:{t['id']}")] for t in got]
+    rows.append([InlineKeyboardButton("➕ Новый шаблон", callback_data="pg:tnew")])
+    rows.append([InlineKeyboardButton("⬅️ К группам", callback_data="pg:main")])
+    text = ("✉️ Шаблоны писем\n\nТекст, который не хочется набирать заново: "
+            "«зал в четверг», «сбор за час». Шаблон можно послать любой группе "
+            "и поставить на повтор.")
+    if not got:
+        text += "\n\nПока ни одного."
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _pg_template(tid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    t = pg.template(tid)
+    if not t:
+        return _pg_templates()
+    rows = [[InlineKeyboardButton("📨 Разослать", callback_data=f"pg:tto:{tid}")],
+            [InlineKeyboardButton("✏️ Переписать", callback_data=f"pg:ted:{tid}"),
+             InlineKeyboardButton("🗑 Удалить", callback_data=f"pg:tdel:{tid}")],
+            [InlineKeyboardButton("⬅️ К шаблонам", callback_data="pg:tpl")]]
+    return f"✉️ {t['name']}\n\n———\n{t['body']}\n———", InlineKeyboardMarkup(rows)
+
+
+def _pg_pick_group(action: str, arg: str, head: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Общий выбор группы: «кому разослать», «кому повторять»."""
+    import player_groups as pg
+    rows = [[InlineKeyboardButton(f"{g['name']} ({g['size']})"[:BTN_TEXT],
+                                  callback_data=f"pg:{action}:{arg}:{g['id']}")]
+            for g in pg.groups()]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pg:tpl")])
+    if not rows[:-1]:
+        head += "\n\nСначала заведи хотя бы одну группу."
+    return head, InlineKeyboardMarkup(rows)
+
+
+def _pg_repeats(gid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    g = pg.group(gid)
+    if not g:
+        return _pg_main()
+    rows = []
+    for r in pg.repeats(gid):
+        mark = "🔔" if int(r["active"]) else "🔕"
+        first = (r["body_text"] or "").splitlines()[0] if r["body_text"] else "—"
+        rows.append([InlineKeyboardButton(
+            f"{mark} {pg.DAYS_SHORT[int(r['weekday']) % 7]} {r['at_time']} · {first}"[:BTN_TEXT],
+            callback_data=f"pg:r1:{r['id']}")])
+    rows.append([InlineKeyboardButton("➕ Добавить повтор",
+                                      callback_data=f"pg:rnew:{gid}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:g:{gid}")])
+    text = (f"🔁 Повторяющиеся письма группе «{g['name']}»\n\n"
+            "Уходят сами, каждую неделю в назначенный день и час — по Москве.")
+    if not pg.repeats(gid):
+        text += "\n\nПока ни одного."
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _pg_repeat(rid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    found = [r for r in pg.repeats() if int(r["id"]) == int(rid)]
+    if not found:
+        return _pg_main()
+    r = found[0]
+    mark = "включён" if int(r["active"]) else "выключен"
+    lines = [f"🔁 {r['group_name']} · {r['when']}", f"Сейчас {mark}.", "",
+             "———", r["body_text"] or "(пусто)", "———"]
+    if r["last_sent"]:
+        lines += ["", f"Последний раз ушло: {r['last_sent']}."]
+    rows = [[InlineKeyboardButton("🔕 Выключить" if int(r["active"]) else "🔔 Включить",
+                                  callback_data=f"pg:rsw:{rid}")],
+            [InlineKeyboardButton("🗑 Удалить", callback_data=f"pg:rdel:{rid}")],
+            [InlineKeyboardButton("⬅️ Назад",
+                                  callback_data=f"pg:rep:{r['group_id']}")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _pg_repeat_what(gid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Чем повторять: шаблоном (тогда правка шаблона меняет и повтор) или
+    своим текстом."""
+    import player_groups as pg
+    rows = [[InlineKeyboardButton(f"✉️ {t['name']}"[:BTN_TEXT],
+                                  callback_data=f"pg:rday:{gid}:{t['id']}")]
+            for t in pg.templates()]
+    rows.append([InlineKeyboardButton("✍️ Свой текст",
+                                      callback_data=f"pg:rfree:{gid}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:rep:{gid}")])
+    return ("🔁 Что повторять?\n\nШаблон удобнее: переписал текст один раз — "
+            "изменились все повторы на нём.", InlineKeyboardMarkup(rows))
+
+
+def _pg_repeat_day(gid: int, tid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import player_groups as pg
+    rows = [[InlineKeyboardButton(pg.DAYS[i].capitalize(),
+                                  callback_data=f"pg:rtime:{gid}:{tid}:{i}")]
+            for i in range(7)]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:rnew:{gid}")])
+    return "🔁 В какой день недели?", InlineKeyboardMarkup(rows)
+
+
+async def handle_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки раздела групп."""
+    import player_groups as pg
+    query = update.callback_query
+    user = query.from_user if query else None
+    if not query or not _can_see_reports(user):
+        if query:
+            await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    parts = (query.data or "").split(":")
+    what = parts[1] if len(parts) > 1 else "main"
+    arg = parts[2] if len(parts) > 2 else ""
+    uid = user.id
+
+    try:
+        if what == "main":
+            _clear_pending(uid)
+            text, markup = await asyncio.to_thread(_pg_main)
+
+        elif what == "noop":
+            return
+
+        elif what == "g":
+            text, markup = await asyncio.to_thread(_pg_group, int(arg))
+
+        elif what == "new":
+            _clear_pending(uid)
+            _awaiting_group[uid] = "new"
+            text, markup = GROUP_ASK_NAME, InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="pg:main")]])
+
+        elif what == "ren":
+            _clear_pending(uid)
+            _awaiting_group[uid] = f"ren:{arg}"
+            g = await asyncio.to_thread(pg.group, int(arg))
+            text = (f"✏️ Новое имя вместо «{(g or {}).get('name', '?')}».\n\n"
+                    "Состав и повторы останутся.\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:g:{arg}")]])
+
+        elif what == "del":
+            g = await asyncio.to_thread(pg.group, int(arg))
+            text = (f"🗑 Удалить группу «{(g or {}).get('name', '?')}»?\n\n"
+                    "Вместе с ней уйдут её состав и повторяющиеся письма. "
+                    "Сами игроки останутся на месте.")
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Да, удалить",
+                                      callback_data=f"pg:del2:{arg}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:g:{arg}")]])
+
+        elif what == "del2":
+            await asyncio.to_thread(pg.delete, int(arg))
+            text, markup = await asyncio.to_thread(_pg_main)
+            text = "🗑 Удалил.\n\n" + text
+
+        elif what == "who":
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            text, markup = await asyncio.to_thread(_pg_members, int(arg), page)
+
+        elif what == "t" and len(parts) > 3:
+            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+            await asyncio.to_thread(pg.toggle, int(arg), int(parts[3]))
+            text, markup = await asyncio.to_thread(_pg_members, int(arg), page)
+
+        elif what == "lg":
+            text, markup = await asyncio.to_thread(_pg_league, int(arg))
+
+        elif what == "lgset" and len(parts) > 3:
+            idx = int(parts[3])
+            items = await asyncio.to_thread(pg.leagues)
+            if idx < 0 or idx >= len(items):
+                await asyncio.to_thread(pg.bind, int(arg), "", "")
+            else:
+                await asyncio.to_thread(pg.bind, int(arg),
+                                        items[idx]["source"], items[idx]["team_id"])
+            text, markup = await asyncio.to_thread(_pg_group, int(arg))
+
+        elif what == "send":
+            text, markup = await asyncio.to_thread(_pg_send_pick, int(arg))
+
+        elif what == "free":
+            _clear_pending(uid)
+            _awaiting_group[uid] = f"free:{arg}"
+            g = await asyncio.to_thread(pg.group, int(arg))
+            text = (f"✍️ Что написать группе «{(g or {}).get('name', '?')}»?\n\n"
+                    "Пришли текст письма. Перед отправкой покажу его целиком."
+                    "\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:send:{arg}")]])
+
+        elif what == "use" and len(parts) > 3:
+            t = await asyncio.to_thread(pg.template, int(parts[3]))
+            if not t:
+                text, markup = await asyncio.to_thread(_pg_send_pick, int(arg))
+            else:
+                _group_letter[uid] = {"gid": int(arg), "body": t["body"]}
+                text, markup = await asyncio.to_thread(_pg_letter_preview, uid)
+
+        elif what == "go":
+            note = await _pg_broadcast(query.get_bot(), uid)
+            text, markup = await asyncio.to_thread(_pg_group, int(arg))
+            text = note + "\n\n" + text
+
+        elif what == "keep":
+            draft = _group_letter.get(uid) or {}
+            if not draft.get("body"):
+                text, markup = await asyncio.to_thread(_pg_main)
+            else:
+                _clear_pending(uid)
+                _group_letter[uid] = draft          # _clear_pending его снял
+                _awaiting_group[uid] = f"tname:{arg}"
+                text = ("💾 Как назвать шаблон?\n\nПод этим именем он появится "
+                        "в списке писем.\n\nПередумал — /start.")
+                markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"pg:g:{arg}")]])
+
+        elif what == "tpl":
+            _clear_pending(uid)
+            text, markup = await asyncio.to_thread(_pg_templates)
+
+        elif what == "t1":
+            text, markup = await asyncio.to_thread(_pg_template, int(arg))
+
+        elif what == "tnew":
+            _clear_pending(uid)
+            _awaiting_group[uid] = "tnew"
+            text = ("✉️ Имя нового шаблона.\n\nКоротко, чтобы узнать в списке: "
+                    "«Зал в четверг».\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data="pg:tpl")]])
+
+        elif what == "ted":
+            _clear_pending(uid)
+            _awaiting_group[uid] = f"tbody:{arg}"
+            t = await asyncio.to_thread(pg.template, int(arg))
+            text = (f"✏️ Новый текст шаблона «{(t or {}).get('name', '?')}».\n\n"
+                    "Пришли письмо целиком.\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Назад", callback_data=f"pg:t1:{arg}")]])
+
+        elif what == "tdel":
+            await asyncio.to_thread(pg.template_delete, int(arg))
+            text, markup = await asyncio.to_thread(_pg_templates)
+            text = "🗑 Удалил.\n\n" + text
+
+        elif what == "tto":
+            text, markup = await asyncio.to_thread(
+                _pg_pick_group, "use2", arg, "📨 Какой группе разослать?")
+
+        elif what == "use2" and len(parts) > 3:
+            t = await asyncio.to_thread(pg.template, int(arg))
+            gid = int(parts[3])
+            if not t:
+                text, markup = await asyncio.to_thread(_pg_templates)
+            else:
+                _group_letter[uid] = {"gid": gid, "body": t["body"]}
+                text, markup = await asyncio.to_thread(_pg_letter_preview, uid)
+
+        elif what == "rep":
+            _clear_pending(uid)
+            text, markup = await asyncio.to_thread(_pg_repeats, int(arg))
+
+        elif what == "rnew":
+            text, markup = await asyncio.to_thread(_pg_repeat_what, int(arg))
+
+        elif what == "rfree":
+            _clear_pending(uid)
+            _awaiting_group[uid] = f"rbody:{arg}"
+            text = ("✍️ Текст повторяющегося письма.\n\nОн будет уходить "
+                    "каждую неделю без изменений.\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⬅️ Назад", callback_data=f"pg:rnew:{arg}")]])
+
+        elif what == "rday" and len(parts) > 3:
+            text, markup = await asyncio.to_thread(
+                _pg_repeat_day, int(arg), int(parts[3]))
+
+        elif what == "rtime" and len(parts) > 4:
+            # Текст повтора уже набран и лежит в черновике — сброс диалогов
+            # его снимает, поэтому кладём обратно. Без этого «свой текст» для
+            # повтора терялся ровно между выбором дня и вводом времени.
+            draft = _group_letter.get(uid)
+            _clear_pending(uid)
+            if draft:
+                _group_letter[uid] = draft
+            _awaiting_group[uid] = f"rtime:{arg}:{parts[3]}:{parts[4]}"
+            text = (f"🕖 Во сколько по Москве?\n\n"
+                    f"День: {pg.DAYS[int(parts[4]) % 7]}. Пришли время: «19:30»."
+                    "\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⬅️ Назад", callback_data=f"pg:rnew:{arg}")]])
+
+        elif what == "r1":
+            text, markup = await asyncio.to_thread(_pg_repeat, int(arg))
+
+        elif what == "rsw":
+            await asyncio.to_thread(pg.repeat_switch, int(arg))
+            text, markup = await asyncio.to_thread(_pg_repeat, int(arg))
+
+        elif what == "rdel":
+            found = [r for r in await asyncio.to_thread(pg.repeats)
+                     if int(r["id"]) == int(arg)]
+            gid = int(found[0]["group_id"]) if found else 0
+            await asyncio.to_thread(pg.repeat_delete, int(arg))
+            text, markup = await asyncio.to_thread(_pg_repeats, gid) if gid \
+                else await asyncio.to_thread(_pg_main)
+            text = "🗑 Удалил.\n\n" + text
+
+        else:
+            text, markup = await asyncio.to_thread(_pg_main)
+
+        await query.edit_message_text(text, reply_markup=markup)
+
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            await query.answer("Уже открыто")
+            return
+        log.error(f"Группы ({what}): {e}")
+        await query.edit_message_text(
+            f"⚠️ Не получилось: {e}", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ К группам", callback_data="pg:main")]]))
+
+
+async def handle_group_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ввод в разделе групп: имена, тексты писем, время повтора."""
+    import player_groups as pg
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_group:
+        return
+    if not _can_see_reports(user):
+        _awaiting_group.pop(user.id, None)
+        return
+    pending = _awaiting_group.pop(user.id)
+    uid = user.id
+    text = (msg.text or "").strip()
+    kind, _, arg = pending.partition(":")
+
+    async def show(prefix: str, screen: Tuple[str, InlineKeyboardMarkup]) -> None:
+        body, markup = screen
+        await msg.reply_text((prefix + "\n\n" + body) if prefix else body,
+                             reply_markup=markup)
+
+    if kind == "new":
+        gid, note = await asyncio.to_thread(pg.create, text)
+        if not gid:
+            _awaiting_group[uid] = pending
+            await msg.reply_text(note + "\n\nПришли другое имя.")
+            raise ApplicationHandlerStop
+        await show(note, await asyncio.to_thread(_pg_group, gid))
+        raise ApplicationHandlerStop
+
+    if kind == "ren":
+        ok, note = await asyncio.to_thread(pg.rename, int(arg), text)
+        if not ok:
+            _awaiting_group[uid] = pending
+            await msg.reply_text(note + "\n\nПришли другое имя.")
+            raise ApplicationHandlerStop
+        await show(note, await asyncio.to_thread(_pg_group, int(arg)))
+        raise ApplicationHandlerStop
+
+    if kind == "free":
+        if not text:
+            _awaiting_group[uid] = pending
+            await msg.reply_text("Пустое письмо отправлять некуда.")
+            raise ApplicationHandlerStop
+        _group_letter[uid] = {"gid": int(arg), "body": text}
+        await show("", await asyncio.to_thread(_pg_letter_preview, uid))
+        raise ApplicationHandlerStop
+
+    if kind == "tname":
+        draft = _group_letter.get(uid) or {}
+        tid, note = await asyncio.to_thread(
+            pg.template_save, text, str(draft.get("body") or ""))
+        if not tid:
+            _awaiting_group[uid] = pending
+            await msg.reply_text(note + "\n\nПришли другое имя.")
+            raise ApplicationHandlerStop
+        # Письмо после сохранения никуда не делось: тренер сохранял его,
+        # чтобы отправить, — возвращаем к тому же подтверждению.
+        await show(note, await asyncio.to_thread(_pg_letter_preview, uid))
+        raise ApplicationHandlerStop
+
+    if kind == "tnew":
+        name = pg.clean_name(text)
+        if not name:
+            _awaiting_group[uid] = pending
+            await msg.reply_text("У шаблона должно быть имя.")
+            raise ApplicationHandlerStop
+        _awaiting_group[uid] = f"tbody0:{name}"
+        await msg.reply_text(
+            f"✉️ «{name}». Теперь пришли сам текст письма.\n\nПередумал — /start.")
+        raise ApplicationHandlerStop
+
+    if kind == "tbody0":
+        tid, note = await asyncio.to_thread(pg.template_save, arg, text)
+        if not tid:
+            _awaiting_group[uid] = pending
+            await msg.reply_text(note + "\n\nПришли текст ещё раз.")
+            raise ApplicationHandlerStop
+        await show(note, await asyncio.to_thread(_pg_template, tid))
+        raise ApplicationHandlerStop
+
+    if kind == "tbody":
+        t = await asyncio.to_thread(pg.template, int(arg))
+        tid, note = await asyncio.to_thread(
+            pg.template_save, (t or {}).get("name", ""), text, int(arg))
+        if not tid:
+            _awaiting_group[uid] = pending
+            await msg.reply_text(note + "\n\nПришли текст ещё раз.")
+            raise ApplicationHandlerStop
+        await show(note, await asyncio.to_thread(_pg_template, int(arg)))
+        raise ApplicationHandlerStop
+
+    if kind == "rbody":
+        if not text:
+            _awaiting_group[uid] = pending
+            await msg.reply_text("Пустое письмо повторять незачем.")
+            raise ApplicationHandlerStop
+        _group_letter[uid] = {"gid": int(arg), "body": text}
+        await show("", await asyncio.to_thread(_pg_repeat_day, int(arg), 0))
+        raise ApplicationHandlerStop
+
+    if kind == "rtime":
+        gid, tid, day = (arg.split(":") + ["0", "0"])[:3]
+        when = pg.parse_time(text)
+        if not when:
+            _awaiting_group[uid] = pending
+            await msg.reply_text("Не понял время. Напиши «19:30».")
+            raise ApplicationHandlerStop
+        body = ""
+        if not int(tid):
+            body = str((_group_letter.get(uid) or {}).get("body") or "")
+            if not body:
+                await show("Текст потерялся — начни заново.",
+                           await asyncio.to_thread(_pg_repeats, int(gid)))
+                raise ApplicationHandlerStop
+        _group_letter.pop(uid, None)
+        await asyncio.to_thread(pg.repeat_add, int(gid), int(day), when,
+                                int(tid), body)
+        await show(f"🔁 Готово: {pg.DAYS[int(day) % 7]}, {when}.",
+                   await asyncio.to_thread(_pg_repeats, int(gid)))
+        raise ApplicationHandlerStop
+
+
+async def _send_group_repeats(app: Application) -> None:
+    """Отправляет повторяющиеся письма, которым пришло время.
+
+    Отметка о дате ставится ДО отправки: если демон упадёт на середине списка,
+    половина группы получит письмо дважды — а это хуже, чем не получить."""
+    import player_groups as pg
+    try:
+        ready = await asyncio.to_thread(pg.due)
+    except Exception as e:
+        log.warning(f"Повторяющиеся письма: список не собрался: {e}")
+        return
+    for rep in ready:
+        body = str(rep.get("body_text") or "").strip()
+        if not body:
+            continue
+        await asyncio.to_thread(pg.mark_sent, int(rep["id"]))
+        people, _ = await asyncio.to_thread(pg.targets, int(rep["group_id"]))
+        sent = 0
+        for chat_id, _title in people:
+            try:
+                await app.bot.send_message(chat_id=chat_id, text=body)
+                sent += 1
+            except Exception as e:
+                log.info(f"Повтор {rep['id']}: не доставлено: {e}")
+        log.info(f"Повтор {rep['id']} ({rep['group_name']}): ушло {sent}")
+
+
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -8907,6 +9576,7 @@ async def _background_loop(app: Application) -> None:
                     log.info(f"Доступы с истёкшим сроком сняты: {dropped}")
             except Exception as e:
                 log.warning(f"Уборка доступов: {e}")
+            await _send_group_repeats(app)
             await _catch_up_prices()
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.
@@ -9207,6 +9877,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_private_text), group=12)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_group_text), group=14)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_gamelink_callback, pattern=r"^gl:"))
@@ -9222,6 +9895,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_coach_callback, pattern=r"^coach:"))
     app.add_handler(CallbackQueryHandler(handle_roster_callback, pattern=r"^rost:"))
     app.add_handler(CallbackQueryHandler(handle_private_callback, pattern=r"^pl:"))
+    app.add_handler(CallbackQueryHandler(handle_group_callback, pattern=r"^pg:"))
     app.add_error_handler(_on_error)
 
     log.info("Запуск polling...")
