@@ -54,11 +54,15 @@ def setup() -> Any:
         conn.execute("DELETE FROM players")
         conn.execute("DELETE FROM player_links")
         conn.execute("DELETE FROM league_teams")
-        for i, (sur, name) in enumerate([("Иванов", "Иван"), ("Петров", "Пётр"),
-                                         ("Сидоров", "Семён")], start=2):
+        # У одного даты рождения нет намеренно: заявку с пустой клеткой
+        # вернут, и выгрузка обязана предупредить об этом заранее.
+        people = [("Иванов", "Иван", "2001-09-22"),
+                  ("Петров", "Пётр", "1998-03-04"),
+                  ("Сидоров", "Семён", "")]
+        for i, (sur, name, born) in enumerate(people, start=2):
             conn.execute(
-                "INSERT INTO players (row_index, surname, name, synced_at) "
-                "VALUES (?, ?, ?, ?)", (i, sur, name, now))
+                "INSERT INTO players (row_index, surname, name, birthday, "
+                "synced_at) VALUES (?, ?, ?, ?, ?)", (i, sur, name, born, now))
         # Двое запускали бота, третий — нет: рассылка обязана это различать.
         for row, uid in ((2, 900002), (3, 900003)):
             conn.execute(
@@ -277,6 +281,49 @@ async def test_clear_pending_knows_us(bd) -> None:
     check(COACH.id not in bd._group_letter, "черновик письма забыт")
 
 
+async def test_export_for_the_application(bd, gid: int) -> None:
+    """Выгрузка состава в таблицу — под заявку в лигу."""
+    print("\n=== выгрузка для заявки ===")
+    import roster_export
+
+    _, markup = await press(bd, f"pg:g:{gid}")
+    check(f"pg:csv:{gid}" in cbs(markup), "кнопка есть в группе")
+    _, markup = await press(bd, "coach:main")
+    team = bd._team_markup().inline_keyboard
+    check("coach:csv" in [b.callback_data for row in team for b in row],
+          "и в разделе «Команда»")
+
+    before = len(BOT.docs) if hasattr(BOT, "docs") else None
+    msg = FakeMessage(text="", bot=BOT, user=COACH)
+    q = FakeQuery(f"pg:csv:{gid}", COACH, BOT)
+    q.message = msg
+    await bd.handle_group_callback(FakeUpdate(query=q, user=COACH), FakeContext(BOT))
+    sent = [d for d in getattr(msg, "documents", [])]
+    check(len(sent) == 1, f"файл отправлен: {len(sent)}")
+    if not sent:
+        return
+    body = sent[0]["document"].getvalue().decode("utf-8")
+    check(body.startswith("\ufeff"), "в начале BOM — иначе Excel даст кракозябры")
+    head = body.splitlines()[0]
+    check(head.count(";") == 5 and head.startswith("\ufeff№;Фамилия;Имя"),
+          f"шапка через точку с запятой: {head}")
+    check("22.09.2001" in body, "дата рождения по-русски")
+    check("2001-09-22" not in body, "и ISO-вида в файле не осталось")
+    check("Без даты рождения" in sent[0]["caption"],
+          "про пустую дату рождения предупредили: "
+          + sent[0]["caption"].splitlines()[-1][:60])
+    lines = [l for l in body.splitlines() if l.strip()]
+    check(len(lines) == 1 + len(pg_members_count(gid)),
+          f"строк по числу людей в группе: {len(lines) - 1}")
+    check(sent[0]["filename"].startswith("Заявка"),
+          f"имя файла говорит, что это: {sent[0]['filename']}")
+
+
+def pg_members_count(gid: int):
+    import player_groups as pg
+    return pg.members(gid)
+
+
 async def run() -> None:
     bd = setup()
     gid = await test_create_and_fill(bd)
@@ -284,6 +331,7 @@ async def run() -> None:
     await test_silent_are_named(bd, gid)
     await test_templates(bd, gid)
     await test_repeat(bd, gid)
+    await test_export_for_the_application(bd, gid)
     await test_delete_takes_repeats(bd)
     await test_nothing_leaks_to_chat(bd)
     await test_clear_pending_knows_us(bd)

@@ -66,6 +66,9 @@ class FakeMessage:
         self.from_user = user or FakeUser()
         self._bot = bot or FakeBot()
         self.replies: List[Dict[str, Any]] = []
+        # Отправленные файлы держим целиком: выгрузку состава проверяют по
+        # содержимому, а не по факту «что-то ушло».
+        self.documents: List[Dict[str, Any]] = []
 
     def get_bot(self):
         return self._bot
@@ -76,6 +79,9 @@ class FakeMessage:
 
     async def reply_document(self, document=None, **kw):
         self.replies.append({"text": "<файл>", "markup": None})
+        self.documents.append({"document": document,
+                               "filename": kw.get("filename", ""),
+                               "caption": kw.get("caption", "")})
         return FakeMessage(bot=self._bot)
 
 

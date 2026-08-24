@@ -4813,6 +4813,7 @@ def _team_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
         [InlineKeyboardButton("👪 Группы и рассылки", callback_data="pg:main")],
         [InlineKeyboardButton("🔕 Кто вне бота", callback_data="coach:offline")],
+        [InlineKeyboardButton("📄 Выгрузить для заявки", callback_data="coach:csv")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -4873,6 +4874,33 @@ def _game_title_of(rec: Dict[str, Any]) -> str:
     teams = parts[2:] if len(parts) > 2 else parts
     title = " — ".join(teams).strip()
     return title or str(rec.get("alt_name") or "игра")
+
+
+async def _send_roster_csv(query, people: List[Dict[str, Any]], what: str) -> None:
+    """Отдаёт состав табличным файлом — в личку тому, кто нажал.
+
+    Пустой состав файлом не шлём: заявка из одних заголовков человеку не
+    нужна, а понять по ней, что список пуст, труднее, чем прочитать строку."""
+    import roster_export
+    if not people:
+        await query.message.reply_text(
+            "Выгружать некого: в этом списке пока никого нет.")
+        return
+    data = await asyncio.to_thread(roster_export.csv_bytes, people)
+    name = roster_export.file_name(what)
+    bio = io.BytesIO(data)
+    bio.name = name
+    lines = [f"📄 {what}: {len(people)} чел.",
+             "Открывается в Excel и Google Таблицах — оттуда копируйте в бланк."]
+    # Пустая дата рождения — первое, из-за чего заявку вернут. Называем сразу,
+    # пока тренер не отправил файл в лигу.
+    empty = roster_export.missing_birthday(people)
+    if empty:
+        lines += ["", f"⚠️ Без даты рождения ({len(empty)}): "
+                      + ", ".join(empty[:8]) + (" и др." if len(empty) > 8 else "")
+                      + ". Впишите её в «👥 Игроки» — иначе заявку вернут."]
+    await query.message.reply_document(document=bio, filename=name,
+                                       caption="\n".join(lines))
 
 
 def _played_games(limit: int = 6) -> List[Dict[str, Any]]:
@@ -6326,6 +6354,12 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(
                 "👥 Команда\n\nИгроки, их составы и рассылки по ним.",
                 reply_markup=_team_markup())
+
+        elif what == "csv":
+            import roster_export
+            people = await asyncio.to_thread(roster_export.team_people)
+            await _send_roster_csv(query, people, "Вся команда")
+            return
 
         elif what == "cfg":
             await query.edit_message_text(
@@ -8830,6 +8864,8 @@ def _pg_group(gid: int) -> Tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("👥 Состав", callback_data=f"pg:who:{gid}:0")],
         [InlineKeyboardButton("📨 Написать группе", callback_data=f"pg:send:{gid}")],
         [InlineKeyboardButton("🔁 Повторяющиеся", callback_data=f"pg:rep:{gid}")],
+        [InlineKeyboardButton("📄 Выгрузить для заявки",
+                              callback_data=f"pg:csv:{gid}")],
         [InlineKeyboardButton("🏆 Лига", callback_data=f"pg:lg:{gid}"),
          InlineKeyboardButton("✏️ Имя", callback_data=f"pg:ren:{gid}")],
         [InlineKeyboardButton("🗑 Удалить группу", callback_data=f"pg:del:{gid}")],
@@ -9130,6 +9166,13 @@ async def handle_group_callback(update: Update, context: ContextTypes.DEFAULT_TY
             page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
             await asyncio.to_thread(pg.toggle, int(arg), int(parts[3]))
             text, markup = await asyncio.to_thread(_pg_members, int(arg), page)
+
+        elif what == "csv":
+            import roster_export
+            g = await asyncio.to_thread(pg.group, int(arg))
+            people = await asyncio.to_thread(roster_export.group_people, int(arg))
+            await _send_roster_csv(query, people, (g or {}).get("name", "группа"))
+            return
 
         elif what == "lg":
             text, markup = await asyncio.to_thread(_pg_league, int(arg))
