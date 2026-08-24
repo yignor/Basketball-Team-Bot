@@ -27,7 +27,6 @@ import sheets_cache                                             # noqa: E402
 sheets_cache.DB_PATH = Path(tempfile.mkdtemp()) / "bot.db"
 
 import protocol_pdf                                             # noqa: E402
-import result_catchup                                           # noqa: E402
 
 bad: List[str] = []
 
@@ -88,70 +87,41 @@ def test_no_library_says_so() -> None:
         check(True, "библиотека есть, файл просто не PDF")
 
 
-def test_catchup_finds_missed_game() -> None:
-    """Догон находит игру со счётом, по которой результат не публиковали.
+def test_late_result_still_inside_window() -> None:
+    """Опоздавший протокол обязан попадать в обычный путь результата.
 
-    22.08.2026: счёт приехал ночным добором через двое суток, окно слежения
-    (7 часов) к тому времени закрылось, и в чат не ушло ничего."""
-    print("\n=== догон находит пропущенный итог ===")
-    sheets_cache.init_db()
-    now = sheets_cache.now_iso()
-    today = date.today()
-    with sheets_cache.get_connection() as conn:
-        conn.execute("DELETE FROM game_meta")
-        conn.execute("DELETE FROM service_records")
-        conn.execute("DELETE FROM league_teams")
-        conn.execute("INSERT INTO league_teams (source, team_id, name, ours, "
-                     "fetched_at) VALUES ('infobasket','38116','PULL UP',1,?)", (now,))
-        quarters = json.dumps([{"score1": 14, "score2": 20}, {"score1": 21, "score2": 21},
-                               {"score1": 16, "score2": 15}, {"score1": 28, "score2": 23},
-                               {"score1": 11, "score2": 6}])
-        conn.execute(
-            "INSERT INTO game_meta (source, game_id, game_date, home_name, "
-            "guest_name, home_team_id, guest_team_id, home_score, guest_score, "
-            "quarters_json, fetched_at) VALUES ('infobasket','1082250',?,"
-            "'Кирпичный Завод','PULL UP','999','38116',90,85,?,?)",
-            (today.isoformat(), quarters, now))
-        conn.commit()
+    22.08.2026 счёт матча с овертаймом лига опубликовала через двое суток.
+    Окно слежения (7 часов) к тому времени закрылось, монитор до игры не
+    доходил, и в чат не ушло ничего. Отдельного «догонного» сообщения быть не
+    должно: оно уходило мимо темы результатов и без ссылки на протокол и
+    лучших игроков. Вместо этого шире смотрит сам монитор."""
+    print("\n=== опоздавший итог ещё в окне ===")
+    from datetime_utils import (is_within_game_tracking_window,
+                                GAME_TRACKING_WINDOW_HOURS,
+                                RESULT_CATCHUP_WINDOW_HOURS)
+    check(RESULT_CATCHUP_WINDOW_HOURS > GAME_TRACKING_WINDOW_HOURS,
+          "окно догона шире окна слежения")
 
-    got = result_catchup.pending()
-    check(len(got) == 1, f"игра найдена: {len(got)}")
+    two_days_ago = (date.today() - timedelta(days=2))
+    dmy = two_days_ago.strftime("%d.%m.%Y")
+    check(not is_within_game_tracking_window(dmy, "19:00"),
+          "через двое суток слежение уже закрыто — из-за этого игра и пропала")
+    check(is_within_game_tracking_window(dmy, "19:00",
+                                         hours=RESULT_CATCHUP_WINDOW_HOURS),
+          "но монитор результатов до неё ещё дотягивается")
 
-    text = result_catchup.text(got[0])
-    check("85:90" in text, f"счёт нашей стороной: {text.splitlines()[1]}")
-    check("ПОРАЖЕНИЕ" in text, "итог назван верно")
-    check("20:14" in text, "четверти развёрнуты на нашу сторону")
-    check("овертайм" in text.lower(), "про овертайм сказано")
-    check("опозданием" in text, "и что итог задним числом — тоже")
+    old = (date.today() - timedelta(days=5)).strftime("%d.%m.%Y")
+    check(not is_within_game_tracking_window(old, "19:00",
+                                             hours=RESULT_CATCHUP_WINDOW_HOURS),
+          "пятидневной давности итог уже не новость")
 
-
-def test_catchup_skips_published_and_old() -> None:
-    print("\n=== догон не шумит зря ===")
-    now = sheets_cache.now_iso()
-    with sheets_cache.get_connection() as conn:
-        conn.execute(
-            "INSERT INTO service_records (unique_key, logged_at, created_at, "
-            "updated_at, data_type, game_id, game_date, deleted) "
-            "VALUES ('r', ?, ?, ?, 'РЕЗУЛЬТАТ_ИГРА', '1082250', ?, 0)",
-            (now, now, now, date.today().isoformat()))
-        conn.commit()
-    check(result_catchup.pending() == [], "опубликованное второй раз не шлём")
-
-    with sheets_cache.get_connection() as conn:
-        conn.execute("DELETE FROM service_records")
-        old = (date.today() - timedelta(days=result_catchup.MAX_AGE_DAYS + 2)).isoformat()
-        conn.execute("UPDATE game_meta SET game_date = ?", (old,))
-        conn.commit()
-    check(result_catchup.pending() == [],
-          f"старее {result_catchup.MAX_AGE_DAYS} дней — уже не новость")
 
 
 def main() -> int:
     test_parse_head()
     test_no_score_is_refused()
     test_no_library_says_so()
-    test_catchup_finds_missed_game()
-    test_catchup_skips_published_and_old()
+    test_late_result_still_inside_window()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
