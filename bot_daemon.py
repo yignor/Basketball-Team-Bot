@@ -1508,7 +1508,8 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
         return
     if len(parts) >= 5 and parts[1] == "vidt":
         _awaiting_video[uid] = f"rep:{parts[2]}:{parts[3]}:{parts[4]}"
-        await query.edit_message_text(VIDTIME_ASK)
+        await query.edit_message_text(
+            await asyncio.to_thread(_vidtime_ask, parts[2], parts[3]))
         return
     if len(parts) >= 6 and parts[1] == "vidm":
         back = [[InlineKeyboardButton(
@@ -4544,8 +4545,10 @@ async def handle_progress_button(update: Update, context: ContextTypes.DEFAULT_T
         return
     if not _can_see_reports(user):
         return
+    _clear_pending(user.id)
     text, markup = await _render_prog_list(is_admin=_is_admin(user), back="coach:main")
     await msg.reply_text(text, reply_markup=markup)
+    raise ApplicationHandlerStop
     raise ApplicationHandlerStop
 
 
@@ -5157,6 +5160,25 @@ def _moments_screen(source: str, game_id: str, player_id: str, page: int,
     return text, InlineKeyboardMarkup(rows)
 
 
+def _vidtime_ask(source: str, game_id: str) -> str:
+    """Просьба прислать время спорного — С ТЕКУЩИМ значением.
+
+    Без него человек правит вслепую: не видно, от чего бот считает сейчас и
+    насколько нужно сдвинуть. А заодно видно, откуда это значение взялось —
+    посчитано по эфиру, прикинуто по расписанию или уже выставлено руками."""
+    import game_timeline
+    now = game_timeline.offset(source, game_id)
+    kind = game_timeline.offset_kind(source, game_id)
+    how = {"vk": "посчитано по началу эфира",
+           "hand": "выставлено вручную",
+           }.get(kind, "прикинуто по расписанию")
+    head = (f"Сейчас бот считает спорный на {game_timeline.hhmmss(now)} "
+            f"записи ({how}).\n\n" if now else
+            f"Сейчас точка отсчёта не задана — время считается от начала "
+            f"записи ({how}).\n\n")
+    return head + VIDTIME_ASK
+
+
 VIDTIME_ASK = ("⏱ Открой запись и найди спорный мяч — момент, с которого "
                "пошла игра.\n\nПришли его время с плеера: «5:33» или "
                "«1:02:15».\n\nВсе выходы этой игры пересчитаю от него — и "
@@ -5368,6 +5390,7 @@ async def handle_coach_button(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not _can_see_reports(user):
         return
+    _clear_pending(user.id)
     await msg.reply_text(COACH_TEXT, reply_markup=_coach_markup())
     raise ApplicationHandlerStop
 
@@ -7804,22 +7827,30 @@ async def handle_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if not _is_admin(user):
         return
+    _clear_pending(user.id)
     _refresh_db_cache()
     _periodic_push_local_changes()
     await _send_main_menu(update)
 
 
 async def handle_admin_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Нажатие постоянной кнопки '📊 Админ-панель' — то же самое, что /admin."""
+    """Нажатие постоянной кнопки '📊 Админ-панель' — то же самое, что /admin.
+
+    Нажал кнопку раздела — значит ушёл из того, что делал. Без этого подпись
+    кнопки проваливалась в открытый диалог: он отвечал своим экраном, и на
+    экране оказывались две панели разом. А если был открыт ввод значения, в
+    лист «Игроки» записалось бы «📊 Админ-панель»."""
     user = update.effective_user
     chat = update.effective_chat
     if not user or not chat or chat.type != "private":
         return
     if not _is_admin(user):
         return
+    _clear_pending(user.id)
     _refresh_db_cache()
     _periodic_push_local_changes()
     await _send_main_menu(update)
+    raise ApplicationHandlerStop
 
 
 BACKGROUND_TICK_SECONDS = 30
@@ -8441,6 +8472,9 @@ async def handle_protocol_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
         handle = await context.bot.get_file(doc.file_id)
         data = bytes(await handle.download_as_bytearray())
         got = await asyncio.to_thread(protocol_pdf.parse, data)
+        # Таблицу игроков разбираем тем же файлом: она сверена с API по этой
+        # же игре — совпали все 323 значения, включая пропущенные нули.
+        got["players"] = await asyncio.to_thread(protocol_pdf.players, data)
     except protocol_pdf.NotAvailable:
         await msg.reply_text(
             "На сервере нет библиотеки для чтения PDF. Поставить:\n\n"
@@ -8458,6 +8492,10 @@ async def handle_protocol_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
         raise ApplicationHandlerStop
 
     _pdf_ready[user.id] = got
+    people = got.get("players") or []
+    if people:
+        text += (f"\n\nИгроков в протоколе: {len(people)}.\n"
+                 + protocol_pdf.box_score(people))
     await msg.reply_text(
         text + "\n\nОпубликовать итог в чат команды?",
         reply_markup=InlineKeyboardMarkup([
