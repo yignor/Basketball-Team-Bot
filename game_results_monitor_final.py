@@ -496,6 +496,19 @@ class GameResultsMonitorFinal:
                 print(f"⏭️ Результат для игры {game_info['team1']} vs {game_info['team2']} уже отправлен (найдено в Google Sheets)")
                 print(f"   📅 Время отправки: {duplicate_check.get('data', ['', '', '', '', ''])[1]}")
                 return False
+
+            # Вторая проверка — по GameID. Ключ выше собран из даты и названий
+            # команд, и запись, сделанную другим путём (у неё ключ по номеру
+            # игры), он не находит. Пока окно было семичасовым, это не всплывало:
+            # разойтись успевал только один путь. С окном в трое суток монитор
+            # возвращается к уже объявленной игре — и без этой проверки прислал
+            # бы второй результат по тому же матчу.
+            game_id_key = str(game_info.get('game_id') or '').strip()
+            if game_id_key and duplicate_protection.get_game_record(
+                    "РЕЗУЛЬТАТ_ИГРА", game_id_key):
+                print(f"⏭️ Результат игры {game_id_key} уже публиковался "
+                      f"(запись найдена по номеру игры)")
+                return False
             
             # Используем новую функцию форматирования с лидерами команды
             our_team_leaders = game_info.get('our_team_leaders', {})
