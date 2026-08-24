@@ -466,8 +466,13 @@ class GameResultsMonitorFinal:
             print(f"❌ Ошибка поиска в анонсах: {e}")
             return None
     
-    async def send_game_result(self, game_info: Dict) -> bool:
-        """Отправляет результат игры в Telegram"""
+    async def send_game_result(self, game_info: Dict, force: bool = False) -> bool:
+        """Отправляет результат игры в Telegram.
+
+        force — объявить, даже если результат уже публиковался. Так работает
+        кнопка тренера «📣 Объявить результат»: бывает, что лига отдала
+        протокол не целиком, и в чат ушёл огрызок без четвертей и лучших
+        игроков. Сам по себе монитор никогда не форсирует."""
         if not self.bot:
             print("❌ Бот не инициализирован")
             return False
@@ -490,8 +495,10 @@ class GameResultsMonitorFinal:
             
             # Проверяем дублирование в Google Sheets
             print(f"🔍 Проверяем дублирование в Google Sheets для игры: {game_info['team1']} vs {game_info['team2']}")
-            duplicate_check = duplicate_protection.check_duplicate("РЕЗУЛЬТАТ_ИГРА", result_key)
-            
+            duplicate_check = ({} if force else
+                               duplicate_protection.check_duplicate(
+                                   "РЕЗУЛЬТАТ_ИГРА", result_key))
+
             if duplicate_check.get('exists'):
                 print(f"⏭️ Результат для игры {game_info['team1']} vs {game_info['team2']} уже отправлен (найдено в Google Sheets)")
                 print(f"   📅 Время отправки: {duplicate_check.get('data', ['', '', '', '', ''])[1]}")
@@ -504,7 +511,7 @@ class GameResultsMonitorFinal:
             # возвращается к уже объявленной игре — и без этой проверки прислал
             # бы второй результат по тому же матчу.
             game_id_key = str(game_info.get('game_id') or '').strip()
-            if game_id_key and duplicate_protection.get_game_record(
+            if not force and game_id_key and duplicate_protection.get_game_record(
                     "РЕЗУЛЬТАТ_ИГРА", game_id_key):
                 print(f"⏭️ Результат игры {game_id_key} уже публиковался "
                       f"(запись найдена по номеру игры)")

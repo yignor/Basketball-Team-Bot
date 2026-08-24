@@ -4554,7 +4554,7 @@ async def handle_progress_button(update: Update, context: ContextTypes.DEFAULT_T
     if not _can_see_reports(user):
         return
     _clear_pending(user.id)
-    text, markup = await _render_prog_list(is_admin=_is_admin(user), back="coach:main")
+    text, markup = await _render_prog_list(is_admin=_is_admin(user), back="coach:play")
     await msg.reply_text(text, reply_markup=markup)
     raise ApplicationHandlerStop
     raise ApplicationHandlerStop
@@ -4661,7 +4661,7 @@ def _offline_screen() -> Tuple[str, InlineKeyboardMarkup]:
     if groups["ok"]:
         lines.append(f"✅ На связи: {len(groups['ok'])}.")
     rows = [[InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")]]
+            [InlineKeyboardButton("⬅️ Назад", callback_data="coach:team")]]
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -4678,7 +4678,7 @@ def _preview_menu(prefix: str = "coach") -> Tuple[str, InlineKeyboardMarkup]:
             line.append(InlineKeyboardButton(
                 mark, callback_data=f"{prefix}:tpl:{tpl}"))
         rows.append(line)
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:cfg")])
     return ("👁 Предпросмотр писем\n\n"
             "Покажу, что получит человек. Никому, кроме тебя, не уйдёт.\n\n"
             "✎ рядом — текст можно переписать. ✏️ значит, что он уже свой.",
@@ -4790,21 +4790,39 @@ def _preview_text(key: str) -> str:
 def _coach_markup() -> InlineKeyboardMarkup:
     """Корень раздела: два больших входа и разбор игр.
 
-    Плоский список из одиннадцати кнопок читался как свалка — деньги и игры
-    перемешивались, и нужное приходилось искать глазами каждый раз."""
+    Пять входов вместо девяти. Каждая новая возможность добавляла сюда строку,
+    и корень снова разросся в список, по которому нужное ищешь глазами. Правило
+    простое: на первом экране — области («деньги», «игры», «команда»), а не
+    отдельные действия; действие живёт внутри своей области.
+
+    Частные занятия стоят особняком намеренно: к команде они отношения не
+    имеют, но живут там же, где тренер, — заводить ради них отдельную кнопку
+    под чатом значило бы засорять клавиатуру всем ради одного человека."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Оплата", callback_data="coach:money")],
+        [InlineKeyboardButton("💰 Деньги", callback_data="coach:money")],
         [InlineKeyboardButton("🏀 Игры", callback_data="coach:play")],
-        [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
+        [InlineKeyboardButton("👥 Команда", callback_data="coach:team")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="coach:cfg")],
+        [InlineKeyboardButton("🎾 Частные занятия", callback_data="pl:main")],
+    ])
+
+
+def _team_markup() -> InlineKeyboardMarkup:
+    """Про людей: кто есть, как разложены по составам, до кого не дозвониться."""
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
         [InlineKeyboardButton("👪 Группы и рассылки", callback_data="pg:main")],
-        [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🔕 Кто вне бота", callback_data="coach:offline")],
+        [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
+    ])
+
+
+def _cfg_markup() -> InlineKeyboardMarkup:
+    """Настройки: что бот пишет и когда. Заходят сюда редко."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
-        # Частные занятия к команде отношения не имеют, но живут там же, где
-        # тренер: заводить ради них отдельную кнопку под чатом — засорять
-        # клавиатуру всем ради одного человека.
-        [InlineKeyboardButton("🎾 Частные занятия", callback_data="pl:main")],
+        [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
 
@@ -4841,12 +4859,103 @@ def _money2_markup() -> InlineKeyboardMarkup:
     ])
 
 
+def _played_games(limit: int = 6) -> List[Dict[str, Any]]:
+    """Сыгранные игры со ссылкой на протокол — свежие первыми.
+
+    Берём из анонсов: там лежит ссылка, по которой монитор и разбирает игру.
+    Без ссылки объявлять нечего, поэтому такие в список не попадают."""
+    from datetime_utils import get_moscow_time
+    from enhanced_duplicate_protection import duplicate_protection
+    today = get_moscow_time().date()
+    out: List[Dict[str, Any]] = []
+    for rec in duplicate_protection.get_records_by_type("АНОНС_ИГРА"):
+        if not rec.get("link") or not rec.get("game_id"):
+            continue
+        raw = str(rec.get("game_date") or "")
+        try:
+            day = datetime.strptime(raw, "%d.%m.%Y").date()
+        except ValueError:
+            continue
+        if day > today:
+            continue
+        key = str(rec["unique_key"])
+        title = key.split("_", 1)[1] if "_" in key else key
+        out.append({"game_id": str(rec["game_id"]), "date": day,
+                    "title": title.replace("_", " "), "link": rec["link"]})
+    out.sort(key=lambda g: g["date"], reverse=True)
+    return out[:limit]
+
+
+def _republish_list() -> Tuple[str, InlineKeyboardMarkup]:
+    games = _played_games()
+    rows = [[InlineKeyboardButton(
+        f"{g['date'].strftime('%d.%m')} · {g['title']}"[:BTN_TEXT],
+        callback_data=f"coach:repub1:{g['game_id']}")] for g in games]
+    rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:play")])
+    text = ("📣 Объявить результат\n\n"
+            "Обычно бот объявляет итог сам. Кнопка нужна, когда он этого не "
+            "сделал или сообщение вышло неполным: лига публикует протокол с "
+            "опозданием, и в первый раз в нём может не быть ни четвертей, ни "
+            "лучших игроков.\n\nВыбери игру:")
+    if not games:
+        text = ("📣 Объявить результат\n\nСыгранных игр со ссылкой на протокол "
+                "не нашлось.")
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _republish_ask(game_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Спрашиваем прежде, чем писать в общий чат. Это сообщение увидят все."""
+    found = [g for g in _played_games(12) if g["game_id"] == str(game_id)]
+    if not found:
+        return _republish_list()
+    g = found[0]
+    text = (f"📣 Объявить результат игры {g['date'].strftime('%d.%m')} "
+            f"({g['title']})?\n\n"
+            "Сообщение уйдёт в общий чат, в тему результатов — со счётом, "
+            "четвертями, ссылкой на протокол и лучшими игроками.\n\n"
+            "⚠️ Если итог по этой игре уже объявляли, в чате станет два "
+            "сообщения о ней.")
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("📣 Да, объявить",
+                              callback_data=f"coach:repub2:{g['game_id']}")],
+        [InlineKeyboardButton("⬅️ Отмена", callback_data="coach:repub")]])
+
+
+async def _republish_result(game_id: str) -> str:
+    """Публикует итог игры обычным путём, минуя защиту от повторов.
+
+    Своего сообщения здесь намеренно нет: собирать «почти такой же» текст
+    рядом с настоящим — верный способ получить два непохожих результата в
+    чате. Зовём тот же монитор, что объявляет игры сам."""
+    found = [g for g in _played_games(12) if g["game_id"] == str(game_id)]
+    if not found:
+        return "Не нашёл эту игру среди сыгранных."
+    game = found[0]
+    try:
+        from game_results_monitor_final import GameResultsMonitorFinal
+        monitor = GameResultsMonitorFinal()
+        info = await monitor.parse_game_from_link(game["link"])
+        if not info:
+            return ("Лига не отдала протокол по этой игре — объявлять нечего. "
+                    "Попробуй позже.")
+        info.setdefault("game_link", game["link"])
+        ok = await monitor.send_game_result(info, force=True)
+    except Exception as e:
+        log.error(f"Переобъявление результата {game_id}: {e}")
+        return f"⚠️ Не получилось: {e}"
+    if not ok:
+        return "Не отправилось — подробности в журнале бота."
+    return f"📣 Объявил результат игры {game['date'].strftime('%d.%m')}."
+
+
 def _play_markup() -> InlineKeyboardMarkup:
-    """Всё про игры."""
+    """Всё про игры — включая разбор сыгранного."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 Состав на игру", callback_data="coach:games")],
         [InlineKeyboardButton("🏁 Стартовый состав", callback_data="coach:start")],
         [InlineKeyboardButton("➕ Создать игру", callback_data="coach:ng")],
+        [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
+        [InlineKeyboardButton("📣 Объявить результат", callback_data="coach:repub")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -4897,7 +5006,7 @@ def _sched_screen() -> Tuple[str, InlineKeyboardMarkup]:
                                           callback_data=f"coach:setsched:{key}")])
     lines += ["", "<i>Взносы за тренировки начинаются с сентября 2026 — "
               "до этого месяца бот про них молчит.</i>"]
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:cfg")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -6054,7 +6163,7 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif what == "prog":
             text, markup = await _render_prog_list(is_admin=_is_admin(user),
-                                                   back="coach:main")
+                                                   back="coach:play")
             await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "pay":
@@ -6196,8 +6305,32 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif what == "play":
             await query.edit_message_text(
-                "🏀 Игры\n\nСостав, создание игры.",
+                "🏀 Игры\n\nСоставы, создание игры, разбор сыгранного.",
                 reply_markup=_play_markup())
+
+        elif what == "team":
+            await query.edit_message_text(
+                "👥 Команда\n\nИгроки, их составы и рассылки по ним.",
+                reply_markup=_team_markup())
+
+        elif what == "cfg":
+            await query.edit_message_text(
+                "⚙️ Настройки\n\nЧто бот пишет команде и в какие дни.",
+                reply_markup=_cfg_markup())
+
+        elif what == "repub":
+            text, markup = await asyncio.to_thread(_republish_list)
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "repub1":
+            text, markup = await asyncio.to_thread(
+                _republish_ask, parts[2] if len(parts) > 2 else "")
+            await query.edit_message_text(text, reply_markup=markup)
+
+        elif what == "repub2":
+            await query.edit_message_text("📣 Собираю протокол и объявляю…")
+            note = await _republish_result(parts[2] if len(parts) > 2 else "")
+            await query.edit_message_text(note, reply_markup=_play_markup())
 
         elif what == "remind" and len(parts) > 2:
             kind = parts[2]
@@ -8654,7 +8787,7 @@ def _pg_main() -> Tuple[str, InlineKeyboardMarkup]:
             callback_data=f"pg:g:{g['id']}")])
     rows.append([InlineKeyboardButton("➕ Создать группу", callback_data="pg:new")])
     rows.append([InlineKeyboardButton("✉️ Шаблоны писем", callback_data="pg:tpl")])
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:team")])
     text = GROUPS_HEAD if got else (
         GROUPS_HEAD + "\n\nПока ни одной группы нет.")
     return text, InlineKeyboardMarkup(rows)

@@ -41,6 +41,8 @@ FORBIDDEN = re.compile(
     r"(:del|:un2?:|:off:|:revoke|remind|send|sync|backup|launch|:do:|:set:"
     r"|accset|accoff|delpay|startsend|:new:|:split:|:keep:|finish|start:"
     r"|admin:report|fantasy:ingest|fantasy:prices|fscope|admin:stats"
+    # «Объявить результат» пишет в общий чат всей команде.
+    r"|coach:repub2"
     # Частные занятия: это чужие деньги. Обход ходит по настоящей базе, и
     # начислить долг или снять оплату «просто чтобы проверить кнопку» нельзя.
     r"|pl:(t|done|paid|offok|arch|back|rm|repon|repoff2):"
@@ -300,6 +302,72 @@ def test_same_message_is_not_an_error(bd) -> bool:
     return good and not left and hooked
 
 
+def test_coach_root_stays_short(bd) -> bool:
+    """Корень раздела тренера не должен снова расползтись в список.
+
+    Каждая новая возможность добавляла туда строку, и первый экран превратился
+    в девять кнопок, по которым нужное ищешь глазами. Держим предел: на корне
+    только области, действия живут внутри них."""
+    print("\n=== корень раздела тренера ===")
+    rows = bd._coach_markup().inline_keyboard
+    ok = len(rows) <= 6
+    print(("  ✅ " if ok else "  ❌ ") + f"кнопок на корне: {len(rows)} (предел 6)")
+
+    # Каждая ведёт в область, а не в конкретное действие с аргументами.
+    deep = [b.callback_data for row in rows for b in row
+            if (b.callback_data or "").count(":") > 1]
+    clean = not deep
+    print(("  ✅ " if clean else "  ❌ ")
+          + f"на корне нет действий с аргументами: {deep}")
+
+    # Всё, что переехало, обязано остаться достижимым.
+    reachable = set()
+    for markup in (bd._coach_markup(), bd._team_markup(), bd._cfg_markup(),
+                   bd._play_markup(), bd._money_markup()):
+        for row in markup.inline_keyboard:
+            for b in row:
+                reachable.add(b.callback_data or "")
+    want = {"coach:money", "coach:play", "coach:field:list:0", "pg:main",
+            "coach:offline", "coach:prev", "coach:sched", "coach:prog",
+            "pl:main"}
+    lost = sorted(want - reachable)
+    print(("  ✅ " if not lost else "  ❌ ") + f"ничего не потерялось: {lost}")
+    return ok and clean and not lost
+
+
+def test_republish_asks_first(bd) -> bool:
+    """«Объявить результат» пишет всей команде — только после вопроса.
+
+    Кнопка нужна, когда лига отдала протокол не целиком и в чат ушёл огрызок.
+    Но само нажатие не должно ничего публиковать: сообщение увидят все, и
+    промах здесь не отменишь."""
+    print("\n=== объявление результата спрашивает ===")
+    import inspect
+    from game_results_monitor_final import GameResultsMonitorFinal
+
+    inside = [b.callback_data for row in bd._play_markup().inline_keyboard
+              for b in row]
+    listed = "coach:repub" in inside
+    print(("  ✅ " if listed else "  ❌ ") + "кнопка живёт в разделе «Игры»")
+
+    text, markup = bd._republish_ask("нет-такой-игры")
+    fell_back = "Объявить результат" in text
+    print(("  ✅ " if fell_back else "  ❌ ")
+          + "неизвестная игра возвращает к списку, а не падает")
+
+    src = (ROOT / "bot_daemon.py").read_text()
+    body = src[src.index("def _republish_ask"):src.index("async def _republish_result")]
+    warned = "уже объявляли" in body and "общий чат" in body
+    print(("  ✅ " if warned else "  ❌ ") + "предупреждаем про общий чат и повтор")
+    confirms = "coach:repub2" in body
+    print(("  ✅ " if confirms else "  ❌ ") + "публикует только отдельное «Да»")
+
+    sig = inspect.signature(GameResultsMonitorFinal.send_game_result)
+    quiet = sig.parameters["force"].default is False
+    print(("  ✅ " if quiet else "  ❌ ") + "сам монитор никогда не форсирует")
+    return listed and fell_back and warned and confirms and quiet
+
+
 async def main() -> int:
     db = _prepare_db()
     os.environ.setdefault("BOT_TOKEN", "0:test")
@@ -371,6 +439,10 @@ async def main() -> int:
                   + ", ".join(f"{d} ({s:.1f} с)" for d, s in worst))
         total_problems += c.problems
 
+    if not test_coach_root_stays_short(bd):
+        total_problems.append({"data": "корень раздела тренера"})
+    if not test_republish_asks_first(bd):
+        total_problems.append({"data": "объявление результата"})
     if not test_same_message_is_not_an_error(bd):
         total_problems = list(total_problems) + ["повтор нажатия считается ошибкой"]
 
