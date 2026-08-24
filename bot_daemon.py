@@ -8622,59 +8622,6 @@ def _protocol_post_text(got: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _catch_up_results(app: Application) -> None:
-    """Публикует итоги игр, которые монитор не успел поймать в своё окно.
-
-    22.08.2026 матч с овертаймом попал в базу ночным добором через двое суток —
-    окно слежения (7 часов от начала) к тому времени давно закрылось, и в чат
-    не ушло ничего. Со стороны это выглядит как пропавшая игра.
-
-    Публикуем с пометкой, что задним числом: делать вид, будто всё вовремя,
-    нельзя — люди помнят, что сообщения не было."""
-    import result_catchup
-    try:
-        late = await asyncio.to_thread(result_catchup.pending)
-    except Exception as e:
-        log.warning(f"Догон результатов: список не собрался: {e}")
-        return
-    if not late:
-        return
-    gsm = await asyncio.to_thread(_game_manager)
-    chat_ids = _result_chat_ids(gsm)
-    if not chat_ids:
-        return
-    # Результаты лежат в теме обновлений игры — туда же их кладёт и обычный
-    # путь; отдельной темы под результаты в настройках нет.
-    topic = getattr(gsm, "game_updates_topic_id", None)
-    for game in late:
-        text = await asyncio.to_thread(result_catchup.text, game)
-        sent = 0
-        for chat_id in chat_ids:
-            kwargs = {"chat_id": int(chat_id), "text": text}
-            if topic is not None:
-                kwargs["message_thread_id"] = topic
-            try:
-                await app.bot.send_message(**kwargs)
-                sent += 1
-            except Exception as e:
-                # Топик мог быть удалён — пробуем в общий чат, а не молчим.
-                if topic is not None and "thread not found" in str(e).lower():
-                    kwargs.pop("message_thread_id", None)
-                    try:
-                        await app.bot.send_message(**kwargs)
-                        sent += 1
-                        continue
-                    except Exception as e2:
-                        e = e2
-                log.warning(f"Догон результата в чат {chat_id}: {e}")
-        # Помечаем ТОЛЬКО если дошло: иначе игра молча выпадет из догона и
-        # второго шанса уже не будет.
-        if sent:
-            await asyncio.to_thread(result_catchup.mark_done, game)
-            log.info(f"Догон: итог игры {game['source']}:{game['game_id']} "
-                     f"опубликован ({sent} чат(а))")
-
-
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -8961,7 +8908,6 @@ async def _background_loop(app: Application) -> None:
             except Exception as e:
                 log.warning(f"Уборка доступов: {e}")
             await _catch_up_prices()
-            await _catch_up_results(app)
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.
             try:

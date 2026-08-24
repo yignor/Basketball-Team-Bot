@@ -184,7 +184,8 @@ class GameResultsMonitorFinal:
         """Получает результаты игр используя ссылки из сервисного листа"""
         try:
             from enhanced_duplicate_protection import duplicate_protection
-            from datetime_utils import is_within_game_tracking_window
+            from datetime_utils import (is_within_game_tracking_window,
+                                        RESULT_CATCHUP_WINDOW_HOURS)
 
             games = []
 
@@ -199,7 +200,12 @@ class GameResultsMonitorFinal:
             for rec in records:
                 if not rec.get('link'):
                     continue
-                if not is_within_game_tracking_window(rec.get('game_date'), rec.get('game_time')):
+                # Окно здесь шире слежения: сюда игра попадает и через сутки
+                # после матча, если лига опубликовала протокол с опозданием.
+                # Повторов не будет — send_game_result сверяется с защитой.
+                if not is_within_game_tracking_window(
+                        rec.get('game_date'), rec.get('game_time'),
+                        hours=RESULT_CATCHUP_WINDOW_HOURS):
                     continue
 
                 game_link = rec['link']
@@ -670,13 +676,17 @@ class GameResultsMonitorFinal:
         # fetch_game_results_from_links/is_within_game_tracking_window)
         today_games_found = False
         try:
-            from datetime_utils import get_moscow_time, is_within_game_tracking_window
+            from datetime_utils import (get_moscow_time,
+                                        is_within_game_tracking_window,
+                                        RESULT_CATCHUP_WINDOW_HOURS)
             today = get_moscow_time().strftime('%d.%m.%Y')
 
             for rec in duplicate_protection.get_records_by_type("АНОНС_ИГРА"):
                 if not rec.get('link'):
                     continue
-                if not is_within_game_tracking_window(rec.get('game_date'), rec.get('game_time')):
+                if not is_within_game_tracking_window(
+                        rec.get('game_date'), rec.get('game_time'),
+                        hours=RESULT_CATCHUP_WINDOW_HOURS):
                     continue
                 today_games_found = True
                 print(f"✅ Найдена игра на сегодня: {rec.get('unique_key')} (ссылка: {rec.get('link')})")

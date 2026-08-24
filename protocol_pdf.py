@@ -47,6 +47,23 @@ PAIR_COLUMNS = ("fg2", "fg3", "fg", "ft")
 COLUMN_TOLERANCE = 8.0
 
 
+def _place(cm, tm) -> tuple:
+    """Где на странице оказался кусок текста.
+
+    Позиция — произведение матрицы текста на матрицу преобразования. В PyPDF2
+    вся позиция лежала в tm, а cm была единичной, и хватало tm[4], tm[5]. В
+    pypdf 6 ровно наоборот: tm нулевая, всё в cm. Перемножение даёт верный
+    ответ в обоих случаях, поэтому версия библиотеки перестаёт быть важна."""
+    try:
+        a, b, c, d, e, f = (float(v) for v in cm[:6])
+        ta, tb, tc, td, te, tf = (float(v) for v in tm[:6])
+    except (TypeError, ValueError, IndexError):
+        return 0.0, 0.0
+    x = te * a + tf * c + e
+    y = te * b + tf * d + f
+    return x, y
+
+
 def _fragments(data: bytes) -> List[tuple]:
     """[(y, x, текст)] со всей первой страницы.
 
@@ -57,13 +74,40 @@ def _fragments(data: bytes) -> List[tuple]:
     if not reader.pages:
         return []
     out: List[tuple] = []
+    pos = [0.0, 0.0]
+
+    def before(op, operands, cm, tm):
+        # Позицию берём из самих операторов страницы, а не из матриц, которые
+        # библиотека передаёт в визитор текста: в pypdf 6 они приходят
+        # единичными почти для всех чисел протокола, и таблица разваливалась
+        # (см. комментарий к _place). Операнды Tm/Td одинаковы в любой версии.
+        try:
+            if op == b"Tm" and len(operands) >= 6:
+                pos[0], pos[1] = float(operands[4]), float(operands[5])
+            elif op in (b"Td", b"TD") and len(operands) >= 2:
+                pos[0], pos[1] = float(operands[0]), float(operands[1])
+        except (TypeError, ValueError):
+            pass
 
     def visit(text, cm, tm, font, size):
         got = (text or "").strip()
         if got:
-            out.append((round(tm[5], 1), round(tm[4], 1), got))
+            out.append((round(pos[1], 1), round(pos[0], 1), got))
 
-    reader.pages[0].extract_text(visitor_text=visit)
+    try:
+        reader.pages[0].extract_text(visitor_operand_before=before,
+                                     visitor_text=visit)
+    except TypeError:
+        # Библиотека без обхода операторов — читаем позицию из матриц.
+        out.clear()
+
+        def only_text(text, cm, tm, font, size):
+            got = (text or "").strip()
+            if got:
+                x, y = _place(cm, tm)
+                out.append((round(y, 1), round(x, 1), got))
+
+        reader.pages[0].extract_text(visitor_text=only_text)
     return out
 
 
@@ -71,8 +115,15 @@ def _rows(parts: List[tuple]) -> Dict[float, List[tuple]]:
     """Фрагменты по строкам. Имя игрока лига печатает чуть выше цифр, поэтому
     близкие y считаем одной строкой."""
     rows: Dict[float, List[tuple]] = {}
-    for y, x, t in parts:
-        key = next((k for k in rows if abs(k - y) < 1.5), y)
+    keys: List[float] = []
+    # Порядок обхода задаём сами: раньше строка собиралась вокруг того куска,
+    # который попался первым, и одна и та же таблица распадалась по-разному в
+    # зависимости от того, в каком порядке библиотека отдала текст.
+    for y, x, t in sorted(parts, key=lambda p: (-p[0], p[1])):
+        key = next((k for k in keys if abs(k - y) < 1.5), None)
+        if key is None:
+            key = y
+            keys.append(key)
         rows.setdefault(key, []).append((x, t))
     return rows
 

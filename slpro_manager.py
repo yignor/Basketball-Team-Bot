@@ -34,7 +34,8 @@ from game_system_manager import (
 import slpro_client
 from slpro_client import SlproClient
 from slpro_game import parse_box_score, format_quarters, format_leaders
-from datetime_utils import get_moscow_time, is_within_game_tracking_window
+from datetime_utils import (get_moscow_time, is_within_game_tracking_window,
+                            RESULT_CATCHUP_WINDOW_HOURS)
 
 # Отдельные типы записей, чтобы Infobasket-конвейер (game_watcher.py,
 # game_results_monitor_final.py — ищут АНОНС_ИГРА и пикают fbp.ru) их не касался.
@@ -482,9 +483,13 @@ class SlproManager:
 
                 status = game.get("status")
                 if status == 2:
-                    # Завершена — публикуем результат, пока в окне отслеживания.
+                    # Завершена — публикуем результат. Окно шире слежения:
+                    # протокол приходит и на следующий день, а post_result всё
+                    # равно спросит защиту от дублей и промолчит на повторе.
                     if only in (None, "results") and is_within_game_tracking_window(
-                            self._date_ddmmyyyy(game["game_date"]), self._time_hhmm(game["game_time"])):
+                            self._date_ddmmyyyy(game["game_date"]),
+                            self._time_hhmm(game["game_time"]),
+                            hours=RESULT_CATCHUP_WINDOW_HOURS):
                         if await self.post_result(game, ctx):
                             results += 1
                 elif status == 0:
