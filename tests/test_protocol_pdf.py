@@ -117,11 +117,55 @@ def test_late_result_still_inside_window() -> None:
 
 
 
+def test_result_is_not_sent_twice() -> None:
+    """Объявленную игру монитор не объявляет второй раз.
+
+    Ключ защиты у монитора собран из даты и названий команд, и запись,
+    сделанную другим путём (у той ключ по номеру игры), он не находил. Пока
+    окно было семичасовым, разойтись успевал только один путь; с окном в трое
+    суток монитор возвращается к уже объявленной игре — и по матчу 22.08 ушёл
+    бы второй результат."""
+    print("\n=== один результат на игру ===")
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    gid = "1082250"
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM service_records")
+        conn.execute(
+            "INSERT INTO service_records (unique_key, logged_at, created_at, "
+            "updated_at, data_type, game_id, game_date, status, deleted) "
+            "VALUES (?, ?, ?, ?, 'РЕЗУЛЬТАТ_ИГРА', ?, '2026-08-22', "
+            "'РЕЗУЛЬТАТ ОТПРАВЛЕН', 0)",
+            (f"РЕЗУЛЬТАТ_ИГРА_{gid}", now, now, now, gid))
+        conn.commit()
+
+    import enhanced_duplicate_protection as edp
+    from enhanced_duplicate_protection import duplicate_protection
+    # На сервере записи ведутся в локальном зеркале; в тесте Google нет вовсе,
+    # и без этого флага проверка ушла бы в неинициализированную таблицу.
+    edp.SERVICE_RECORDS_LOCAL_PRIMARY = True
+    check(bool(duplicate_protection.get_game_record("РЕЗУЛЬТАТ_ИГРА", gid)),
+          "запись об отправленном результате находится по номеру игры")
+    check(not duplicate_protection.check_duplicate(
+        "РЕЗУЛЬТАТ_ИГРА", "result_22.08.2026_Кирпичный_Завод_PULL_UP").get("exists"),
+        "а по ключу из названий — нет: ровно та дыра, из-за которой шёл дубль")
+
+    src = (ROOT / "game_results_monitor_final.py").read_text()
+    body = src[src.index("async def send_game_result"):]
+    body = body[:body.index("\n    async def ", 1)]
+    guard = body.find("get_game_record")
+    send = body.find("send_message")
+    check(guard != -1, "монитор сверяется по номеру игры")
+    check(guard != -1 and (send == -1 or guard < send),
+          "и делает это ДО отправки, а не после")
+
+
 def main() -> int:
     test_parse_head()
     test_no_score_is_refused()
     test_no_library_says_so()
     test_late_result_still_inside_window()
+    test_result_is_not_sent_twice()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
