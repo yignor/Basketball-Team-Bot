@@ -5,10 +5,13 @@
 бота уже есть: фамилия, имя, дата рождения. Переписывание сорока строк из чата
 в таблицу — работа, которой быть не должно.
 
-Почему CSV, а не xlsx. Библиотек для xlsx на сервере нет, а поставить их туда
-нельзя: окружение бота принадлежит другому пользователю, и установка требует
-пароля. CSV открывается и Excel, и Google Таблицами, и в заявку оттуда
-копируется так же. Две мелочи, без которых он открывается плохо:
+Формат. Отдаём xlsx, если в окружении есть openpyxl, и CSV, если нет. Выбор
+делается на месте, а не настройкой: бот живёт на сервере, куда библиотеку
+могут поставить или не поставить, и падать из-за этого выгрузка не должна.
+
+CSV остаётся полноценным запасным вариантом — он открывается и Excel, и Google
+Таблицами, и в заявку оттуда копируется так же. Две мелочи, без которых он
+открывается плохо:
 
 * **BOM в начале** — иначе русский Excel читает файл как cp1251 и показывает
   кракозябры;
@@ -27,8 +30,11 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from datetime import date
 from typing import Any, Dict, List, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 # Столбцы заявки: что показываем и откуда берём. Порядок — как в бланке.
 COLUMNS: Tuple[Tuple[str, str], ...] = (
@@ -79,8 +85,78 @@ def csv_bytes(people: Sequence[Dict[str, Any]]) -> bytes:
     return (BOM + buf.getvalue()).encode("utf-8")
 
 
-def file_name(what: str, today: date = None) -> str:
-    """Имя файла: «Заявка — Второй состав — 24.08.2026.csv».
+def has_xlsx() -> bool:
+    """Есть ли чем собрать настоящую книгу Excel."""
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _as_date(raw: Any):
+    """«2001-09-22» → date. Не разобрали — None, положим текстом."""
+    got = str(raw or "").strip()
+    try:
+        return date(int(got[:4]), int(got[5:7]), int(got[8:10]))
+    except (ValueError, IndexError):
+        return None
+
+
+def xlsx_bytes(people: Sequence[Dict[str, Any]], title: str = "Заявка") -> bytes:
+    """Книга Excel: шапка выделена, ширины подобраны, шапка не уезжает.
+
+    Дату рождения кладём НАСТОЯЩЕЙ датой с форматом ДД.ММ.ГГГГ, а не строкой:
+    так она и показывается привычно, и сортируется правильно, если тренер
+    захочет переставить строки. Что не разобралось — кладём текстом, чтобы не
+    потерять значение молча."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+
+    book = Workbook()
+    sheet = book.active
+    # Имя листа: Excel не пускает длиннее 31 знака и часть символов.
+    clean = "".join(c for c in str(title or "Заявка") if c not in "[]:*?/\\")
+    sheet.title = (clean[:31] or "Заявка")
+
+    table = rows(people)
+    sheet.append(table[0])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    sheet.freeze_panes = "A2"
+
+    # Числа и даты кладём типами, а не текстом: иначе таблица не сортируется,
+    # а Excel вешает на каждую клетку зелёный уголок «число как текст».
+    born_at = [i for i, (_, key) in enumerate(COLUMNS) if key == "birthday"]
+    index_at = [i for i, (_, key) in enumerate(COLUMNS) if key == "_index"]
+    for person, line in zip(people, table[1:]):
+        sheet.append(line)
+        for i in index_at:
+            cell = sheet.cell(row=sheet.max_row, column=i + 1)
+            if str(cell.value).isdigit():
+                cell.value = int(cell.value)
+                cell.alignment = Alignment(horizontal="center")
+        for i in born_at:
+            got = _as_date(person.get("birthday"))
+            if got:
+                cell = sheet.cell(row=sheet.max_row, column=i + 1)
+                cell.value = got
+                cell.number_format = "DD.MM.YYYY"
+
+    widths = [max(len(str(line[i])) for line in table) + 2
+              for i in range(len(COLUMNS))]
+    for i, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(i)].width = min(max(width, 6), 34)
+
+    buf = io.BytesIO()
+    book.save(buf)
+    return buf.getvalue()
+
+
+def file_name(what: str, today: date = None, suffix: str = "csv") -> str:
+    """Имя файла: «Заявка — Второй состав — 24.08.2026.xlsx».
 
     Дата в имени не украшение: заявку подают несколько раз за сезон, и две
     версии в загрузках без даты не различить."""
@@ -89,7 +165,19 @@ def file_name(what: str, today: date = None) -> str:
     # Знаки, на которых спотыкаются файловые системы и Telegram.
     for bad in '\\/:*?"<>|':
         clean = clean.replace(bad, " ")
-    return f"Заявка — {' '.join(clean.split())} — {day}.csv"
+    return f"Заявка — {' '.join(clean.split())} — {day}.{suffix}"
+
+
+def build(people: Sequence[Dict[str, Any]], what: str) -> Tuple[bytes, str]:
+    """Готовый файл и его имя. Книгу Excel — если есть чем, иначе CSV."""
+    if has_xlsx():
+        try:
+            return xlsx_bytes(people, what), file_name(what, suffix="xlsx")
+        except Exception:
+            # Библиотека есть, но собрать не вышло — отдаём CSV, а не ошибку:
+            # тренеру нужен список, а не разбирательство с форматом.
+            logger.warning("Книга Excel не собралась, отдаю CSV", exc_info=True)
+    return csv_bytes(people), file_name(what, suffix="csv")
 
 
 def team_people() -> List[Dict[str, Any]]:

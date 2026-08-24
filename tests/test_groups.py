@@ -302,21 +302,61 @@ async def test_export_for_the_application(bd, gid: int) -> None:
     check(len(sent) == 1, f"файл отправлен: {len(sent)}")
     if not sent:
         return
-    body = sent[0]["document"].getvalue().decode("utf-8")
-    check(body.startswith("\ufeff"), "в начале BOM — иначе Excel даст кракозябры")
-    head = body.splitlines()[0]
-    check(head.count(";") == 5 and head.startswith("\ufeff№;Фамилия;Имя"),
-          f"шапка через точку с запятой: {head}")
-    check("22.09.2001" in body, "дата рождения по-русски")
-    check("2001-09-22" not in body, "и ISO-вида в файле не осталось")
+    raw = sent[0]["document"].getvalue()
+    name = sent[0]["filename"]
+    check(name.startswith("Заявка"), f"имя файла говорит, что это: {name}")
     check("Без даты рождения" in sent[0]["caption"],
           "про пустую дату рождения предупредили: "
           + sent[0]["caption"].splitlines()[-1][:60])
-    lines = [l for l in body.splitlines() if l.strip()]
-    check(len(lines) == 1 + len(pg_members_count(gid)),
-          f"строк по числу людей в группе: {len(lines) - 1}")
-    check(sent[0]["filename"].startswith("Заявка"),
-          f"имя файла говорит, что это: {sent[0]['filename']}")
+
+    people = pg_members_count(gid)
+    if name.endswith(".xlsx"):
+        check(raw[:2] == b"PK", "это настоящая книга Excel, а не переименованный csv")
+        import io
+        from openpyxl import load_workbook
+        sheet = load_workbook(io.BytesIO(raw)).active
+        table = list(sheet.iter_rows(values_only=True))
+        check(table[0][:3] == ("№", "Фамилия", "Имя"), f"шапка на месте: {table[0]}")
+        check(len(table) == 1 + len(people),
+              f"строк по числу людей в группе: {len(table) - 1}")
+        check(isinstance(table[1][0], int), "номер лежит числом, а не текстом")
+        born = [r[3] for r in table[1:] if r[3] is not None]
+        check(born and all(hasattr(b, "year") for b in born),
+              "дата рождения лежит датой — таблица сортируется")
+        check(sheet.freeze_panes == "A2", "шапка не уезжает при прокрутке")
+    else:
+        body = raw.decode("utf-8")
+        check(body.startswith("\ufeff"), "в начале BOM — иначе Excel даст кракозябры")
+        head = body.splitlines()[0]
+        check(head.count(";") == 5 and head.startswith("\ufeff№;Фамилия;Имя"),
+              f"шапка через точку с запятой: {head}")
+        check("22.09.2001" in body, "дата рождения по-русски")
+        check("2001-09-22" not in body, "и ISO-вида в файле не осталось")
+        lines = [l for l in body.splitlines() if l.strip()]
+        check(len(lines) == 1 + len(people),
+              f"строк по числу людей в группе: {len(lines) - 1}")
+
+
+async def test_csv_still_works_without_openpyxl(bd, gid: int) -> None:
+    """Без библиотеки выгрузка не падает, а отдаёт CSV.
+
+    Библиотеку ставят руками в окружение бота, и на новом сервере её может не
+    оказаться. Заявка нужна тренеру в любом случае — пусть таблицей попроще."""
+    print("\n=== без openpyxl отдаём CSV ===")
+    import roster_export
+    was = roster_export.has_xlsx
+    roster_export.has_xlsx = lambda: False
+    try:
+        people = roster_export.group_people(gid)
+        data, name = roster_export.build(people, "Второй состав")
+    finally:
+        roster_export.has_xlsx = was
+    check(name.endswith(".csv"), f"формат сменился: {name}")
+    body = data.decode("utf-8")
+    check(body.startswith("\ufeff"), "BOM на месте — Excel прочтёт кириллицу")
+    check("22.09.2001" in body, "дата рождения по-русски и здесь")
+    check(len([l for l in body.splitlines() if l.strip()]) == 1 + len(people),
+          "и люди все на месте")
 
 
 def pg_members_count(gid: int):
@@ -332,6 +372,7 @@ async def run() -> None:
     await test_templates(bd, gid)
     await test_repeat(bd, gid)
     await test_export_for_the_application(bd, gid)
+    await test_csv_still_works_without_openpyxl(bd, gid)
     await test_delete_takes_repeats(bd)
     await test_nothing_leaks_to_chat(bd)
     await test_clear_pending_knows_us(bd)

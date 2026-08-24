@@ -4886,8 +4886,7 @@ async def _send_roster_csv(query, people: List[Dict[str, Any]], what: str) -> No
         await query.message.reply_text(
             "Выгружать некого: в этом списке пока никого нет.")
         return
-    data = await asyncio.to_thread(roster_export.csv_bytes, people)
-    name = roster_export.file_name(what)
+    data, name = await asyncio.to_thread(roster_export.build, people, what)
     bio = io.BytesIO(data)
     bio.name = name
     lines = [f"📄 {what}: {len(people)} чел.",
