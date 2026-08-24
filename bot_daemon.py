@@ -585,14 +585,12 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user or not chat or chat.type != "private":
         return
 
-    # /start обещан как выход из любого незаконченного ввода — в том числе из
-    # недовведённого платежа.
-    _awaiting_payment.discard(user.id)
-    _pay_draft.pop(user.id, None)
-    _awaiting_video.pop(user.id, None)
-    _awaiting_field.pop(user.id, None)
-    _awaiting_money.pop(user.id, None)
-    _newgame.pop(user.id, None)
+    # /start обещан как выход из ЛЮБОГО незаконченного ввода. Раньше здесь
+    # чистились шесть словарей из пятнадцати, выписанных руками: гостевой ввод
+    # состава, например, переживал /start и потом перехватывал чужой текст —
+    # присланное время спорного уходило в поиск игрока по фамилии. Список
+    # диалогов растёт, и держать его во втором месте нельзя.
+    _clear_pending(user.id)
 
     # Фиксируем ЛЮБОГО пользователя, который запустил бота — не только
     # админа. Нужно для "Список пользователей → В боте".
@@ -1507,6 +1505,10 @@ async def handle_report_prefs_callback(update: Update, context: ContextTypes.DEF
         await query.edit_message_text(text, reply_markup=markup)
         return
     if len(parts) >= 5 and parts[1] == "vidt":
+        # Открываем диалог — закрываем предыдущий. Иначе текст заберёт тот, чей
+        # обработчик стоит в группе раньше, а не тот, кого человек только что
+        # позвал кнопкой.
+        _clear_pending(uid)
         _awaiting_video[uid] = f"rep:{parts[2]}:{parts[3]}:{parts[4]}"
         await query.edit_message_text(
             await asyncio.to_thread(_vidtime_ask, parts[2], parts[3]))
@@ -2323,6 +2325,10 @@ def _clear_pending(uid: int) -> None:
     _awaiting_priv.pop(uid, None)
     _awaiting_guest.pop(uid, None)
     _awaiting_identity.pop(uid, None)
+    # Эти двое стоят в самых ранних группах обработчиков и перехватывают текст
+    # раньше всех остальных — забыть их здесь опаснее прочего.
+    _awaiting_coach.pop(uid, None)
+    _awaiting_feedback.discard(uid)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -8496,12 +8502,39 @@ async def handle_protocol_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
     if people:
         text += (f"\n\nИгроков в протоколе: {len(people)}.\n"
                  + protocol_pdf.box_score(people))
+        text += "\n\n" + await asyncio.to_thread(_pdf_stats_note, got)
     await msg.reply_text(
         text + "\n\nОпубликовать итог в чат команды?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📣 Опубликовать", callback_data="pdf:post")],
             [InlineKeyboardButton("Не надо", callback_data="pdf:no")]]))
     raise ApplicationHandlerStop
+
+
+def _pdf_stats_note(got: Dict[str, Any]) -> str:
+    """Что будет со статистикой, если тренер подтвердит.
+
+    Говорим ДО записи: эти цифры питают фэнтези, и человек должен видеть,
+    скольких бот опознал и кого не смог, а не узнавать это по очкам."""
+    import protocol_import
+    game = protocol_import.find_game(got)
+    if not game:
+        return ("📊 Статистику не запишу: не нашёл эту игру у себя. "
+                "Итог опубликовать всё равно могу.")
+    got["game"] = game
+    have = protocol_import.already_has_stats(game["source"], game["game_id"])
+    if have:
+        return (f"📊 Статистика по этой игре уже есть ({have} строк) — "
+                "данные лиги главнее, переписывать не буду.")
+    ok, lost = protocol_import.match(got.get("players") or [], game["source"])
+    got["matched"] = ok
+    lines = [f"📊 Запишу статистику: опознано {len(ok)} из "
+             f"{len(got.get('players') or [])}."]
+    if lost:
+        lines.append("Не опознаны (пропущу): " + ", ".join(lost[:6]))
+        lines.append("Однофамильцев и незнакомых лиге не записываю — "
+                     "приписать чужие очки хуже, чем не записать вовсе.")
+    return "\n".join(lines)
 
 
 async def handle_protocol_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8518,6 +8551,7 @@ async def handle_protocol_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     import protocol_pdf
+    written = await asyncio.to_thread(_pdf_store_stats, got)
     text = _protocol_post_text(got)
     gsm = await asyncio.to_thread(_game_manager)
     chat_ids = _result_chat_ids(gsm)
@@ -8540,10 +8574,30 @@ async def handle_protocol_callback(update: Update, context: ContextTypes.DEFAULT
                 except Exception as e2:
                     e = e2
             log.warning(f"Протокол PDF в чат {chat_id}: {e}")
+    tail = f"\n📊 Записал статистику: {written} строк." if written else ""
     await query.edit_message_text(
-        f"📣 Опубликовал ({sent} чат(а))." if sent else
-        "⚠️ Не смог отправить — проверь, что бот в чате команды.")
+        (f"📣 Опубликовал ({sent} чат(а))." if sent else
+         "⚠️ Не смог отправить — проверь, что бот в чате команды.") + tail)
     log.info(f"Итог по PDF-протоколу опубликован ({sent}), прислал id {user.id}")
+
+
+def _pdf_store_stats(got: Dict[str, Any]) -> int:
+    """Кладёт разобранную статистику. Ноль — если писать нечего или незачем."""
+    import protocol_import
+    game = got.get("game") or protocol_import.find_game(got)
+    rows = got.get("matched")
+    if not game:
+        return 0
+    if protocol_import.already_has_stats(game["source"], game["game_id"]):
+        return 0
+    if rows is None:
+        rows, _ = protocol_import.match(got.get("players") or [], game["source"])
+    try:
+        return protocol_import.store(game["source"], game["game_id"],
+                                     str(game["game_date"]), rows)
+    except Exception as e:
+        log.warning(f"Статистика из протокола не записалась: {e}")
+        return 0
 
 
 def _protocol_post_text(got: Dict[str, Any]) -> str:
