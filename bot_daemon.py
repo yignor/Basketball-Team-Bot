@@ -1743,6 +1743,7 @@ def _people_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎯 Профили в лигах", callback_data="admin:idn:list:0")],
         [InlineKeyboardButton("🎂 Дни рождения и ники", callback_data="admin:field:list:0")],
         [InlineKeyboardButton("🔑 Доступы", callback_data="admin:acc:list")],
+        [InlineKeyboardButton("🏅 Ачивки", callback_data="admin:ach:list")],
         _back_button(),
     ])
 
@@ -2331,6 +2332,8 @@ def _clear_pending(uid: int) -> None:
     _awaiting_feedback.discard(uid)
     _awaiting_group.pop(uid, None)
     _group_letter.pop(uid, None)
+    _awaiting_ach.pop(uid, None)
+    _awaiting_badge.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -7617,6 +7620,10 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
+        if parts[1] == "ach":
+            await _ach_admin(query, user, parts)
+            return
+
         if parts[1] == "doors":
             what = parts[2] if len(parts) > 2 else "list"
             if what == "toggle" and len(parts) > 3:
@@ -9483,6 +9490,324 @@ async def _send_group_repeats(app: Application) -> None:
         log.info(f"Повтор {rep['id']} ({rep['group_name']}): ушло {sent}")
 
 
+# ─────────────────── ачивки: значки рядом с именем ───────────────────
+
+# Что админ сейчас вводит по ачивке: uid -> «что:id».
+_awaiting_ach: Dict[int, str] = {}
+# Кому грузим картинку: uid -> id ачивки. Отдельно от текстового ожидания —
+# картинка приходит фотографией, а не текстом, и ловит её другой обработчик.
+_awaiting_badge: Dict[int, int] = {}
+
+# Как часто перебирать правила выдачи значков.
+ACH_RECOUNT_SECONDS = 3600
+_ach_checked_at = 0.0
+
+ACH_HEAD = ("🏅 Ачивки\n\nЗначки рядом с именем в таблице фэнтези. Человек сам "
+            "решает, какие показывать, а по нажатию видно описание и картинку "
+            "целиком.")
+
+
+def _ach_list() -> Tuple[str, InlineKeyboardMarkup]:
+    import achievements
+    got = achievements.all_achievements()
+    rows = []
+    for a in got:
+        mark = a["emoji"] or ("🖼" if a["has_image"] else "▫️")
+        off = "" if a["active"] else " (выключена)"
+        rows.append([InlineKeyboardButton(
+            f"{mark} {a['title']} — {a['holders']}{off}"[:BTN_TEXT],
+            callback_data=f"admin:ach:one:{a['id']}")])
+    rows.append([InlineKeyboardButton("➕ Создать ачивку",
+                                      callback_data="admin:ach:new")])
+    rows.append([InlineKeyboardButton("♻️ Пересчитать по правилам",
+                                      callback_data="admin:ach:recount")])
+    rows.append(_back_button("admin:menu:people"))
+    text = ACH_HEAD if got else ACH_HEAD + "\n\nПока ни одной."
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _ach_card(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import achievements
+    a = achievements.get(ach_id)
+    if not a:
+        return _ach_list()
+    lines = [f"🏅 {a['title']}", ""]
+    lines.append(a["description"] or "Описания нет — человек увидит только картинку.")
+    lines += ["", f"⚙️ Выдаётся: {a['rule_title']}",
+              f"🖼 Картинка: {'загружена' if a['has_image'] else 'нет'}",
+              f"😀 Запасной значок: {a['emoji'] or 'нет'}",
+              f"👥 У кого есть: {a['holders']}"]
+    if not a["active"]:
+        lines += ["", "⚠️ Выключена — людям не показывается."]
+    rows = [
+        [InlineKeyboardButton("🖼 Загрузить картинку",
+                              callback_data=f"admin:ach:img:{ach_id}")],
+        [InlineKeyboardButton("✏️ Название", callback_data=f"admin:ach:title:{ach_id}"),
+         InlineKeyboardButton("📝 Описание", callback_data=f"admin:ach:desc:{ach_id}")],
+        [InlineKeyboardButton("😀 Значок", callback_data=f"admin:ach:emoji:{ach_id}"),
+         InlineKeyboardButton("⚙️ Правило", callback_data=f"admin:ach:rule:{ach_id}")],
+        [InlineKeyboardButton("👥 Кому выдана", callback_data=f"admin:ach:who:{ach_id}:0")],
+        [InlineKeyboardButton("🔕 Выключить" if a["active"] else "🔔 Включить",
+                              callback_data=f"admin:ach:onoff:{ach_id}")],
+        [InlineKeyboardButton("🗑 Удалить", callback_data=f"admin:ach:del:{ach_id}")],
+        [InlineKeyboardButton("⬅️ К ачивкам", callback_data="admin:ach:list")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _ach_rules(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import achievements
+    a = achievements.get(ach_id) or {}
+    rows = []
+    for key, (title, needs) in achievements.RULES.items():
+        here = "✅ " if str(a.get("rule") or "") == key else ""
+        rows.append([InlineKeyboardButton(
+            f"{here}{title}"[:BTN_TEXT],
+            callback_data=f"admin:ach:setrule:{ach_id}:{key or 'none'}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"admin:ach:one:{ach_id}")])
+    return ("⚙️ За что выдавать «{}»?\n\nПравило бот считает сам и выдаёт "
+            "значок всем подходящим. «Только вручную» — значит, отмечаете "
+            "людей сами.".format(a.get("title", "")), InlineKeyboardMarkup(rows))
+
+
+def _ach_people(ach_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кому выдана. Нажатие переключает: выдать или забрать."""
+    import achievements
+    import fantasy
+    import player_identity
+    a = achievements.get(ach_id)
+    if not a:
+        return _ach_list()
+    users = [str(u) for u in player_identity.linked_users()]
+    have = set(achievements.holders(ach_id))
+    # Кто-то мог получить значок и не быть опознан как игрок — не теряем его.
+    users = sorted(set(users) | have)
+    names = fantasy.display_names(users)
+    users.sort(key=lambda u: (names.get(u, "") or "я", u))
+    pages = max(1, (len(users) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = users[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(
+        ("✅ " if u in have else "▫️ ") + (names.get(u) or f"id {u}")[:BTN_TEXT - 3],
+        callback_data=f"admin:ach:give:{ach_id}:{u}:{page}")] for u in chunk]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "◀️", callback_data=f"admin:ach:who:{ach_id}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}",
+                                        callback_data="admin:ach:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(
+                "▶️", callback_data=f"admin:ach:who:{ach_id}:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"admin:ach:one:{ach_id}")])
+    return (f"👥 Кому выдана «{a['title']}»\n\nНажми на человека, чтобы выдать "
+            f"или забрать. Сейчас у {len(have)}.", InlineKeyboardMarkup(rows))
+
+
+async def handle_badge_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Картинка ачивки, присланная админом.
+
+    Берём и фото, и файл: фотографию Telegram пережмёт в JPEG и обрежет
+    прозрачность, а значку она чаще всего нужна — поэтому в подсказке просим
+    присылать файлом, но и фото принимаем, чтобы не спорить с человеком."""
+    import achievements
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_badge:
+        return
+    if not _is_admin(user):
+        _awaiting_badge.pop(user.id, None)
+        return
+    ach_id = _awaiting_badge.pop(user.id)
+    doc = msg.document
+    if doc is not None:
+        mime = doc.mime_type or ""
+        source = doc
+    elif msg.photo:
+        mime, source = "image/jpeg", msg.photo[-1]
+    else:
+        _awaiting_badge[user.id] = ach_id
+        await msg.reply_text("Это не картинка. Пришли PNG, JPEG или WebP.")
+        raise ApplicationHandlerStop
+    try:
+        handle = await source.get_file()
+        data = bytes(await handle.download_as_bytearray())
+    except Exception as e:
+        log.warning(f"Картинка ачивки {ach_id} не скачалась: {e}")
+        await msg.reply_text(f"⚠️ Не получилось забрать файл: {e}")
+        raise ApplicationHandlerStop
+    ok, note = await asyncio.to_thread(achievements.set_image, ach_id, data, mime)
+    if not ok:
+        _awaiting_badge[user.id] = ach_id
+        await msg.reply_text(note + "\n\nПришли другой файл.")
+        raise ApplicationHandlerStop
+    text, markup = await asyncio.to_thread(_ach_card, ach_id)
+    await msg.reply_text(f"{note}\n\n{text}", reply_markup=markup)
+    raise ApplicationHandlerStop
+
+
+async def handle_ach_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ввод по ачивке: название, описание, значок, аргумент правила."""
+    import achievements
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_ach:
+        return
+    if not _is_admin(user):
+        _awaiting_ach.pop(user.id, None)
+        return
+    pending = _awaiting_ach.pop(user.id)
+    text = (msg.text or "").strip()
+    kind, _, arg = pending.partition(":")
+
+    if kind == "new":
+        ach_id, note = await asyncio.to_thread(achievements.create, text)
+        if not ach_id:
+            _awaiting_ach[user.id] = pending
+            await msg.reply_text(note + "\n\nПришли другое название.")
+            raise ApplicationHandlerStop
+        screen, markup = await asyncio.to_thread(_ach_card, ach_id)
+        await msg.reply_text(f"{note}\n\n{screen}", reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    field = {"title": "title", "desc": "description", "emoji": "emoji",
+             "arg": "rule_arg"}.get(kind)
+    if not field:
+        raise ApplicationHandlerStop
+    if field == "title" and not text:
+        _awaiting_ach[user.id] = pending
+        await msg.reply_text("Название не может быть пустым.")
+        raise ApplicationHandlerStop
+    await asyncio.to_thread(achievements.update, int(arg), **{field: text})
+    screen, markup = await asyncio.to_thread(_ach_card, int(arg))
+    await msg.reply_text(screen, reply_markup=markup)
+    raise ApplicationHandlerStop
+
+
+async def _ach_admin(query, user, parts: List[str]) -> None:
+    """Кнопки раздела ачивок. Зовётся из общего админского обработчика."""
+    import achievements
+    what = parts[2] if len(parts) > 2 else "list"
+    arg = parts[3] if len(parts) > 3 else ""
+    uid = user.id
+
+    if what == "noop":
+        return
+    if what == "list":
+        _clear_pending(uid)
+        text, markup = await asyncio.to_thread(_ach_list)
+    elif what == "one":
+        text, markup = await asyncio.to_thread(_ach_card, int(arg))
+    elif what == "new":
+        _clear_pending(uid)
+        _awaiting_ach[uid] = "new"
+        text = ("🏅 Как назвать ачивку?\n\nНапример: «Бетатестер». Картинку и "
+                "описание добавим следующим шагом.\n\nПередумал — /start.")
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Назад", callback_data="admin:ach:list")]])
+    elif what in ("title", "desc", "emoji", "arg"):
+        _clear_pending(uid)
+        _awaiting_ach[uid] = f"{what}:{arg}"
+        asks = {
+            "title": "✏️ Новое название ачивки.",
+            "desc": ("📝 Описание — его человек увидит, нажав на значок. "
+                     "Скажи, за что он даётся."),
+            "emoji": ("😀 Значок-эмодзи. Показывается там, где картинку не "
+                      "вставить, — например в текстовых списках. Пришли один "
+                      "символ или «-», чтобы убрать."),
+            "arg": "🔢 Сколько игр нужно для этой ачивки? Пришли число.",
+        }
+        text = asks[what] + "\n\nПередумал — /start."
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
+    elif what == "img":
+        _clear_pending(uid)
+        _awaiting_badge[uid] = int(arg)
+        text = ("🖼 Пришли картинку значка.\n\nЛучше файлом, а не фото: "
+                "фотографию Telegram пережмёт в JPEG и потеряет прозрачность. "
+                "Подойдёт PNG, JPEG или WebP до "
+                f"{achievements.MAX_IMAGE_BYTES // 1024} КБ.\n\n"
+                "Передумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
+    elif what == "rule":
+        text, markup = await asyncio.to_thread(_ach_rules, int(arg))
+    elif what == "setrule" and len(parts) > 4:
+        rule = "" if parts[4] == "none" else parts[4]
+        await asyncio.to_thread(achievements.update, int(arg), rule=rule)
+        needs = achievements.RULES.get(rule, ("", False))[1]
+        if needs:
+            _clear_pending(uid)
+            _awaiting_ach[uid] = f"arg:{arg}"
+            text = ("🔢 Сколько игр нужно для этой ачивки? Пришли число."
+                    "\n\nПередумал — /start.")
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
+        else:
+            text, markup = await asyncio.to_thread(_ach_card, int(arg))
+    elif what == "who":
+        page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+        text, markup = await asyncio.to_thread(_ach_people, int(arg), page)
+    elif what == "give" and len(parts) > 4:
+        page = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+        target = parts[4]
+        if target in await asyncio.to_thread(achievements.holders, int(arg)):
+            await asyncio.to_thread(achievements.revoke, int(arg), target)
+        else:
+            await asyncio.to_thread(achievements.award, int(arg), target)
+        text, markup = await asyncio.to_thread(_ach_people, int(arg), page)
+    elif what == "onoff":
+        a = await asyncio.to_thread(achievements.get, int(arg)) or {}
+        await asyncio.to_thread(achievements.update, int(arg),
+                                active=0 if a.get("active") else 1)
+        text, markup = await asyncio.to_thread(_ach_card, int(arg))
+    elif what == "del":
+        a = await asyncio.to_thread(achievements.get, int(arg)) or {}
+        text = (f"🗑 Удалить «{a.get('title', '?')}»?\n\nЗначок пропадёт у всех "
+                f"{a.get('holders', 0)} человек, у кого он есть. Вернуть будет "
+                "нельзя — только завести заново и выдать снова.")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 Да, удалить",
+                                  callback_data=f"admin:ach:del2:{arg}")],
+            [InlineKeyboardButton("⬅️ Назад",
+                                  callback_data=f"admin:ach:one:{arg}")]])
+    elif what == "del2":
+        await asyncio.to_thread(achievements.delete, int(arg))
+        text, markup = await asyncio.to_thread(_ach_list)
+        text = "🗑 Удалил.\n\n" + text
+    elif what == "recount":
+        res = await asyncio.to_thread(achievements.recount)
+        text, markup = await asyncio.to_thread(_ach_list)
+        text = (f"♻️ Правил проверено: {res['rules']}, выдано новых: "
+                f"{res['given']}.\n\n" + text)
+    else:
+        text, markup = await asyncio.to_thread(_ach_list)
+
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def _recount_achievements() -> None:
+    """Раздаёт значки, которые выдаются по правилу.
+
+    Раз в час, а не каждый тик: правила ходят по всей статистике лиг, и
+    считать это каждые полминуты незачем — новых игр за это время не
+    появляется."""
+    global _ach_checked_at
+    now = time.time()
+    if now - _ach_checked_at < ACH_RECOUNT_SECONDS:
+        return
+    _ach_checked_at = now
+    import achievements
+    try:
+        res = await asyncio.to_thread(achievements.recount)
+    except Exception as e:
+        log.warning(f"Ачивки: пересчёт не прошёл: {e}")
+        return
+    if res.get("given"):
+        log.info(f"Ачивки: выдано по правилам {res['given']}")
+
+
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -9785,6 +10110,7 @@ async def _background_loop(app: Application) -> None:
             except Exception as e:
                 log.warning(f"Уборка доступов: {e}")
             await _send_group_repeats(app)
+            await _recount_achievements()
             await _catch_up_prices()
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.
@@ -10088,6 +10414,14 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_group_text), group=14)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_ach_text), group=15)
+    # Картинка значка приходит фотографией или файлом — своя группа, с
+    # текстовыми диалогами не пересекается.
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE,
+        handle_badge_photo), group=16)
     app.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(handle_prog_callback, pattern=r"^prog:"))
     app.add_handler(CallbackQueryHandler(handle_gamelink_callback, pattern=r"^gl:"))

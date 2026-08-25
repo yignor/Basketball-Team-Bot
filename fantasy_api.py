@@ -2275,11 +2275,16 @@ async def handle_standings(request: web.Request) -> web.Response:
 
     def _build_tables() -> Dict[str, Any]:
         out = {}
+        import achievements
         for m in enabled:
             rows = fantasy.season_standings_live(season["id"], mode=m)
             names = fantasy.display_names([r["user_id"] for r in rows])
+            # Значки берём одним запросом на всю таблицу: по запросу на строку
+            # зачёт из тридцати человек стоил бы тридцати походов в базу.
+            badges = achievements.shown_map([r["user_id"] for r in rows])
             for r in rows:
                 r["name"] = names.get(str(r["user_id"]), "")
+                r["badges"] = badges.get(str(r["user_id"]), [])
             out[m] = rows
         return out
 
@@ -2318,6 +2323,60 @@ def doors_state() -> List[Dict[str, Any]]:
     return out
 
 
+async def handle_badge_image(request: web.Request) -> web.StreamResponse:
+    """Картинка значка. Единственная ручка без подписи — и намеренно.
+
+    Тег <img> в WebView заголовков не ставит, подписать его нечем. Отдаём
+    только само изображение: ни имени, ни владельца, ни чего бы то ни было
+    личного здесь нет — это рисунок, лежащий в базе."""
+    import achievements
+    try:
+        ach_id = int(request.match_info.get("ach_id", "0"))
+    except ValueError:
+        raise web.HTTPNotFound()
+    data, kind = await asyncio.to_thread(achievements.image, ach_id)
+    if not data:
+        raise web.HTTPNotFound()
+    return web.Response(body=data, content_type=kind,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+async def handle_badges(request: web.Request) -> web.Response:
+    """Мои значки: что выдано, что показываю, и сколько можно показывать."""
+    import achievements
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
+    mine = await asyncio.to_thread(achievements.of_user, str(user["id"]))
+    return web.json_response({"badges": mine, "limit": achievements.SHOWN_LIMIT})
+
+
+async def handle_save_badges(request: web.Request) -> web.Response:
+    """Человек выбрал, какие значки показывать рядом со своим именем."""
+    import achievements
+    user = _auth_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if not _can_view(user):
+        return web.json_response({"error": "not_a_member"}, status=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad_json"}, status=400)
+    picked = body.get("shown") or []
+    if not isinstance(picked, list):
+        return web.json_response({"error": "bad_shown"}, status=400)
+    ok, note = await asyncio.to_thread(
+        achievements.set_shown, str(user["id"]), picked)
+    if not ok:
+        return web.json_response({"error": note}, status=400)
+    mine = await asyncio.to_thread(achievements.of_user, str(user["id"]))
+    return web.json_response({"ok": True, "badges": mine,
+                              "limit": achievements.SHOWN_LIMIT})
+
+
 async def handle_ping(request: web.Request) -> web.Response:
     """Проба двери. Без подписи и без данных: этим эндпоинтом человек
     проверяет, доходит ли он до сервера вообще, — и как раз в этот момент
@@ -2341,6 +2400,9 @@ def create_app(bot_token: str) -> web.Application:
         web.get("/fantasy/history", handle_history),
         web.get("/fantasy/admin", handle_admin_state),
         web.post("/fantasy/admin", handle_admin_action),
+        web.get("/fantasy/badges", handle_badges),
+        web.post("/fantasy/badges", handle_save_badges),
+        web.get("/fantasy/badge/{ach_id}", handle_badge_image),
         web.get("/fantasy/ping", handle_ping),
         web.get("/health", lambda r: web.json_response({"ok": True})),
     ])

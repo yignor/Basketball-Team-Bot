@@ -252,6 +252,32 @@
   .copydone { display: block; width: 100%; margin-top: 4px; padding: 11px;
               border-radius: 12px; border: 1px solid var(--sep, #2a2a2a);
               background: transparent; color: inherit; font-size: 15px; }
+  /* Ачивки: значок рядом с именем и разворот по нажатию. Размер держим
+     маленьким намеренно — строка зачёта должна оставаться строкой, а не
+     превращаться в полку с наградами. */
+  .badges { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+  .badge { width: 18px; height: 18px; border: 0; padding: 0; background: none;
+           cursor: pointer; line-height: 1; font-size: 15px; }
+  .badge img { width: 18px; height: 18px; object-fit: contain; display: block; }
+  .badgePick { display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+               border-radius: 12px; border: 2px solid transparent;
+               background: var(--secondary-bg); color: var(--text);
+               cursor: pointer; width: 100%; text-align: left; font-size: 15px;
+               margin-bottom: 6px; }
+  .badgePick.on { border-color: var(--button); }
+  .badgePick img { width: 30px; height: 30px; object-fit: contain; flex: none; }
+  .badgePick .bi { font-size: 24px; width: 30px; text-align: center; flex: none; }
+  .badgePick .bt { color: var(--hint); font-size: 12px; }
+  #badgeBox { position: fixed; inset: 0; z-index: 60; display: none;
+              align-items: center; justify-content: center; padding: 24px;
+              background: rgba(0, 0, 0, .6); }
+  #badgeBox.on { display: flex; }
+  #badgeCard { background: var(--bg); border-radius: 16px; padding: 22px;
+               max-width: 320px; text-align: center; }
+  #badgeCard img { width: 160px; height: 160px; object-fit: contain; }
+  #badgeCard .big { font-size: 96px; line-height: 1.1; }
+  #badgeCard h3 { margin: 12px 0 6px; font-size: 17px; }
+  #badgeCard p { margin: 0; font-size: 14px; color: var(--hint); white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -376,6 +402,12 @@
 
   <div id="saveBar" class="hidden">
     <button id="saveBtn" onclick="saveRoster()">Сохранить состав</button>
+  </div>
+
+  <!-- Значок во весь экран: нажал на иконку — увидел, за что она и как
+       выглядит целиком. Закрывается касанием мимо карточки. -->
+  <div id="badgeBox" onclick="closeBadge(event)">
+    <div id="badgeCard"></div>
   </div>
 
   <div id="msg">Загрузка…</div>
@@ -1598,6 +1630,7 @@
       const div = document.createElement('div'); div.className = 'rank';
       div.innerHTML = `<div class="place">${medal}</div>` +
         `<div class="info"><div class="pname">${esc(row.name || 'Участник')}` +
+        badgesHtml(row.badges) +
         ((row.history && row.history.length) ? '<span class="chev">›</span>' : '') + `</div></div>` +
         `<div class="pts">${row.points}</div>`;
       div.onclick = () => { openRank = (openRank === i ? -1 : i); renderStandings(); };
@@ -1640,6 +1673,120 @@
   let meRef = '';           // пусто — свой кабинет
   let meData = null;        // кабинет из payload (запасной вход)
 
+
+  // Своего toast в приложении нет — говорим окном Telegram, как везде.
+  function alertUser(text) {
+    if (tg && tg.showAlert) tg.showAlert(text); else alert(text);
+  }
+
+  // ─────────────────── ачивки ───────────────────
+  // Значки едут вместе со строками зачёта, поэтому отдельного запроса на
+  // таблицу нет. Свои — грузим один раз при заходе в кабинет.
+  let myBadges = null, badgeLimit = 3;
+
+  function badgeIcon(b) {
+    // Картинку тянем с того же сервера, что и данные: она лежит в базе бота.
+    // Не загрузилась (сервер моргнул) — показываем эмодзи, а не битый квадрат.
+    const fallback = esc(b.emoji || '🏅');
+    if (b.has_image && API) {
+      return `<img src="${esc(API)}/fantasy/badge/${b.id}" alt="${esc(b.title)}"` +
+             ` onerror="this.replaceWith(document.createTextNode('${fallback}'))">`;
+    }
+    return fallback;
+  }
+
+  function badgesHtml(list) {
+    if (!list || !list.length) return '';
+    return '<span class="badges">' + list.map(b =>
+      `<button class="badge" title="${esc(b.title)}"` +
+      ` onclick="openBadge(event, ${b.id})">${badgeIcon(b)}</button>`).join('') +
+      '</span>';
+  }
+
+  // Что показать в окне: ищем среди своих, потом среди тех, что приехали в
+  // таблице. Отдельный запрос ради описания делать незачем.
+  function findBadge(id) {
+    for (const b of (myBadges || [])) if (b.id === id) return b;
+    for (const key of Object.keys(tables || {})) {
+      for (const row of tables[key] || []) {
+        for (const b of (row.badges || [])) if (b.id === id) return b;
+      }
+    }
+    return null;
+  }
+
+  function openBadge(ev, id) {
+    if (ev) ev.stopPropagation();      // не разворачиваем строку зачёта
+    const b = findBadge(id);
+    if (!b) return;
+    haptic('light');
+    const art = (b.has_image && API)
+      ? `<img src="${esc(API)}/fantasy/badge/${b.id}" alt="">`
+      : `<div class="big">${esc(b.emoji || '🏅')}</div>`;
+    $('badgeCard').innerHTML = art + `<h3>${esc(b.title)}</h3>` +
+      `<p>${esc(b.description || 'Описание не заполнено.')}</p>`;
+    $('badgeBox').classList.add('on');
+  }
+  window.openBadge = openBadge;
+
+  function closeBadge(ev) {
+    // Клик по самой карточке окно не закрывает: по описанию хочется вести
+    // пальцем, и захлопывать его на этом движении — раздражает.
+    if (ev && ev.target.closest('#badgeCard')) return;
+    $('badgeBox').classList.remove('on');
+  }
+  window.closeBadge = closeBadge;
+
+  async function loadMyBadges() {
+    if (!live) return;
+    try {
+      const d = await api('/fantasy/badges');
+      myBadges = d.badges || [];
+      badgeLimit = d.limit || 3;
+    } catch (e) { myBadges = null; }
+  }
+
+  function myBadgesHtml() {
+    if (!myBadges || !myBadges.length) return '';
+    const shown = myBadges.filter(b => b.shown).length;
+    const rows = myBadges.map(b =>
+      `<button class="badgePick${b.shown ? ' on' : ''}"` +
+      ` onclick="toggleBadge(${b.id})">` +
+      (b.has_image && API
+        ? `<img src="${esc(API)}/fantasy/badge/${b.id}" alt="">`
+        : `<span class="bi">${esc(b.emoji || '🏅')}</span>`) +
+      `<span><div>${esc(b.title)}</div>` +
+      `<div class="bt">${esc(b.description || '')}</div></span></button>`).join('');
+    return `<div class="c2"><b>🏅 Мои ачивки</b>` +
+      `<div class="sub">Показываю ${shown} из ${badgeLimit}. ` +
+      `Нажми, чтобы включить или убрать из таблицы.</div>` +
+      rows + `</div>`;
+  }
+
+  async function toggleBadge(id) {
+    if (!myBadges) return;
+    const mine = myBadges.find(b => b.id === id);
+    if (!mine) return;
+    const want = myBadges.filter(b => b.shown).map(b => b.id);
+    const next = mine.shown ? want.filter(x => x !== id) : want.concat([id]);
+    if (next.length > badgeLimit) {
+      alertUser(`Показывать можно не больше ${badgeLimit} — сначала убери лишний.`);
+      return;
+    }
+    haptic('light');
+    try {
+      const d = await api('/fantasy/badges', {
+        method: 'POST', body: JSON.stringify({shown: next})});
+      myBadges = d.badges || myBadges;
+      badgeLimit = d.limit || badgeLimit;
+      // Зачёт держит значки в своих строках — перечитаем его при следующем
+      // заходе, иначе там останется прежний набор.
+      tables = {};
+      loadMe(meRef);
+    } catch (e) { alertUser('Не сохранилось, попробуй ещё раз.'); }
+  }
+  window.toggleBadge = toggleBadge;
+
   async function loadMe(ref) {
     const el = $('meBody');
     el.innerHTML = '<div class="banner">Загружаю…</div>';
@@ -1659,6 +1806,9 @@
       return;
     }
     renderMePicker(d);
+    // Свои значки грузим один раз за сеанс: они меняются редко, а кабинет
+    // открывают часто.
+    if (myBadges === null) await loadMyBadges();
     if (!d.found) {
       el.innerHTML = '<div class="banner">' + (d.reason === 'no_player'
         ? 'Пока не могу связать тебя с игроком команды. Напиши админу — он ' +
@@ -1666,7 +1816,9 @@
         : 'Не нашёл такого игрока.') + '</div>';
       return;
     }
-    el.innerHTML = meCards(d);
+    // Значки показываем только в СВОЁМ кабинете: админ смотрит чужой, и
+    // переключать там чужую видимость он не должен.
+    el.innerHTML = meCards(d) + (ref ? '' : myBadgesHtml());
   }
   window.loadMe = loadMe;
 
