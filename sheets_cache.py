@@ -1447,6 +1447,12 @@ def write_player_field(spreadsheet, player_row: int, field: str, value: str,
     живёт своей жизнью, и запись по устаревшему номеру попала бы к соседу."""
     meta = PLAYER_FIELDS.get(field)
     if not meta:
+        # Молча вернуть False нельзя: снаружи это неотличимо от «таблица не
+        # ответила», и опечатка в ключе живёт месяцами. Ровно так и вышло с
+        # «active_mark» вместо «active»: тренеру шло «сними руками», а в
+        # таблицу никто не ходил.
+        logger.error("Поле «%s» листу «Игроки» неизвестно. Есть: %s",
+                     field, ", ".join(sorted(PLAYER_FIELDS)))
         return False
     header, column, _ = meta
     ws = spreadsheet.worksheet(PLAYERS_SHEET_NAME)

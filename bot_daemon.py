@@ -8601,7 +8601,10 @@ def _drop_active(row: int) -> bool:
         log.warning(f"Снятие активности: таблица недоступна: {exc}")
         return False
     person = coach_payments.player_by_row(int(row)) or {}
-    return sheets_cache.write_player_field(book, int(row), "active_mark", "",
+    # Ключ поля — «active», а не имя колонки зеркала «active_mark». С неверным
+    # ключом запись возвращала False, ни разу не сходив в таблицу: тренеру
+    # приходило «сними руками», хотя лист был в полном порядке.
+    return sheets_cache.write_player_field(book, int(row), "active", "",
                                            person.get("title", ""))
 
 

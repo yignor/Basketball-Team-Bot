@@ -476,6 +476,41 @@ def test_start_clears_every_dialog() -> None:
           "правка времени спорного закрывает чужой диалог")
 
 
+def test_every_call_site_names_a_real_field() -> None:
+    """Все, кто пишет в лист «Игроки», зовут поле существующим ключом.
+
+    25.08.2026 отказ от тренировок сопровождался «отметку снять не вышло, сними
+    руками», хотя таблица была в порядке: в вызов уходило «active_mark» — имя
+    колонки зеркала вместо ключа поля «active». Неизвестный ключ возвращал
+    False, ни разу не сходив в Google, и снаружи это выглядело как сбой
+    таблицы. Опечатка такого рода не ловится ничем, кроме такой проверки."""
+    print("\n=== поля, в которые пишем, существуют ===")
+    import re
+    import sheets_cache as sc
+
+    known = set(sc.PLAYER_FIELDS)
+    bad = []
+    for path in sorted(ROOT.glob("*.py")):
+        src = path.read_text()
+        # Ключ поля — третий аргумент; берём только записанные строкой.
+        for m in re.finditer(r"write_player_field\(\s*[^,]+,\s*[^,]+,\s*"
+                             r"[\"']([a-z_]+)[\"']", src):
+            if m.group(1) not in known:
+                bad.append(f"{path.name}: «{m.group(1)}»")
+    check(not bad, f"неизвестных полей нет: {bad}")
+
+    # И наоборот: снятие активности должно писать пустоту в известное поле.
+    src = (ROOT / "bot_daemon.py").read_text()
+    body = src[src.index("def _drop_active"):]
+    body = body[:body.index("\n\n\n")]
+    check('"active"' in body, "снятие активности зовёт поле «active»")
+    # Комментарии выбрасываем: в них «active_mark» упомянут намеренно — там
+    # объяснено, из-за чего всё сломалось.
+    code = "\n".join(l.split("#")[0] for l in body.splitlines())
+    check("active_mark" not in code,
+          "имени колонки зеркала в самом вызове не осталось")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -491,6 +526,7 @@ def main() -> int:
     test_offline_players()
     test_manual_reminder_asks_before_repeat()
     test_start_clears_every_dialog()
+    test_every_call_site_names_a_real_field()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
