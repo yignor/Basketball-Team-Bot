@@ -79,6 +79,20 @@ def get_identities(tg_user_id: Any) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def user_of(source: str, player_id: Any) -> str:
+    """Кому в Telegram принадлежит этот профиль лиги. Пусто — никому.
+
+    Обратная сторона get_identities: карточка игрока в приложении знает про
+    человека только его номер в лиге, а значки выданы telegram-пользователю."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            """SELECT tg_user_id FROM player_identities
+                WHERE source = ? AND player_id = ? LIMIT 1""",
+            (str(source), str(player_id))).fetchone()
+    return str(row["tg_user_id"]) if row else ""
+
+
 def linked_users() -> List[str]:
     """Telegram-id всех, кто привязал хотя бы один профиль лиги."""
     sheets_cache.init_db()

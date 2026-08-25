@@ -2165,7 +2165,23 @@ async def handle_player(request: web.Request) -> web.Response:
     psrcs = {fantasy_stats.parse_ref(lr)[0] for lr in fantasy_stats.expand_refs([ref])}
     own = [s for s in scopes if s.get("source") in psrcs]
     profile["tournament"] = fantasy.scopes_title(own or scopes)
+    # Значки принадлежат telegram-человеку, а карточка знает только номер в
+    # лиге — переводим через привязку профилей. Не привязан (а таких в пуле
+    # большинство: это игроки соперника) — значков просто нет.
+    profile["badges"] = await asyncio.to_thread(_badges_of_ref, ref)
     return web.json_response(profile)
+
+
+def _badges_of_ref(ref: str) -> List[Dict[str, Any]]:
+    """Видимые значки того, кому принадлежит этот профиль лиги."""
+    import achievements
+    import player_identity
+    for one in fantasy_stats.expand_refs([ref]):
+        source, player_id = fantasy_stats.parse_ref(one)
+        owner = player_identity.user_of(source, player_id)
+        if owner:
+            return achievements.shown_map([owner]).get(owner, [])
+    return []
 
 
 def _my_player_row(user: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -1546,7 +1546,14 @@
 
   function renderPlayer() {
     const s = P.season;
+    // textContent, а не innerHTML: имя приходит из лиги, и вставлять его как
+    // разметку нельзя. Значки дописываем отдельным узлом.
     $('pTitle').textContent = (P.number ? '№' + P.number + ' ' : '') + P.name;
+    if (P.badges && P.badges.length) {
+      const holder = document.createElement('span');
+      holder.innerHTML = badgesHtml(P.badges);
+      $('pTitle').appendChild(holder);
+    }
     $('pSub').textContent = P.tournament || '';
     const b = $('pBody');
 
@@ -1707,6 +1714,9 @@
   // таблице. Отдельный запрос ради описания делать незачем.
   function findBadge(id) {
     for (const b of (myBadges || [])) if (b.id === id) return b;
+    for (const b of ((typeof P !== 'undefined' && P && P.badges) || [])) {
+      if (b.id === id) return b;
+    }
     for (const key of Object.keys(tables || {})) {
       for (const row of tables[key] || []) {
         for (const b of (row.badges || [])) if (b.id === id) return b;

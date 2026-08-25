@@ -167,6 +167,39 @@ async def test_table_gets_badges_in_one_go(bd, ach_id: int) -> None:
     check("image" not in got[OTHER][0], "картинку в таблицу не тащим, только признак")
 
 
+async def test_player_card_finds_the_owner(bd, ach_id: int) -> None:
+    """Значок виден и в карточке игрока — через привязку профиля лиги.
+
+    Карточка знает человека только по номеру в лиге, а значок выдан
+    telegram-пользователю. Без обратного поиска значки в карточке не появились
+    бы вовсе, и «везде в приложении» осталось бы обещанием."""
+    print("\n=== значки в карточке игрока ===")
+    import achievements as ach
+    import player_identity
+    import sheets_cache
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO player_identities (tg_user_id, source, "
+            "player_id, linked_at) VALUES (?, 'infobasket', '55555', ?)",
+            (OTHER, now))
+        conn.commit()
+
+    check(player_identity.user_of("infobasket", "55555") == OTHER,
+          "профиль лиги нашёл своего человека")
+    check(not player_identity.user_of("infobasket", "00000"),
+          "чужой профиль никому не принадлежит")
+
+    ach.set_shown(OTHER, [ach_id])
+    import fantasy_api
+    got = fantasy_api._badges_of_ref("ib:36502:55555")
+    check(len(got) == 1 and got[0]["id"] == ach_id,
+          f"в карточке виден его значок: {got}")
+    check(fantasy_api._badges_of_ref("ib:36502:00000") == [],
+          "у чужого игрока значков нет")
+
+
 async def test_image_is_checked(bd, ach_id: int) -> None:
     """Картинку принимаем не любую: она грузится у каждого в таблице."""
     print("\n=== картинка значка ===")
@@ -234,6 +267,7 @@ async def run() -> None:
     await test_rule_gives_it_out(bd, ach_id)
     await test_person_chooses_what_is_visible(bd, ach_id)
     await test_table_gets_badges_in_one_go(bd, ach_id)
+    await test_player_card_finds_the_owner(bd, ach_id)
     await test_image_is_checked(bd, ach_id)
     await test_delete_takes_awards(bd)
     await test_only_admin_gets_in(bd)
