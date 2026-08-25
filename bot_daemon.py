@@ -9521,6 +9521,10 @@ async def _catch_up_prices() -> None:
                      f"двинулось {len(res['changes'])}, записано {res.get('updated')}")
 
 
+# Докуда открыт вечерний хвост для разбора только что сыгранного матча.
+NIGHT_TAIL_MINUTE = 30
+
+
 async def _personal_digests(app: Application) -> None:
     """«Присылать после каждой игры» — настройка была, отправки не было.
 
@@ -9531,10 +9535,18 @@ async def _personal_digests(app: Application) -> None:
     # Протокол игры приходит когда угодно — 10.08 он лёг в 04:31 по Москве, и
     # люди получили разбор ночью. Личные сообщения ждут утра: раньше девяти
     # никто их не ждёт, а телефон звенит.
-    hour = get_moscow_time().hour
+    #
+    # Но окно до 22:00 отрезало и то, чего ждут: игры начинаются в 21:10 и
+    # 21:50, заканчиваются к полуночи, и разбор своего же матча приходил
+    # только на следующее утро. Поэтому вечерний хвост до 00:30 открыт — но
+    # ТОЛЬКО для игры, которую человек только что отыграл. Чужой протокол,
+    # приехавший под утро, по-прежнему ждёт девяти.
+    now = get_moscow_time()
     quiet_from = sheets_cache.get_int_setting("quiet_hour_to", 9)
     quiet_to = sheets_cache.get_int_setting("quiet_hour_from", 22)
-    if not (quiet_from <= hour < quiet_to):
+    daytime = quiet_from <= now.hour < quiet_to
+    tail = now.hour >= quiet_to or (now.hour == 0 and now.minute < NIGHT_TAIL_MINUTE)
+    if not daytime and not tail:
         return
     try:
         todo = await asyncio.to_thread(personal_game.pending)
@@ -9542,6 +9554,10 @@ async def _personal_digests(app: Application) -> None:
         log.warning(f"Личные разборы: список не собрался: {e}")
         return
     for item in todo:
+        # Поздним вечером — только по своей свежей игре; остальное подождёт утра.
+        if not daytime and not await asyncio.to_thread(
+                personal_game.just_played, item["source"], item["game"], now):
+            continue
         try:
             text = await asyncio.to_thread(
                 personal_game.digest, item["source"], item["title"],

@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 # заваливать человека разборами матчей, о которых он давно забыл.
 MAX_AGE_DAYS = 3
 
+# Матч, который человек ТОЛЬКО ЧТО отыграл: начался не больше этого срока
+# назад. Считаем от начала, а не от появления протокола: 10.08.2026 протокол
+# лёг в 04:31 — через четырнадцать часов после дневной игры, и по «протокол
+# только что пришёл» разбор ушёл бы ночью.
+FRESH_AFTER_START_HOURS = 4
+
 # Сколько предыдущих игр берём за «обычно».
 BASE_GAMES = 5
 
@@ -47,6 +53,51 @@ def _rows(source: str, player_id: str) -> List[Dict[str, Any]]:
             """SELECT * FROM game_player_stats
                WHERE source = ? AND player_id = ?
                ORDER BY game_date, game_id""", (source, str(player_id)))]
+
+
+def started_at(source: str, game_id: Any) -> Optional[datetime]:
+    """Когда матч начался по расписанию лиги. МСК; не нашли — None.
+
+    Времени начала в статистике нет, оно живёт в служебных записях об опросе и
+    анонсе. Форматы у лиг разошлись: SLPRO пишет id с приставкой и дату по
+    ISO, Инфобаскет — голый id и дату «22.08.2026». Разбираем оба, иначе
+    правило «только что отыграл» молча не сработает для одной из лиг."""
+    from datetime_utils import MOSCOW_TZ
+    sheets_cache.init_db()
+    plain = str(game_id or "").strip()
+    if not plain:
+        return None
+    ids = {plain, f"{source}-{plain}", plain.split("-")[-1]}
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT game_date, game_time FROM service_records
+                WHERE deleted = 0 AND game_time != '' AND game_id IN (%s)
+                ORDER BY updated_at DESC""" % ",".join("?" * len(ids)),
+            tuple(ids)).fetchall()
+    for row in rows:
+        day, clock = str(row["game_date"] or ""), str(row["game_time"] or "")
+        for fmt in ("%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M"):
+            try:
+                got = datetime.strptime(f"{day} {clock}", fmt)
+            except ValueError:
+                continue
+            return got.replace(tzinfo=MOSCOW_TZ)
+    return None
+
+
+def just_played(source: str, game: Dict[str, Any],
+                now: Optional[datetime] = None) -> bool:
+    """Правда ли, что человек только что отыграл этот матч.
+
+    Нужно для позднего вечера: игры начинаются и в 21:50, заканчиваются к
+    полуночи, и разбор в это время — не помеха, а то, чего ждут. А протокол,
+    приехавший под утро по вчерашней игре, ждёт девяти часов."""
+    from datetime_utils import get_moscow_time
+    started = started_at(source, game.get("game_id"))
+    if not started:
+        return False
+    passed = ((now or get_moscow_time()) - started).total_seconds() / 3600.0
+    return 0 <= passed <= FRESH_AFTER_START_HOURS
 
 
 def latest_game(source: str, player_id: str,

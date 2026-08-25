@@ -308,11 +308,79 @@ def test_note_tells_about_modelled_time() -> None:
     check(len(notes) == 1, "лишних оговорок не добавилось")
 
 
+def test_digest_waits_for_a_decent_hour() -> None:
+    """Разбор своей игры не ждёт утра, чужой ночной протокол — ждёт.
+
+    Жалоба 25.08.2026: матч был 24-го в 21:10, статистика легла в 22:46, а
+    разбор пришёл в 9:00 следующего дня. Окно личных сообщений кончалось в
+    22:00, и после вечерней игры разбор не мог прийти в тот же день никогда:
+    из четырнадцати разных времён начала пять приходятся на 20:00 и позже.
+
+    Обратный случай тоже настоящий: 10.08.2026 протокол дневной игры лёг в
+    04:31, и разбор ушёл ночью. Его придерживать по-прежнему надо."""
+    print("\n=== разбор и тихие часы ===")
+    import personal_game
+    from datetime import datetime, timedelta
+    from datetime_utils import MOSCOW_TZ
+
+    sheets_cache.init_db()
+    now_iso = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM service_records WHERE game_id IN "
+                     "('slpro-4586','1082250')")
+        # SLPRO: приставка в id и дата по ISO. Инфобаскет: голый id и ДД.ММ.ГГГГ.
+        conn.execute(
+            "INSERT INTO service_records (unique_key, logged_at, created_at, "
+            "updated_at, data_type, game_id, game_date, game_time, deleted) "
+            "VALUES ('a', ?, ?, ?, 'АНОНС_ИГРА_SLPRO', 'slpro-4586', "
+            "'2026-08-24', '21:10', 0)", (now_iso, now_iso, now_iso))
+        conn.execute(
+            "INSERT INTO service_records (unique_key, logged_at, created_at, "
+            "updated_at, data_type, game_id, game_date, game_time, deleted) "
+            "VALUES ('b', ?, ?, ?, 'ОПРОС_ИГРА', '1082250', "
+            "'22.08.2026', '14:00', 0)", (now_iso, now_iso, now_iso))
+        conn.commit()
+
+    started = personal_game.started_at("slpro", "4586")
+    check(started is not None and started.hour == 21,
+          f"время начала найдено по id без приставки: {started}")
+    check(personal_game.started_at("infobasket", "1082250") is not None,
+          "и у второй лиги, с другим форматом даты")
+
+    evening = datetime(2026, 8, 24, 22, 46, tzinfo=MOSCOW_TZ)
+    check(personal_game.just_played("slpro", {"game_id": "4586"}, evening),
+          "через полтора часа после начала — «только что отыграл»")
+
+    midnight = datetime(2026, 8, 25, 0, 25, tzinfo=MOSCOW_TZ)
+    check(personal_game.just_played("slpro", {"game_id": "4586"}, midnight),
+          "и в 00:25 ещё считается своей игрой")
+
+    late = datetime(2026, 8, 25, 4, 31, tzinfo=MOSCOW_TZ)
+    check(not personal_game.just_played("slpro", {"game_id": "4586"}, late),
+          "а в 04:31 уже нет — это ночь, а не после матча")
+
+    # Дневная игра, протокол под утро: ровно случай 10.08.
+    night = datetime(2026, 8, 23, 4, 31, tzinfo=MOSCOW_TZ)
+    check(not personal_game.just_played("infobasket", {"game_id": "1082250"}, night),
+          "ночной протокол дневной игры свежим не считается")
+
+    check(personal_game.FRESH_AFTER_START_HOURS >= 3,
+          "запаса хватает на матч с овертаймом и задержкой протокола")
+
+    # Хвост в демоне кончается на 00:30 — иначе правило некуда приложить.
+    src = (ROOT / "bot_daemon.py").read_text()
+    check("NIGHT_TAIL_MINUTE = 30" in src, "вечерний хвост открыт до 00:30")
+    body = src[src.index("async def _personal_digests"):]
+    body = body[:body.index("\nasync def ", 1)]
+    check("just_played" in body, "поштучная проверка стоит в отправке")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
     test_broken_anchors_do_not_squash_the_game()
     test_note_tells_about_modelled_time()
+    test_digest_waits_for_a_decent_hour()
     test_only_mine()
     test_link_opens_before_the_action()
     test_bad_goes_after_good()
