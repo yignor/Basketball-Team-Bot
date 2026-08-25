@@ -310,6 +310,46 @@ def test_confirmed_text() -> None:
     check("0 ₽" not in lone, f"нулевой суммы в тексте нет: {lone!r}"[:110])
 
 
+def test_no_debt_for_an_untracked_month() -> None:
+    """За месяц до начала учёта долгов нет — ни в списках, ни в письмах.
+
+    Жалоба 25.08.2026: в вопросе «будешь заниматься в сентябре?» приехала
+    строка «за тобой 5 500 ₽ за август», хотя за август тренер ничего не ждёт.
+    Причина не в вопросе: сумма взноса проставлена в листе всем заранее, и
+    любой месяц до сентября 2026 выглядел как месяц, за который никто не
+    заплатил."""
+    print("\n=== за неучитываемый месяц долга нет ===")
+    import training_dues as td
+    seed_player(603, "Четырнадцатый")
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_season = 5500 WHERE row_index = 603")
+        conn.commit()
+
+    before = td.FIRST_PERIOD[:4] + "-08" if td.FIRST_PERIOD.endswith("-09") else "2026-01"
+    check(not td.counts(before), f"{before} — до начала учёта")
+    check(td.debtors(before) == [],
+          f"должников за {td.month_title(before)} нет: {len(td.debtors(before))}")
+
+    # А по учитываемому месяцу счёт по-прежнему работает — иначе «починили»
+    # тем, что выключили.
+    owing = td.debtors(td.FIRST_PERIOD)
+    check(any(int(r["row"]) == 603 for r in owing),
+          f"за {td.month_title(td.FIRST_PERIOD)} должники считаются: {len(owing)}")
+
+    # Вопрос про следующий месяц не должен упоминать несуществующий долг.
+    rows = td.status(td.FIRST_PERIOD, True)
+    mine = [r for r in rows if int(r["row"]) == 603] or rows
+    debts = {r["row"]: int(r["debt"] or 0) for r in td.debtors(before)}
+    text = td.ask_text(td.FIRST_PERIOD, mine[0], debts.get(603, 0))
+    check(td.month_title(before) not in text,
+          f"про {td.month_title(before)} в вопросе ни слова")
+    check("5 500" not in text, f"и суммы долга нет: {text!r}"[:120])
+
+    # Тренеру про такой месяц отвечаем честно, а не «внесли все».
+    report = td.coach_report(before)
+    check("не ведём" in report, f"отчёт объясняет, а не врёт: {report[:70]}")
+
+
 def test_grouping() -> None:
     """Долги разбиты по играм и по месяцам, а не одним списком.
 
@@ -422,6 +462,7 @@ def main() -> int:
     test_edit_manual_debt()
     test_mark_paid_is_idempotent()
     test_confirmed_text()
+    test_no_debt_for_an_untracked_month()
     test_grouping()
     test_debt_names_the_game()
     test_debt_title_without_tournament()
