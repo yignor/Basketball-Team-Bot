@@ -297,6 +297,33 @@ def image(ach_id: int) -> Tuple[Optional[bytes], str]:
     return bytes(row["image"]), str(row["image_type"] or "image/png")
 
 
+def image_size(ach_id: int) -> int:
+    """Сколько весит картинка значка, байт. Нет — ноль."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute("SELECT LENGTH(image) AS n FROM achievements WHERE id = ?",
+                           (int(ach_id),)).fetchone()
+    return int((row["n"] if row else 0) or 0)
+
+
+def reshrink(ach_id: int) -> Tuple[bool, str]:
+    """Ужимает уже лежащую в базе картинку.
+
+    Нужно для значков, залитых до появления сжатия: перезаливать файл ради
+    этого — лишняя работа человеку, который его уже прислал."""
+    data, kind = image(ach_id)
+    if not data:
+        return False, "У этой ачивки нет картинки."
+    small, out_kind, note = shrink(data, kind)
+    if len(small) >= len(data):
+        return False, "Ужимать нечего — картинка уже лёгкая."
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE achievements SET image = ?, image_type = ? WHERE id = ?",
+                     (sqlite3.Binary(small), out_kind, int(ach_id)))
+        conn.commit()
+    return True, note or "Готово."
+
+
 # ─────────────────────────── выдача ───────────────────────────
 
 

@@ -9533,15 +9533,22 @@ def _ach_card(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
         return _ach_list()
     lines = [f"🏅 {a['title']}", ""]
     lines.append(a["description"] or "Описания нет — человек увидит только картинку.")
+    weight = achievements.image_size(ach_id) if a["has_image"] else 0
+    heavy = weight > achievements.STORE_SIDE * 200      # ~50 КБ на значок хватает
     lines += ["", f"⚙️ Выдаётся: {a['rule_title']}",
-              f"🖼 Картинка: {'загружена' if a['has_image'] else 'нет'}",
+              f"🖼 Картинка: {str(weight // 1024) + ' КБ' if weight else 'нет'}"
+              + (" — тяжеловата, грузится у каждого" if heavy else ""),
               f"😀 Запасной значок: {a['emoji'] or 'нет'}",
               f"👥 У кого есть: {a['holders']}"]
     if not a["active"]:
         lines += ["", "⚠️ Выключена — людям не показывается."]
     rows = [
         [InlineKeyboardButton("🖼 Загрузить картинку",
-                              callback_data=f"admin:ach:img:{ach_id}")],
+                              callback_data=f"admin:ach:img:{ach_id}")]]
+    if heavy:
+        rows.append([InlineKeyboardButton(
+            "🗜 Ужать картинку", callback_data=f"admin:ach:squeeze:{ach_id}")])
+    rows += [
         [InlineKeyboardButton("✏️ Название", callback_data=f"admin:ach:title:{ach_id}"),
          InlineKeyboardButton("📝 Описание", callback_data=f"admin:ach:desc:{ach_id}")],
         [InlineKeyboardButton("😀 Значок", callback_data=f"admin:ach:emoji:{ach_id}"),
@@ -9779,6 +9786,11 @@ async def _ach_admin(query, user, parts: List[str]) -> None:
                 "Передумал — /start.")
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
             "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
+    elif what == "squeeze":
+        ok, note = await asyncio.to_thread(achievements.reshrink, int(arg))
+        text, markup = await asyncio.to_thread(_ach_card, int(arg))
+        text = note + "\n\n" + text
+
     elif what == "rule":
         text, markup = await asyncio.to_thread(_ach_rules, int(arg))
     elif what == "setrule" and len(parts) > 4:

@@ -307,8 +307,11 @@ async def test_image_is_checked(bd, ach_id: int) -> None:
     print("\n=== картинка значка ===")
     import achievements as ach
 
+    # Заголовок PNG есть, а данных за ним нет — Pillow такое не откроет.
+    # Проверяем запасной путь: значок важнее аккуратности, кладём как прислали.
     ok, note = ach.set_image(ach_id, b"\x89PNG\r\n\x1a\n" + b"0" * 100, "image/png")
-    check(ok, f"PNG принят: {note}")
+    check(ok and "как прислали" in note,
+          f"нечитаемую картинку не теряем: {note}")
     data, kind = ach.image(ach_id)
     check(data and kind == "image/png", "и достаётся обратно тем же типом")
 
@@ -320,6 +323,22 @@ async def test_image_is_checked(bd, ach_id: int) -> None:
 
     data, _ = ach.image(ach_id)
     check(data and data.startswith(b"\x89PNG"), "прежняя картинка на месте")
+
+    # Ужатие: кладём заведомо большую картинку и проверяем, что она худеет.
+    from PIL import Image
+    import io as _io
+    buf = _io.BytesIO()
+    Image.new("RGB", (1400, 1400), (20, 90, 160)).save(buf, format="JPEG", quality=95)
+    fat = buf.getvalue()
+    ach.set_image(ach_id, fat, "image/jpeg")
+    check(ach.image_size(ach_id) < len(fat),
+          f"при загрузке ужали: {len(fat)} -> {ach.image_size(ach_id)}")
+    small = Image.open(_io.BytesIO(ach.image(ach_id)[0]))
+    check(max(small.size) <= ach.STORE_SIDE,
+          f"и по стороне уложились в {ach.STORE_SIDE}: {small.size}")
+
+    ok, note = ach.reshrink(ach_id)
+    check(not ok and "уже" in note, f"второй раз жать нечего: {note}")
 
 
 async def test_delete_takes_awards(bd) -> None:
