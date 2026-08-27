@@ -9615,8 +9615,8 @@ def _ach_arg_ask(ach_id: int) -> Tuple[str, List[List[InlineKeyboardButton]]]:
     kind = achievements.RULE_ARG_KIND.get(str(a.get("rule") or ""), "")
     if kind == "date":
         today = get_moscow_time().date().strftime("%d.%m.%Y")
-        return (("📅 До какого дня считать участие?\n\nЗначок получат те, кто "
-                 "собрал первый состав РАНЬШЕ этого дня — сам день не входит. "
+        return (("📅 По какой день считать участие?\n\nЗначок получит каждый, "
+                 "кто хоть раз собирал состав по этот день включительно. "
                  f"Пришли дату: «{today}».\n\n"
                  "Оставить без границы — «-»: тогда значок достанется и тем, "
                  "кто придёт в фэнтези завтра."),
@@ -9833,6 +9833,50 @@ async def _ach_admin(query, user, parts: List[str]) -> None:
         text, markup = await asyncio.to_thread(_ach_list)
 
     await query.edit_message_text(text, reply_markup=markup)
+
+
+async def _tell_about_badges(app: Application) -> None:
+    """Пишет человеку, что ему выдали значок, и показывает его целиком.
+
+    Картинкой, а не текстом: значок — вещь наглядная, и «вам выдана ачивка
+    ПЕРВОПРОХОДЕЦ» без самой картинки выглядит как системное уведомление, а не
+    как награда.
+
+    Ночью молчим по тому же правилу, что и личные разборы: пересчёт правил
+    идёт круглые сутки, и значок, выданный в четыре утра, разбудил бы человека
+    ради украшения."""
+    import achievements
+    from datetime_utils import get_moscow_time
+    now = get_moscow_time()
+    quiet_from = sheets_cache.get_int_setting("quiet_hour_to", 9)
+    quiet_to = sheets_cache.get_int_setting("quiet_hour_from", 22)
+    if not (quiet_from <= now.hour < quiet_to):
+        return
+    try:
+        todo = await asyncio.to_thread(achievements.unannounced)
+    except Exception as e:
+        log.warning(f"Ачивки: список неотправленных не собрался: {e}")
+        return
+    for item in todo:
+        ach_id, uid = int(item["ach_id"]), str(item["user_id"])
+        await asyncio.to_thread(achievements.mark_told, ach_id, uid)
+        mark = item.get("emoji") or "🏅"
+        caption = f"{mark} Тебе выдана ачивка «{item['title']}»"
+        if item.get("description"):
+            caption += f"\n\n{item['description']}"
+        caption += ("\n\nПоказать её рядом со своим именем в таблице или "
+                    "убрать — в фэнтези, вкладка «Мой кабинет».")
+        try:
+            data, _kind = await asyncio.to_thread(achievements.image, ach_id)
+            if data:
+                await app.bot.send_photo(chat_id=int(uid),
+                                         photo=io.BytesIO(data), caption=caption)
+            else:
+                await app.bot.send_message(chat_id=int(uid), text=caption)
+        except Exception as e:
+            # Заблокировал бота, закрыл личку, ушёл из телеграма — отметка уже
+            # стоит, второй раз долбиться не будем.
+            log.info(f"Ачивка {ach_id} не доставлена {uid}: {e}")
 
 
 async def _recount_achievements() -> None:
@@ -10159,6 +10203,7 @@ async def _background_loop(app: Application) -> None:
                 log.warning(f"Уборка доступов: {e}")
             await _send_group_repeats(app)
             await _recount_achievements()
+            await _tell_about_badges(app)
             await _catch_up_prices()
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.

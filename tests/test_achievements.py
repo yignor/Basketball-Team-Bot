@@ -14,6 +14,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, List
 
@@ -28,6 +29,20 @@ TMP = Path(tempfile.mkdtemp(prefix="ach-test-")) / "bot.db"
 ADMIN = FakeUser(uid=900100, username="boss")
 BOT = FakeBot()
 ME, OTHER = "900100", "900200"
+
+# Однопиксельный PNG — настоящий, чтобы ужатие работало как в бою.
+PNG_PIXEL = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000002000000020806000000"
+    "72b60d240000001549444154789c63fccfc0f09f818181810944803000"
+    "1f1702020247b3140000000049454e44ae426082")
+
+
+class FakeApp:
+    """У демона на руках Application, а нам нужен только его бот."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
 
 bad: List[str] = []
 
@@ -139,17 +154,25 @@ async def test_cutoff_limits_the_rule(bd, ach_id: int) -> None:
     everyone = ach._fantasy_users()
     check("900300" in everyone, "без границы новичок тоже участник")
 
-    old_hands = ach._fantasy_users(today)
-    check(ME in old_hands and OTHER in old_hands, "июльские попали")
-    check("900300" not in old_hands, "сегодняшний новичок — нет")
+    # «По сегодняшний день» — включительно: тот, кто собрал состав сегодня,
+    # участвовал, и значок за участие ему положен.
+    by_today = ach._fantasy_users(today)
+    check(ME in by_today and OTHER in by_today, "июльские попали")
+    check("900300" in by_today, "и сегодняшний новичок тоже — день входит")
+
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    by_yesterday = ach._fantasy_users(yesterday)
+    check("900300" not in by_yesterday,
+          "а по вчерашний день его уже нет — граница работает")
+    check(ME in by_yesterday, "июльские при этом остались")
 
     ach.update(ach_id, rule_arg=today)
-    res = ach.recount()
-    check(set(ach.holders(ach_id)) == {ME, OTHER},
-          f"значок ушёл только старожилам: {sorted(ach.holders(ach_id))}")
+    ach.recount()
+    check(set(ach.holders(ach_id)) == {ME, OTHER, "900300"},
+          f"значок у всех, кто хоть раз играл: {sorted(ach.holders(ach_id))}")
 
     got = ach.get(ach_id) or {}
-    check("до" in got.get("rule_title", ""),
+    check("по" in got.get("rule_title", ""),
           f"на карточке видно границу: {got.get('rule_title')}")
 
 
@@ -158,7 +181,8 @@ async def test_rule_gives_it_out(bd, ach_id: int) -> None:
     print("\n=== правило выдаёт само ===")
     import achievements as ach
 
-    check(set(ach.holders(ach_id)) == {ME, OTHER}, "значок у тех, кто играл")
+    check(set(ach.holders(ach_id)) == {ME, OTHER, "900300"},
+          "значок у тех, кто играл")
     again = ach.recount()
     check(again["given"] == 0, "повторный пересчёт ничего не задваивает")
 
@@ -195,13 +219,52 @@ async def test_person_chooses_what_is_visible(bd, ach_id: int) -> None:
           "пересчёт не вернул спрятанное в таблицу за спиной человека")
 
 
+async def test_person_is_told_about_the_badge(bd, ach_id: int) -> None:
+    """Человеку пишут о выданном значке — один раз и картинкой."""
+    print("\n=== письмо о значке ===")
+    import achievements as ach
+
+    ach.hush()                       # старое считаем рассказанным
+    check(not ach.unannounced(), "старые выдачи людям задним числом не летят")
+
+    fresh, _ = ach.create("Свежая", description="За то, что дочитал")
+    ach.set_image(fresh, PNG_PIXEL, "image/png")
+    ach.award(fresh, ME)
+    todo = ach.unannounced()
+    check(len(todo) == 1 and todo[0]["user_id"] == ME,
+          f"в очереди ровно одна выдача: {len(todo)}")
+
+    before = len(BOT.photos)
+    await bd._tell_about_badges(FakeApp(BOT))
+    sent = BOT.photos[before:]
+    check(len(sent) == 1, f"ушла одна картинка: {len(sent)}")
+    if sent:
+        cap = sent[0].get("caption", "")
+        check("Свежая" in cap, f"название названо: {cap.splitlines()[0]}")
+        check("дочитал" in cap, "описание приложено")
+        check("Мой кабинет" in cap, "сказано, где это спрятать")
+    check(not ach.unannounced(), "очередь пуста — второй раз не напишем")
+
+    await bd._tell_about_badges(FakeApp(BOT))
+    check(len(BOT.photos) - before == 1, "повторный проход молчит")
+
+    # Без картинки — просто текстом, а не молчанием.
+    plain, _ = ach.create("Без картинки")
+    ach.award(plain, ME)
+    было = len(BOT.sent)
+    await bd._tell_about_badges(FakeApp(BOT))
+    check(len(BOT.sent) > было, "значок без картинки уходит текстом")
+
+
 async def test_table_gets_badges_in_one_go(bd, ach_id: int) -> None:
     """Для таблицы значки собираются одним запросом, не по строке на человека."""
     print("\n=== значки для таблицы ===")
     import achievements as ach
     ach.set_shown(OTHER, [ach_id])
+    ach.set_shown(ME, [])            # у ME значки есть, но он их спрятал
     got = ach.shown_map([ME, OTHER, "нет-такого"])
-    check(list(got) == [OTHER], f"вернулись только те, у кого есть видимые: {list(got)}")
+    check(list(got) == [OTHER],
+          f"вернулись только те, у кого есть ВИДИМЫЕ: {list(got)}")
     check(got[OTHER][0]["title"] == "Бетатестер", "с названием и описанием")
     check("image" not in got[OTHER][0], "картинку в таблицу не тащим, только признак")
 
@@ -306,6 +369,7 @@ async def run() -> None:
     await test_cutoff_limits_the_rule(bd, ach_id)
     await test_rule_gives_it_out(bd, ach_id)
     await test_person_chooses_what_is_visible(bd, ach_id)
+    await test_person_is_told_about_the_badge(bd, ach_id)
     await test_table_gets_badges_in_one_go(bd, ach_id)
     await test_player_card_finds_the_owner(bd, ach_id)
     await test_image_is_checked(bd, ach_id)

@@ -44,6 +44,11 @@ SHOWN_LIMIT = 3
 MAX_IMAGE_BYTES = 1024 * 1024
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
+# До какого размера ужимаем перед тем, как класть в базу. В таблице значок
+# показывается 18 точками, в окне — 160; с запасом на плотные экраны хватает
+# 256. Присланная админом фотография на 225 КБ после этого весит десятки.
+STORE_SIDE = 256
+
 # Правила, которые бот умеет считать сам. Ключ → (подпись, нужен ли аргумент).
 RULES: Dict[str, Tuple[str, bool]] = {
     "": ("Только вручную", False),
@@ -74,6 +79,7 @@ CREATE TABLE IF NOT EXISTS achievement_awards (
     awarded_at TEXT NOT NULL,
     by_rule    INTEGER NOT NULL DEFAULT 0,
     shown      INTEGER NOT NULL DEFAULT 1,
+    told       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (ach_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS achievement_awards_user
@@ -91,6 +97,12 @@ def init() -> None:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         conn.executescript(SCHEMA)
+        # CREATE TABLE IF NOT EXISTS не добавит колонку в уже созданную
+        # таблицу: у тех, кто успел завести ачивки до этой правки, её нет.
+        have = [r[1] for r in conn.execute("PRAGMA table_info(achievement_awards)")]
+        if "told" not in have:
+            conn.execute("ALTER TABLE achievement_awards "
+                         "ADD COLUMN told INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     _ready = True
 
@@ -126,7 +138,7 @@ def rule_title(rule: str, arg: str = "") -> str:
     if not needs or not arg:
         return title
     if RULE_ARG_KIND.get(key) == "date":
-        return f"{title} до {human_day(arg)}"
+        return f"{title} по {human_day(arg)}"
     return f"{title}: {arg}"
 
 
@@ -213,8 +225,47 @@ def delete(ach_id: int) -> None:
         conn.commit()
 
 
+def shrink(data: bytes, kind: str, side: int = STORE_SIDE) -> Tuple[bytes, str, str]:
+    """Ужимает картинку до значка. (данные, тип, что сказать человеку).
+
+    Прозрачность решает формат: с ней — PNG, без неё — JPEG, он заметно легче
+    на фотографии. Библиотеки нет или картинка не открылась — кладём как
+    прислали: значок важнее аккуратности, а тяжесть видна и так."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return data, kind, ("Ужать не могу — на сервере нет Pillow, "
+                            "картинка легла как есть.")
+    import io
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as exc:
+        logger.warning("Картинка значка не открылась: %s", exc)
+        return data, kind, "Не смог разобрать картинку — положил как прислали."
+
+    was = len(data)
+    if img.width > side or img.height > side:
+        img.thumbnail((side, side), Image.LANCZOS)
+    buf = io.BytesIO()
+    clear = img.mode in ("RGBA", "LA") or "transparency" in img.info
+    if clear:
+        img.convert("RGBA").save(buf, format="PNG", optimize=True)
+        out_kind = "image/png"
+    else:
+        img.convert("RGB").save(buf, format="JPEG", quality=85, optimize=True)
+        out_kind = "image/jpeg"
+    small = buf.getvalue()
+    if len(small) >= was:
+        # Ужимать нечего: прислали уже готовый значок. Не портим его лишним
+        # пережатием — оно только добавит артефактов.
+        return data, kind, ""
+    return small, out_kind, (f"Ужал: было {was // 1024} КБ, стало "
+                             f"{max(1, len(small) // 1024)} КБ.")
+
+
 def set_image(ach_id: int, data: bytes, mime: str) -> Tuple[bool, str]:
-    """Кладёт картинку в базу. (получилось, объяснение)."""
+    """Кладёт картинку в базу, ужав её до размера значка."""
     init()
     kind = str(mime or "").split(";")[0].strip().lower()
     if kind not in IMAGE_TYPES:
@@ -226,11 +277,12 @@ def set_image(ach_id: int, data: bytes, mime: str) -> Tuple[bool, str]:
         return False, (f"Картинка тяжёлая: {len(data) // 1024} КБ. "
                        f"Предел {MAX_IMAGE_BYTES // 1024} КБ — значок грузится "
                        "у каждого в таблице.")
+    data, kind, note = shrink(data, kind)
     with sheets_cache.get_connection() as conn:
         conn.execute("UPDATE achievements SET image = ?, image_type = ? WHERE id = ?",
                      (sqlite3.Binary(data), kind, int(ach_id)))
         conn.commit()
-    return True, "Картинка на месте."
+    return True, ("Картинка на месте. " + note).strip()
 
 
 def image(ach_id: int) -> Tuple[Optional[bytes], str]:
@@ -279,6 +331,50 @@ def holders(ach_id: int) -> List[str]:
         return [str(r["user_id"]) for r in conn.execute(
             "SELECT user_id FROM achievement_awards WHERE ach_id = ?",
             (int(ach_id),))]
+
+
+def unannounced() -> List[Dict[str, Any]]:
+    """Выданное, о чём человеку ещё не сказали.
+
+    Отдельным списком, а не отправкой изнутри выдачи: слать умеет только
+    демон, а выдавать — и админка, и почасовой пересчёт. Сведение в одно
+    место заодно избавляет от двух писем об одном значке."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            """SELECT w.ach_id, w.user_id, a.title, a.description, a.emoji
+                 FROM achievement_awards w JOIN achievements a ON a.id = w.ach_id
+                WHERE w.told = 0 AND a.active = 1
+                ORDER BY w.awarded_at""").fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_told(ach_id: int, user_id: Any) -> None:
+    """Человеку сказали. Ставим отметку ДО отправки: упасть на середине
+    списка и написать половине дважды хуже, чем не написать вовсе."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            "UPDATE achievement_awards SET told = 1 "
+            "WHERE ach_id = ? AND user_id = ?", (int(ach_id), str(user_id)))
+        conn.commit()
+
+
+def hush(user_id: Any = None) -> int:
+    """Помечает всё выданное как рассказанное, ничего не отправляя.
+
+    Нужно на первом включении: значки, выданные до появления писем, не должны
+    прилететь людям пачкой задним числом."""
+    init()
+    with sheets_cache.get_connection() as conn:
+        if user_id is None:
+            cur = conn.execute("UPDATE achievement_awards SET told = 1 WHERE told = 0")
+        else:
+            cur = conn.execute(
+                "UPDATE achievement_awards SET told = 1 WHERE told = 0 AND user_id = ?",
+                (str(user_id),))
+        conn.commit()
+        return cur.rowcount
 
 
 def of_user(user_id: Any, shown_only: bool = False) -> List[Dict[str, Any]]:
@@ -354,23 +450,18 @@ def set_shown(user_id: Any, ach_ids: Sequence[Any]) -> Tuple[bool, str]:
 # ─────────────────────────── правила ───────────────────────────
 
 
-def _fantasy_users(before: str = "") -> List[str]:
-    """Кто собирал состав в фэнтези. before — «начал не позже этой даты».
+def _fantasy_users(until: str = "") -> List[str]:
+    """Кто хоть раз собирал состав в фэнтези. until — «по этот день включительно».
 
-    Считаем по ПЕРВОМУ составу человека, а не по любому: значок вроде
-    «Первопроходец» — про то, что человек был здесь с самого начала. Если
-    смотреть на любой состав, его получит и тот, кто зашёл вчера, но однажды
-    поправил старую неделю.
-
-    Дата — граница строгая: «до сегодняшнего дня» значит вчера и раньше, иначе
-    значок первопроходца достанется всем, кто успеет зайти до вечера."""
+    Достаточно ОДНОГО состава: значок за участие, а не за постоянство. Границу
+    считаем включительно — «по сегодняшний день» значит и сегодня тоже."""
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
             """SELECT user_id, MIN(updated_at) AS first_seen
                  FROM fantasy_rosters WHERE user_id != '' GROUP BY user_id""")
         out = []
         for r in rows:
-            if before and str(r["first_seen"] or "")[:10] >= before:
+            if until and str(r["first_seen"] or "")[:10] > until:
                 continue
             out.append(str(r["user_id"]))
     return out

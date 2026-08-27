@@ -28,6 +28,9 @@ class FakeBot:
 
     def __init__(self):
         self.sent: List[Dict[str, Any]] = []
+        # Картинки держим отдельно: их проверяют по подписи и по факту, что
+        # ушла именно картинка, а не текст вместо неё.
+        self.photos: List[Dict[str, Any]] = []
 
     async def send_message(self, chat_id=None, text="", **kw):
         self.sent.append({"kind": "message", "chat_id": chat_id, "text": text, **kw})
@@ -35,6 +38,12 @@ class FakeBot:
 
     async def send_document(self, chat_id=None, document=None, **kw):
         self.sent.append({"kind": "document", "chat_id": chat_id, **kw})
+        return FakeMessage()
+
+    async def send_photo(self, chat_id=None, photo=None, **kw):
+        item = {"kind": "photo", "chat_id": chat_id, "photo": photo, **kw}
+        self.sent.append(item)
+        self.photos.append(item)
         return FakeMessage()
 
     async def send_poll(self, chat_id=None, question="", options=None, **kw):
