@@ -47,9 +47,12 @@ IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
 # Правила, которые бот умеет считать сам. Ключ → (подпись, нужен ли аргумент).
 RULES: Dict[str, Tuple[str, bool]] = {
     "": ("Только вручную", False),
-    "fantasy": ("Участвовал в фэнтези", False),
+    "fantasy": ("Участвовал в фэнтези", True),
     "games": ("Сыграл игр (не меньше)", True),
 }
+
+# Что значит аргумент у правила — от этого зависит и подсказка, и разбор.
+RULE_ARG_KIND = {"fantasy": "date", "games": "number"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS achievements (
@@ -96,10 +99,35 @@ def _now() -> str:
     return sheets_cache.now_iso()
 
 
+def parse_day(text: str) -> str:
+    """«25.08.2026» или «2026-08-25» → ISO. Не разобрали — пусто."""
+    got = str(text or "").strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(got, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def human_day(iso: str) -> str:
+    """ISO → «25.08.2026». Не дата — отдаём как есть."""
+    got = str(iso or "").strip()
+    try:
+        return datetime.strptime(got, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except ValueError:
+        return got
+
+
 def rule_title(rule: str, arg: str = "") -> str:
     """Человеческая подпись правила: «Сыграл игр (не меньше): 10»."""
-    title, needs = RULES.get(str(rule or ""), ("Своё правило", False))
-    return f"{title}: {arg}" if needs and arg else title
+    key = str(rule or "")
+    title, needs = RULES.get(key, ("Своё правило", False))
+    if not needs or not arg:
+        return title
+    if RULE_ARG_KIND.get(key) == "date":
+        return f"{title} до {human_day(arg)}"
+    return f"{title}: {arg}"
 
 
 # ─────────────────────────── ачивки ───────────────────────────
@@ -326,11 +354,26 @@ def set_shown(user_id: Any, ach_ids: Sequence[Any]) -> Tuple[bool, str]:
 # ─────────────────────────── правила ───────────────────────────
 
 
-def _fantasy_users() -> List[str]:
-    """Кто хоть раз собирал состав в фэнтези."""
+def _fantasy_users(before: str = "") -> List[str]:
+    """Кто собирал состав в фэнтези. before — «начал не позже этой даты».
+
+    Считаем по ПЕРВОМУ составу человека, а не по любому: значок вроде
+    «Первопроходец» — про то, что человек был здесь с самого начала. Если
+    смотреть на любой состав, его получит и тот, кто зашёл вчера, но однажды
+    поправил старую неделю.
+
+    Дата — граница строгая: «до сегодняшнего дня» значит вчера и раньше, иначе
+    значок первопроходца достанется всем, кто успеет зайти до вечера."""
     with sheets_cache.get_connection() as conn:
-        return [str(r["user_id"]) for r in conn.execute(
-            "SELECT DISTINCT user_id FROM fantasy_rosters WHERE user_id != ''")]
+        rows = conn.execute(
+            """SELECT user_id, MIN(updated_at) AS first_seen
+                 FROM fantasy_rosters WHERE user_id != '' GROUP BY user_id""")
+        out = []
+        for r in rows:
+            if before and str(r["first_seen"] or "")[:10] >= before:
+                continue
+            out.append(str(r["user_id"]))
+    return out
 
 
 def _games_played(user_id: Any) -> int:
@@ -368,7 +411,7 @@ def recount(ach_id: Optional[int] = None) -> Dict[str, int]:
             continue
         checked += 1
         if rule == "fantasy":
-            people = _fantasy_users()
+            people = _fantasy_users(str(ach["rule_arg"] or ""))
         elif rule == "games":
             try:
                 need = int(ach["rule_arg"] or 0)

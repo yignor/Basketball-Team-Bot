@@ -111,15 +111,54 @@ async def test_create_through_admin(bd) -> int:
     return int(ach_id)
 
 
+async def test_cutoff_limits_the_rule(bd, ach_id: int) -> None:
+    """«Первопроходец» — тем, кто был здесь ДО дня отсечки, и только им.
+
+    Без границы значок доставался бы и тому, кто зайдёт в фэнтези завтра, —
+    а смысл его ровно в обратном."""
+    print("\n=== отсечка по дате ===")
+    import achievements as ach
+    import sheets_cache
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        # Новичок, собравший состав сегодня.
+        conn.execute(
+            "INSERT INTO fantasy_rosters (user_id, season_id, week_start, "
+            "player_refs_json, mode, updated_at) VALUES ('900300', 1, "
+            "'2026-08-24', '[]', 'classic', ?)", (now,))
+        # А ME и OTHER пришли в июле — их заготовка ставит с этой датой.
+        conn.execute("UPDATE fantasy_rosters SET updated_at = '2026-07-16T20:00:00+00:00' "
+                     "WHERE user_id IN (?, ?)", (ME, OTHER))
+        conn.commit()
+
+    today = now[:10]
+    check(ach.parse_day("25.08.2026") == "2026-08-25", "дата по-русски разбирается")
+    check(ach.parse_day("не дата") == "", "мусор не проходит за дату")
+
+    everyone = ach._fantasy_users()
+    check("900300" in everyone, "без границы новичок тоже участник")
+
+    old_hands = ach._fantasy_users(today)
+    check(ME in old_hands and OTHER in old_hands, "июльские попали")
+    check("900300" not in old_hands, "сегодняшний новичок — нет")
+
+    ach.update(ach_id, rule_arg=today)
+    res = ach.recount()
+    check(set(ach.holders(ach_id)) == {ME, OTHER},
+          f"значок ушёл только старожилам: {sorted(ach.holders(ach_id))}")
+
+    got = ach.get(ach_id) or {}
+    check("до" in got.get("rule_title", ""),
+          f"на карточке видно границу: {got.get('rule_title')}")
+
+
 async def test_rule_gives_it_out(bd, ach_id: int) -> None:
     """Правило выдаёт значок всем подходящим и не трогает остальных."""
     print("\n=== правило выдаёт само ===")
     import achievements as ach
 
-    res = ach.recount()
-    check(res["given"] == 2, f"выдано двоим участникам фэнтези: {res['given']}")
-    check(set(ach.holders(ach_id)) == {ME, OTHER}, "именно тем, кто играл")
-
+    check(set(ach.holders(ach_id)) == {ME, OTHER}, "значок у тех, кто играл")
     again = ach.recount()
     check(again["given"] == 0, "повторный пересчёт ничего не задваивает")
 
@@ -264,6 +303,7 @@ async def test_start_clears_badge_dialogs(bd) -> None:
 async def run() -> None:
     bd = setup()
     ach_id = await test_create_through_admin(bd)
+    await test_cutoff_limits_the_rule(bd, ach_id)
     await test_rule_gives_it_out(bd, ach_id)
     await test_person_chooses_what_is_visible(bd, ach_id)
     await test_table_gets_badges_in_one_go(bd, ach_id)

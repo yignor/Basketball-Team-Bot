@@ -9607,6 +9607,24 @@ def _ach_people(ach_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
             f"или забрать. Сейчас у {len(have)}.", InlineKeyboardMarkup(rows))
 
 
+def _ach_arg_ask(ach_id: int) -> Tuple[str, List[List[InlineKeyboardButton]]]:
+    """Что спросить про аргумент правила и какие дать кнопки."""
+    import achievements
+    from datetime_utils import get_moscow_time
+    a = achievements.get(ach_id) or {}
+    kind = achievements.RULE_ARG_KIND.get(str(a.get("rule") or ""), "")
+    if kind == "date":
+        today = get_moscow_time().date().strftime("%d.%m.%Y")
+        return (("📅 До какого дня считать участие?\n\nЗначок получат те, кто "
+                 "собрал первый состав РАНЬШЕ этого дня — сам день не входит. "
+                 f"Пришли дату: «{today}».\n\n"
+                 "Оставить без границы — «-»: тогда значок достанется и тем, "
+                 "кто придёт в фэнтези завтра."),
+                [[InlineKeyboardButton("📅 По сегодня",
+                                       callback_data=f"admin:ach:today:{ach_id}")]])
+    return ("🔢 Сколько игр нужно для этой ачивки? Пришли число.", [])
+
+
 async def handle_badge_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Картинка ачивки, присланная админом.
 
@@ -9675,6 +9693,23 @@ async def handle_ach_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
              "arg": "rule_arg"}.get(kind)
     if not field:
         raise ApplicationHandlerStop
+    if field == "rule_arg":
+        a = await asyncio.to_thread(achievements.get, int(arg)) or {}
+        want = achievements.RULE_ARG_KIND.get(str(a.get("rule") or ""), "")
+        if text in ("-", "—"):
+            text = ""
+        elif want == "date":
+            day = achievements.parse_day(text)
+            if not day:
+                _awaiting_ach[user.id] = pending
+                await msg.reply_text("Не понял дату. Напиши «25.08.2026» "
+                                     "или «-», чтобы убрать границу.")
+                raise ApplicationHandlerStop
+            text = day
+        elif want == "number" and not text.isdigit():
+            _awaiting_ach[user.id] = pending
+            await msg.reply_text("Нужно число. Например «10».")
+            raise ApplicationHandlerStop
     if field == "title" and not text:
         _awaiting_ach[user.id] = pending
         await msg.reply_text("Название не может быть пустым.")
@@ -9716,11 +9751,24 @@ async def _ach_admin(query, user, parts: List[str]) -> None:
             "emoji": ("😀 Значок-эмодзи. Показывается там, где картинку не "
                       "вставить, — например в текстовых списках. Пришли один "
                       "символ или «-», чтобы убрать."),
-            "arg": "🔢 Сколько игр нужно для этой ачивки? Пришли число.",
         }
-        text = asks[what] + "\n\nПередумал — /start."
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
-            "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
+        rows = [[InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"admin:ach:one:{arg}")]]
+        if what == "arg":
+            text, extra = await asyncio.to_thread(_ach_arg_ask, int(arg))
+            rows = extra + rows
+        else:
+            text = asks[what]
+        text += "\n\nПередумал — /start."
+        markup = InlineKeyboardMarkup(rows)
+
+    elif what == "today":
+        # Отсечка «по сегодня» — самый частый случай: значок первопроходца
+        # закрывают именно днём, когда о нём вспомнили.
+        from datetime_utils import get_moscow_time
+        today = get_moscow_time().date().isoformat()
+        await asyncio.to_thread(achievements.update, int(arg), rule_arg=today)
+        text, markup = await asyncio.to_thread(_ach_card, int(arg))
     elif what == "img":
         _clear_pending(uid)
         _awaiting_badge[uid] = int(arg)
