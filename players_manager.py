@@ -23,6 +23,15 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
+def _tidy(value) -> str:
+    """Значение из листа без краёв и двойных пробелов.
+
+    Лист заполняют руками, и лишний пробел в фамилии невидим, но ломает всё,
+    что сверяет имена: поиск игрока, сопоставление с протоколом лиги, ключ
+    цены. Чинить это в каждом потребителе бессмысленно — режем на входе."""
+    return " ".join(str(value or "").split())
+
+
 class PlayersManager:
     """Менеджер данных игроков"""
     
@@ -232,14 +241,17 @@ class PlayersManager:
                 # Проверяем обязательные поля
                 if record.get('Имя') and record.get('Дата рождения'):
                     player = {
-                        'surname': record.get('Фамилия', ''),  # Новый столбец "Фамилия"
-                        'name': record.get('Имя', ''),  # Столбец "Имя" (только имя)
-                        'nickname': record.get('Ник', ''),
-                        'telegram_id': record.get('Telegram ID', ''),
-                        'birthday': record.get('Дата рождения', ''),
-                        'status': record.get('Статус', 'Активный'),
+                        # Края и двойные пробелы срезаем сразу: «Кондратьев »
+                        # с хвостом не совпадал с «Кондратьев» ни в поиске, ни
+                        # при сверке с протоколом лиги, а глазами это не видно.
+                        'surname': _tidy(record.get('Фамилия', '')),
+                        'name': _tidy(record.get('Имя', '')),
+                        'nickname': _tidy(record.get('Ник', '')),
+                        'telegram_id': _tidy(record.get('Telegram ID', '')),
+                        'birthday': _tidy(record.get('Дата рождения', '')),
+                        'status': _tidy(record.get('Статус', 'Активный')),
                         'active_mark': str(record.get('Активность', '')).strip(),
-                        'team': record.get('Команда', ''),
+                        'team': _tidy(record.get('Команда', '')),
                         'added_date': record.get('Дата добавления', ''),
                         'notes': record.get('Примечания', '')
                     }

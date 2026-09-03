@@ -548,6 +548,42 @@ def _field_card_text(row: int) -> tuple:
     return bd._field_card(row)
 
 
+def test_activity_is_two_buttons() -> None:
+    """Активность ставится кнопками «+» и «−», а не свободным текстом.
+
+    Просьба тренера 03.09.2026. Кнопками нельзя ни промахнуться, ни оставить в
+    клетке лишний пробел — а от этой отметки зависит, ждут ли с человека взнос."""
+    print("\n=== активность кнопками ===")
+    import bot_daemon as bd
+
+    src = (ROOT / "bot_daemon.py").read_text()
+    body = src[src.index('elif what == "set" and parts[4:5] == ["active"]'):]
+    body = body[:body.index('elif what == "set" and len(parts) > 4')]
+    check(":act:" in body and ":on" in body and ":off" in body,
+          "экран предлагает включить и снять")
+    check("свободный текст" in body or "Кнопками" in body,
+          "в коде объяснено, почему не текстом")
+
+    # Запись: включаем — «1», снимаем — пусто. Настоящую таблицу не трогаем.
+    calls = []
+    was = sheets_cache.write_player_field
+
+    def spy(book, row, field, value, expect=""):
+        calls.append((row, field, value))
+        return True
+
+    sheets_cache.write_player_field = spy
+    try:
+        import report_common
+        report_common.init_sheets = lambda: object()
+        bd._write_active(2, True)
+        bd._write_active(2, False)
+    finally:
+        sheets_cache.write_player_field = was
+    check(calls == [(2, "active", "1"), (2, "active", "")],
+          f"в лист уходит 1 и пустота: {calls}")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -565,6 +601,7 @@ def main() -> int:
     test_start_clears_every_dialog()
     test_every_call_site_names_a_real_field()
     test_broken_formula_is_not_a_setting()
+    test_activity_is_two_buttons()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

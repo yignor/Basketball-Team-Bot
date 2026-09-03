@@ -2668,6 +2668,34 @@ FIELD_ORDER = ("surname", "name", "nick", "bd", "role", "team",
                "status", "active", "season", "game", "price", "tier")
 
 
+def _player_by_row_safe(row: Any) -> Dict[str, Any]:
+    import coach_payments
+    try:
+        return coach_payments.player_by_row(int(row)) or {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _write_active(row: int, on: bool) -> bool:
+    """Ставит или снимает отметку активности в листе «Игроки».
+
+    В клетку кладём «1», а не «+»: столбец читается как значение, и бот его
+    таким и держит — «+» остаётся понятным при чтении, но новых не заводим,
+    чтобы в одном столбце не жили два обозначения одного и того же."""
+    import coach_payments
+    try:
+        import report_common
+        book = report_common.init_sheets()
+    except Exception as exc:
+        log.warning(f"Активность строки {row}: таблица недоступна: {exc}")
+        return False
+    person = coach_payments.player_by_row(int(row)) or {}
+    return sheets_cache.write_player_field(
+        book, int(row), "active",
+        sheets_cache.PLAYERS_ACTIVE_MARK if on else "",
+        person.get("title", ""))
+
+
 def _field_card(row: int, prefix: str = "admin:field") -> Tuple[str, InlineKeyboardMarkup]:
     import coach_payments
     p = coach_payments.player_by_row(int(row))
@@ -6130,6 +6158,35 @@ async def _players_editor(query, user, parts: List[str], prefix: str) -> None:
             "➕ Пришли фамилию и имя нового игрока одной строкой: «Иванов Иван».\n\n"
             "Остальное заполнишь на карточке — подставлять умолчания за тебя "
             "не буду.\n\nПередумал — /start.")
+    elif what == "set" and parts[4:5] == ["active"]:
+        # Активность — это «да» или «нет», а не свободный текст. Кнопками
+        # нельзя ни промахнуться, ни оставить в клетке лишний пробел.
+        _clear_pending(user.id)
+        row = parts[3]
+        p = await asyncio.to_thread(_player_by_row_safe, row)
+        now = str((p or {}).get("active_mark") or "")
+        state = ("сейчас занимается" if sheets_cache.is_active_mark(now)
+                 else "сейчас сломана формула в таблице"
+                 if sheets_cache.is_sheet_error(now) else "сейчас не занимается")
+        await query.edit_message_text(
+            f"✅ Активность: {(p or {}).get('title', 'игрок')} — {state}.\n\n"
+            "От неё зависит, ждём ли с человека взнос за тренировки.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Будет тренироваться",
+                                      callback_data=f"{prefix}:act:{row}:on")],
+                [InlineKeyboardButton("➖ Снять активность",
+                                      callback_data=f"{prefix}:act:{row}:off")],
+                [InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"{prefix}:pick:{row}")]]))
+
+    elif what == "act" and len(parts) > 4:
+        row, on = parts[3], parts[4] == "on"
+        ok = await asyncio.to_thread(_write_active, int(row), on)
+        text, markup = await asyncio.to_thread(_field_card, int(row), prefix)
+        head = ("➕ Отметил: занимается." if on else "➖ Снял активность.") if ok \
+            else "⚠️ В таблицу записать не вышло — попробуй ещё раз."
+        await query.edit_message_text(f"{head}\n\n{text}", reply_markup=markup)
+
     elif what == "set" and len(parts) > 4:
         _clear_pending(user.id)
         _awaiting_field[user.id] = f"{parts[3]}|{parts[4]}|{prefix}"
