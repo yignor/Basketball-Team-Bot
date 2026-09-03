@@ -511,6 +511,43 @@ def test_every_call_site_names_a_real_field() -> None:
           "имени колонки зеркала в самом вызове не осталось")
 
 
+def test_broken_formula_is_not_a_setting() -> None:
+    """«#ERROR!» в «Активности» — поломка таблицы, а не значение.
+
+    Жалоба 03.09.2026: в карточке значилось «✅ Активность: #ERROR!». Бот
+    показывал клетку как есть, и это читалось как настройка. Хуже другое:
+    отметку он не распознаёт, значит, человек тихо выпадает из ожидания
+    взносов — семь человек разом."""
+    print("\n=== ошибка формулы видна как ошибка ===")
+    import sheets_cache as sc
+
+    for value in ("#ERROR!", "#REF!", "#n/a"):
+        check(sc.is_sheet_error(value), f"«{value}» распознан как ошибка")
+    for value in ("1", "+", "", "да"):
+        check(not sc.is_sheet_error(value), f"«{value}» ошибкой не считается")
+    check(not sc.is_active_mark("#ERROR!"),
+          "сломанная клетка не выдаётся за отметку активности")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET active_mark = '#ERROR!' WHERE row_index = 2")
+        conn.commit()
+    check(2 in sc.broken_active_marks(), "строка со сломанной формулой найдена")
+
+    text, _ = _field_card_text(2)
+    check("#ERROR!" not in text or "сломана" in text,
+          f"в карточке объяснено, а не показано как значение: {text!r}"[:130])
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET active_mark = '1' WHERE row_index = 2")
+        conn.commit()
+    check(not sc.broken_active_marks(), "починили — жалоб нет")
+
+
+def _field_card_text(row: int) -> tuple:
+    import bot_daemon as bd
+    return bd._field_card(row)
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -527,6 +564,7 @@ def main() -> int:
     test_manual_reminder_asks_before_repeat()
     test_start_clears_every_dialog()
     test_every_call_site_names_a_real_field()
+    test_broken_formula_is_not_a_setting()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

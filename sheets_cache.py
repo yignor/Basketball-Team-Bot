@@ -56,9 +56,37 @@ PLAYERS_ACTIVE_MARK = "1"
 PLAYERS_ACTIVE_LEGACY = ("+",)
 
 
+# Что Google показывает вместо значения, когда формула в клетке сломалась.
+# Бот такого не пишет — он кладёт «1» или пустоту, — но читает лист как есть, и
+# ошибка приезжает к нему обычной строкой.
+SHEET_ERRORS = ("#ERROR!", "#REF!", "#N/A", "#VALUE!", "#DIV/0!", "#NAME?",
+                "#NUM!", "#NULL!")
+
+
+def is_sheet_error(value: Any) -> bool:
+    """Правда ли, что в клетке ошибка формулы, а не значение."""
+    return str(value or "").strip().upper() in SHEET_ERRORS
+
+
 def is_active_mark(value: Any) -> bool:
+    """Стоит ли отметка активности.
+
+    Ошибка формулы отметкой НЕ считается: делать вид, что человек активен,
+    когда в клетке «#ERROR!», — значит гадать за тренера. Но и молчать об этом
+    нельзя: такой человек тихо выпадает из ожидания взносов, поэтому есть
+    broken_active_marks() и предупреждение на экране взносов."""
     mark = str(value or "").strip()
     return mark == PLAYERS_ACTIVE_MARK or mark in PLAYERS_ACTIVE_LEGACY
+
+
+def broken_active_marks() -> List[int]:
+    """Строки листа, где в «Активности» ошибка формулы. Пусто — всё в порядке."""
+    init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT row_index, active_mark FROM players "
+            "WHERE TRIM(COALESCE(active_mark, '')) != ''").fetchall()
+    return [int(r["row_index"]) for r in rows if is_sheet_error(r["active_mark"])]
 # Листы-логи: сырые записи, которые ведёт бот. Названы «Логи …», чтобы их не
 # путали с отчётами — те строит человек и читает глазами.
 ATTEND_SHEET_NAME = "Логи посещаемости"

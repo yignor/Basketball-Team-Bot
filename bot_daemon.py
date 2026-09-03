@@ -2679,6 +2679,10 @@ def _field_card(row: int, prefix: str = "admin:field") -> Tuple[str, InlineKeybo
         header, column, label = sheets_cache.PLAYER_FIELDS[key]
         got = p.get(column)
         got = "" if got in (None, "") else str(got)
+        if sheets_cache.is_sheet_error(got):
+            # Показать «#ERROR!» как значение — значит выдать поломку таблицы
+            # за настройку. Человек будет искать, что это за режим.
+            got = f"⚠️ {got} — формула в таблице сломана"
         lines.append(f"{label}: {got or '—'}")
     lines += ["", "Что поправить?"]
 
@@ -5539,6 +5543,17 @@ def _train_screen(period: str = "") -> Tuple[str, InlineKeyboardMarkup]:
     if nxt <= training_dues.period_of(date.today()):
         nav.append(InlineKeyboardButton(f"{training_dues.month_title(nxt)} ➡️",
                                         callback_data=f"coach:train:{nxt}"))
+    # Ошибка формулы в «Активности» — это молча выпавшие из учёта люди: отметка
+    # не распознана, значит, взноса с них не ждут. Деньги — не то место, где
+    # такое можно оставить незамеченным.
+    broken = sheets_cache.broken_active_marks()
+    if broken:
+        lines += ["", f"⚠️ В столбце «Активность» ошибка формулы в "
+                      f"{len(broken)} строк(ах): "
+                      + ", ".join(str(n) for n in broken[:10])
+                      + ("…" if len(broken) > 10 else "")
+                      + ". Эти люди сейчас считаются НЕактивными, и взносы с "
+                        "них не ждём. Поправь клетки в таблице."]
     if nav:
         buttons.append(nav)
     # Экран открывают из «📊 Сводки и правки» — туда и возвращаемся. Раньше
