@@ -603,6 +603,38 @@ def test_names_lose_stray_spaces() -> None:
           "фамилия чистится там же, где кладётся в базу")
 
 
+def test_single_result_search_resets() -> None:
+    """Поиск, нашедший одного, после правки сбрасывается.
+
+    Жалоба 03.09.2026: правишь человека, жмёшь «К списку» — и снова он же.
+    Набрать другую фамилию неоткуда: список состоит из одного результата."""
+    print("\n=== поиск с одним результатом ===")
+    import bot_daemon as bd
+
+    # Второй однофамилец нужен по существу: без него «несколько совпадений»
+    # неоткуда взять, и проверка молча превратилась бы в копию первой.
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO players (row_index, surname, name, "
+                     "synced_at) VALUES (77, 'Иванченко', 'Пётр', ?)", (now,))
+        conn.commit()
+
+    uid = 4242
+    bd._player_search[uid] = "иванов"
+    check(bd._search_is_spent(uid), "запрос нашёл ровно одного — он отработал")
+
+    bd._player_search[uid] = "иван"
+    check(not bd._search_is_spent(uid),
+          "запрос с несколькими совпадениями не сбрасываем")
+
+    bd._player_search[uid] = "такогонет"
+    check(not bd._search_is_spent(uid),
+          "и пустой результат тоже: человек сам увидит, что не нашлось")
+
+    bd._player_search.pop(uid, None)
+    check(not bd._search_is_spent(uid), "без запроса сбрасывать нечего")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -622,6 +654,7 @@ def main() -> int:
     test_broken_formula_is_not_a_setting()
     test_activity_is_two_buttons()
     test_names_lose_stray_spaces()
+    test_single_result_search_resets()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

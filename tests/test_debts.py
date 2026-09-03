@@ -27,6 +27,9 @@ os.environ["SPREADSHEET_ID"] = ""
 os.environ.setdefault("BOT_TOKEN", "0:test")
 os.environ.setdefault("DAEMON_LOG_PATH", str(ROOT / "tests" / "test.log"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_tg import buttons_of                                  # noqa: E402
+
 import sheets_cache                                            # noqa: E402
 sheets_cache.DB_PATH = TMP
 
@@ -350,6 +353,63 @@ def test_no_debt_for_an_untracked_month() -> None:
     check("не ведём" in report, f"отчёт объясняет, а не врёт: {report[:70]}")
 
 
+def test_wrong_payment_can_be_taken_back() -> None:
+    """Ошибочную оплату можно снять — и не только самую свежую.
+
+    Вопрос тренера 03.09.2026. Экран показывал восемь последних платежей, а их
+    за месяц больше сотни: ошибку недельной давности в боте было не исправить.
+    И удаление шло с одного нажатия — на экране из восьми одинаковых кнопок
+    промахнуться легко, а это чужие деньги."""
+    print("\n=== снятие ошибочной оплаты ===")
+    import bot_daemon as bd
+    import coach_payments
+
+    seed_player(701, "Ошибочный")
+    ids = []
+    # Суммы и даты разные: одинаковые платежи бот считает повтором одного и
+    # того же и второй раз не записывает — и заготовка вышла бы короче страницы.
+    for i in range(12):
+        when = (date.today() - timedelta(days=i)).isoformat()
+        rec = coach_payments.record(701, 900 + i, coach_payments.KIND_GAME, 1,
+                                    paid_at=when, bank="", note=f"тест {i}")
+        ids.append(int(rec["id"]) if isinstance(rec, dict) and rec.get("id") else 0)
+    check(len([i for i in ids if i]) >= 9,
+          f"заготовка длиннее страницы: {len([i for i in ids if i])}")
+
+    first, markup = bd._delpay_screen(0)
+    cbs = [b.callback_data for b in buttons_of(markup) if b.callback_data]
+    check(any(c.startswith("coach:delpay:page:1") for c in cbs),
+          "листание есть — платежей больше страницы")
+    check(all(":ask:" in c for c in cbs if c.startswith("coach:delpay:") and
+              ":page:" not in c),
+          "нажатие ведёт на вопрос, а не сразу на удаление")
+
+    second, _ = bd._delpay_screen(1)
+    check(second != first, "вторая страница показывает другое")
+
+    old_id = min(i for i in ids if i)
+    text, ask = bd._delpay_ask(old_id, 1)
+    check("Удалить платёж?" in text, "спрашиваем перед удалением")
+    check("должником" in text, "и говорим, чем это обернётся")
+    go = [b.callback_data for b in buttons_of(ask) if b.callback_data
+          and ":go:" in b.callback_data]
+    check(len(go) == 1, f"удаляет только отдельное «да»: {go}")
+
+    was = len(coach_payments.recent_payments(limit=400))
+    coach_payments.delete(old_id)
+    now = len(coach_payments.recent_payments(limit=400))
+    check(now == was - 1, f"старый платёж снялся: {was} -> {now}")
+
+    # Убираем за собой: дюжина платежей на выдуманного человека сбивала
+    # соседний сценарий про разбивку долгов по играм.
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM payments WHERE player_row = 701")
+        conn.execute("DELETE FROM players WHERE row_index = 701")
+        conn.commit()
+    check(not [p for p in coach_payments.recent_payments(limit=400)
+               if int(p["player_row"]) == 701], "заготовка убрана")
+
+
 def test_grouping() -> None:
     """Долги разбиты по играм и по месяцам, а не одним списком.
 
@@ -463,6 +523,7 @@ def main() -> int:
     test_mark_paid_is_idempotent()
     test_confirmed_text()
     test_no_debt_for_an_untracked_month()
+    test_wrong_payment_can_be_taken_back()
     test_grouping()
     test_debt_names_the_game()
     test_debt_title_without_tournament()

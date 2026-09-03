@@ -2598,6 +2598,17 @@ def _search_norm(text: Any) -> str:
     return str(text or "").strip().lower().replace("ё", "е")
 
 
+def _search_is_spent(uid: int) -> bool:
+    """Отработал ли поиск: нашёл ровно одного человека."""
+    import coach_payments
+    want = _search_norm(_player_search.get(uid, ""))
+    if not want:
+        return False
+    found = [p for p in coach_payments.players()
+             if want in _search_norm(p.get("title"))]
+    return len(found) == 1
+
+
 def _fields_screen(offset: int = 0, prefix: str = "admin:field",
                    query: str = "") -> Tuple[str, InlineKeyboardMarkup]:
     """Лист «Игроки» списком. Экран общий для тренера и админа: две копии
@@ -5217,14 +5228,24 @@ def _sums_screen(row: Optional[int] = None) -> Tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("⬅️ К списку", callback_data="coach:sums")]])
 
 
-def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
-    """Последние платежи с возможностью отменить ошибочный."""
+DELPAY_PER_PAGE = 8
+
+
+def _delpay_screen(page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Платежи с возможностью отменить ошибочный — страницами.
+
+    Раньше показывались только восемь последних, и ошибка недельной давности
+    в боте была неисправима: платежей за месяц больше сотни. Ошибку замечают
+    не сразу, поэтому листаем всю историю."""
     import coach_payments
-    items = coach_payments.recent_payments(limit=8)
-    if not items:
+    everything = coach_payments.recent_payments(limit=400)
+    if not everything:
         return ("🗑 Удалить оплату\n\nПлатежей пока нет.",
                 InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "⬅️ В раздел", callback_data="coach:money2")]]))
+                    "⬅️ Назад", callback_data="coach:money2")]]))
+    pages = max(1, (len(everything) + DELPAY_PER_PAGE - 1) // DELPAY_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    items = everything[page * DELPAY_PER_PAGE:(page + 1) * DELPAY_PER_PAGE]
     lines = ["🗑 Удалить оплату", "",
              "Отменяем ошибочные: тест, ложное срабатывание, возврат части "
              "суммы. Запись уходит из расчётов, в листе «Логи оплаты» строка "
@@ -5238,9 +5259,43 @@ def _delpay_screen() -> Tuple[str, InlineKeyboardMarkup]:
                      f"{it['amount']} ₽ ({what}{extra})")
         rows.append([InlineKeyboardButton(
             f"🗑 {it['title']} · {it['amount']} ₽"[:BTN_TEXT],
-            callback_data=f"coach:delpay:{it['id']}")])
-    rows.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:money2")])
+            callback_data=f"coach:delpay:ask:{it['id']}:{page}")])
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "◀️", callback_data=f"coach:delpay:page:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}",
+                                        callback_data="coach:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(
+                "▶️", callback_data=f"coach:delpay:page:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:money2")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _delpay_ask(payment_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Спрашиваем перед удалением: это деньги, и одна кнопка в списке из
+    восьми — слишком лёгкий способ снять чужой платёж по ошибке."""
+    import coach_payments
+    found = [p for p in coach_payments.recent_payments(limit=400)
+             if int(p["id"]) == int(payment_id)]
+    if not found:
+        return _delpay_screen(page)
+    it = found[0]
+    what = ("игру" if it["kind"] == coach_payments.KIND_GAME else
+            "тренировки" if it["kind"] == coach_payments.KIND_SEASON else "?")
+    return (f"🗑 Удалить платёж?\n\n{it['title']} — {it['amount']} ₽ за {what}, "
+            f"{coach_payments._human_date(it['paid_at'])}.\n\n"
+            "Запись уйдёт из расчётов, и человек снова станет должником за "
+            "этот период. В «Логи оплаты» строка останется историей.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🗑 Да, удалить",
+                    callback_data=f"coach:delpay:go:{payment_id}:{page}")],
+                [InlineKeyboardButton(
+                    "⬅️ Отмена", callback_data=f"coach:delpay:page:{page}")]]))
 
 
 def _my_games_video(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -6198,6 +6253,11 @@ async def _players_editor(query, user, parts: List[str], prefix: str) -> None:
     else:
         _awaiting_field.pop(user.id, None)
         off = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        # Поиск, нашедший ровно одного, после правки — тупик: «К списку»
+        # возвращает на того же человека, и набрать другую фамилию неоткуда.
+        # Такой запрос сбрасываем: он своё отработал.
+        if await asyncio.to_thread(_search_is_spent, user.id):
+            _player_search.pop(user.id, None)
         text, markup = await asyncio.to_thread(
             _fields_screen, off, prefix, _player_search.get(user.id, ""))
         await query.edit_message_text(text, reply_markup=markup)
@@ -6587,14 +6647,29 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 "Передумал — /start.")
 
         elif what == "delpay":
-            if len(parts) > 2 and parts[2].isdigit():
+            step = parts[2] if len(parts) > 2 else ""
+            arg = parts[3] if len(parts) > 3 else "0"
+            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+            if step == "ask":
+                text, markup = await asyncio.to_thread(
+                    _delpay_ask, int(arg), page)
+            elif step == "go":
                 import coach_payments
-                ok = await asyncio.to_thread(coach_payments.delete, int(parts[2]))
+                ok = await asyncio.to_thread(coach_payments.delete, int(arg))
                 await query.answer("Удалил" if ok else "Уже удалён")
                 # Лист «Оплаты» пересобирается из базы — иначе в сводке
                 # осталась бы сумма, которой больше нет.
                 asyncio.create_task(_rebuild_payments_sheet())
-            text, markup = await asyncio.to_thread(_delpay_screen)
+                text, markup = await asyncio.to_thread(_delpay_screen, page)
+            elif step == "page":
+                text, markup = await asyncio.to_thread(
+                    _delpay_screen, int(arg) if arg.isdigit() else 0)
+            elif step.isdigit():
+                # Старая кнопка из ещё открытого экрана: спрашиваем, а не
+                # удаляем молча — адрес сменился, намерение осталось прежним.
+                text, markup = await asyncio.to_thread(_delpay_ask, int(step), 0)
+            else:
+                text, markup = await asyncio.to_thread(_delpay_screen, 0)
             await query.edit_message_text(text, reply_markup=markup)
 
         elif what == "train":
