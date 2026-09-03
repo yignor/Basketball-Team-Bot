@@ -219,6 +219,59 @@ async def test_person_chooses_what_is_visible(bd, ach_id: int) -> None:
           "пересчёт не вернул спрятанное в таблицу за спиной человека")
 
 
+async def test_season_rules(bd, ach_id: int) -> None:
+    """Место в зачёте и лучший в ранге — за конкретный сезон."""
+    print("\n=== места и ранги ===")
+    import achievements as ach
+    import sheets_cache
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO fantasy_seasons (id, name, format, status, "
+            "started_at, settings_json) VALUES (7, 'Летний кубок 2026', '5x5', "
+            "'ended', ?, ?)",
+            (now, '{"modes": ["free"], "scopes": []}'))
+        # Очки: ME впереди OTHER.
+        conn.execute("DELETE FROM fantasy_game_scores")
+        for uid, pts in ((ME, 120), (OTHER, 80)):
+            conn.execute(
+                "INSERT INTO fantasy_game_scores (season_id, user_id, source, "
+                "game_id, game_date, points, mode, computed_at) VALUES "
+                "(7, ?, 'slpro', 'g1', '2026-08-01', ?, 'free', ?)",
+                (uid, pts, now))
+        conn.commit()
+
+    first, _ = ach.create("Чемпион кубка")
+    ach.update(first, rule="place", rule_arg="1", season_id=7)
+    got = ach.get(first) or {}
+    check("Летний кубок 2026" in got.get("rule_title", ""),
+          f"на карточке видно сезон: {got.get('rule_title')}")
+    check("Первое место" in got.get("rule_title", ""), "и место названо словом")
+
+    winners = ach._place_winners(7, 1)
+    check([w[0] for w in winners] == [ME], f"первое место у лидера: {winners}")
+    check(ach._place_winners(7, 2)[0][0] == OTHER, "второе — у второго")
+
+    ach.recount()
+    check(ach.holders(first) == [ME], "значок ушёл чемпиону")
+
+    summary = ach.season_summary(first, ME)
+    check(summary.get("season") == "Летний кубок 2026", "итог знает сезон")
+    check(any("120" in l for l in summary.get("lines", [])),
+          f"и очки за сезон: {summary.get('lines')}")
+    check(not ach.season_summary(first, OTHER).get("lines"),
+          "чужому итог этого значка не приписываем")
+
+    # Без сезона правило молчит, а не выдаёт кому попало.
+    lost, _ = ach.create("Без сезона")
+    ach.update(lost, rule="place", rule_arg="1")
+    ach.recount()
+    check(not ach.holders(lost), "правило без сезона никого не награждает")
+    check("сезон не выбран" in (ach.get(lost) or {}).get("rule_title", ""),
+          "и об этом сказано на карточке")
+
+
 async def test_person_is_told_about_the_badge(bd, ach_id: int) -> None:
     """Человеку пишут о выданном значке — один раз и картинкой."""
     print("\n=== письмо о значке ===")
@@ -388,6 +441,7 @@ async def run() -> None:
     await test_cutoff_limits_the_rule(bd, ach_id)
     await test_rule_gives_it_out(bd, ach_id)
     await test_person_chooses_what_is_visible(bd, ach_id)
+    await test_season_rules(bd, ach_id)
     await test_person_is_told_about_the_badge(bd, ach_id)
     await test_table_gets_badges_in_one_go(bd, ach_id)
     await test_player_card_finds_the_owner(bd, ach_id)

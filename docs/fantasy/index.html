@@ -1551,7 +1551,7 @@
     $('pTitle').textContent = (P.number ? '№' + P.number + ' ' : '') + P.name;
     if (P.badges && P.badges.length) {
       const holder = document.createElement('span');
-      holder.innerHTML = badgesHtml(P.badges);
+      holder.innerHTML = badgesHtml(P.badges);   // владелец едет в самих значках
       $('pTitle').appendChild(holder);
     }
     $('pSub').textContent = P.tournament || '';
@@ -1637,7 +1637,7 @@
       const div = document.createElement('div'); div.className = 'rank';
       div.innerHTML = `<div class="place">${medal}</div>` +
         `<div class="info"><div class="pname">${esc(row.name || 'Участник')}` +
-        badgesHtml(row.badges) +
+        badgesHtml(row.badges, row.user_id) +
         ((row.history && row.history.length) ? '<span class="chev">›</span>' : '') + `</div></div>` +
         `<div class="pts">${row.points}</div>`;
       div.onclick = () => { openRank = (openRank === i ? -1 : i); renderStandings(); };
@@ -1702,12 +1702,12 @@
     return fallback;
   }
 
-  function badgesHtml(list) {
+  function badgesHtml(list, owner) {
     if (!list || !list.length) return '';
     return '<span class="badges">' + list.map(b =>
       `<button class="badge" title="${esc(b.title)}"` +
-      ` onclick="openBadge(event, ${b.id})">${badgeIcon(b)}</button>`).join('') +
-      '</span>';
+      ` onclick="openBadge(event, ${b.id}, '${esc(b.owner || owner || '')}')">` +
+      `${badgeIcon(b)}</button>`).join('') + '</span>';
   }
 
   // Что показать в окне: ищем среди своих, потом среди тех, что приехали в
@@ -1725,17 +1725,37 @@
     return null;
   }
 
-  function openBadge(ev, id) {
+  function badgeCardHtml(b, extra) {
+    const art = (b.has_image && API)
+      ? `<img src="${esc(API)}/fantasy/badge/${b.id}" alt="">`
+      : `<div class="big">${esc(b.emoji || '🏅')}</div>`;
+    return art + `<h3>${esc(b.title)}</h3>` +
+      `<p>${esc(b.description || 'Описание не заполнено.')}</p>` + (extra || '');
+  }
+
+  async function openBadge(ev, id, owner) {
     if (ev) ev.stopPropagation();      // не разворачиваем строку зачёта
     const b = findBadge(id);
     if (!b) return;
     haptic('light');
-    const art = (b.has_image && API)
-      ? `<img src="${esc(API)}/fantasy/badge/${b.id}" alt="">`
-      : `<div class="big">${esc(b.emoji || '🏅')}</div>`;
-    $('badgeCard').innerHTML = art + `<h3>${esc(b.title)}</h3>` +
-      `<p>${esc(b.description || 'Описание не заполнено.')}</p>`;
+    // Сначала показываем то, что уже знаем: окно должно открыться сразу, а не
+    // после похода на сервер. Итог сезона доедет и допишется.
+    $('badgeCard').innerHTML = badgeCardHtml(b);
     $('badgeBox').classList.add('on');
+    if (!live || !owner) return;
+    let d;
+    try {
+      d = await api(`/fantasy/badge_info?ach=${id}&user=${encodeURIComponent(owner)}`);
+    } catch (e) { return; }
+    if (!$('badgeBox').classList.contains('on')) return;   // успел закрыть
+    let extra = '';
+    if (d.season) {
+      extra = `<p style="margin-top:10px"><b>${esc(d.season)}</b></p>`;
+      for (const line of (d.lines || [])) extra += `<p>${esc(line)}</p>`;
+    }
+    $('badgeCard').innerHTML = badgeCardHtml(
+      {...b, title: d.title || b.title,
+       description: d.description || b.description}, extra);
   }
   window.openBadge = openBadge;
 

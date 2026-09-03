@@ -54,14 +54,25 @@ RULES: Dict[str, Tuple[str, bool]] = {
     "": ("Только вручную", False),
     "fantasy": ("Участвовал в фэнтези", True),
     "games": ("Сыграл игр (не меньше)", True),
+    "place": ("Место в зачёте фэнтези", True),
+    "rank": ("Лучший в ранге", True),
 }
 
 # Что значит аргумент у правила — от этого зависит и подсказка, и разбор.
-RULE_ARG_KIND = {"fantasy": "date", "games": "number"}
+RULE_ARG_KIND = {"fantasy": "date", "games": "number",
+                 "place": "number", "rank": "rank"}
+
+# Правила, которым нужен сезон. Значок за место даётся ЗА КОНКРЕТНЫЙ сезон:
+# летний кубок 2026 и сезон 26/27 — разные награды с разными картинками, а не
+# одна, которая переезжает к новому чемпиону и пропадает у старого.
+NEEDS_SEASON = {"place", "rank"}
+
+PLACE_TITLES = {1: "Первое место", 2: "Второе место", 3: "Третье место"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS achievements (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    season_id   INTEGER NOT NULL DEFAULT 0,
     title       TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     emoji       TEXT NOT NULL DEFAULT '',
@@ -103,6 +114,10 @@ def init() -> None:
         if "told" not in have:
             conn.execute("ALTER TABLE achievement_awards "
                          "ADD COLUMN told INTEGER NOT NULL DEFAULT 0")
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(achievements)")]
+        if "season_id" not in cols:
+            conn.execute("ALTER TABLE achievements "
+                         "ADD COLUMN season_id INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     _ready = True
 
@@ -131,15 +146,40 @@ def human_day(iso: str) -> str:
         return got
 
 
-def rule_title(rule: str, arg: str = "") -> str:
+def season_name(season_id: Any) -> str:
+    """Название сезона. Нет такого — «сезон N», чтобы не показывать пустоту."""
+    try:
+        sid = int(season_id or 0)
+    except (TypeError, ValueError):
+        return ""
+    if not sid:
+        return ""
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute("SELECT name FROM fantasy_seasons WHERE id = ?",
+                           (sid,)).fetchone()
+    return (str(row["name"]) if row and row["name"] else f"сезон {sid}")
+
+
+def rule_title(rule: str, arg: str = "", season_id: Any = 0) -> str:
     """Человеческая подпись правила: «Сыграл игр (не меньше): 10»."""
     key = str(rule or "")
     title, needs = RULES.get(key, ("Своё правило", False))
-    if not needs or not arg:
-        return title
-    if RULE_ARG_KIND.get(key) == "date":
-        return f"{title} по {human_day(arg)}"
-    return f"{title}: {arg}"
+    if key == "place":
+        try:
+            title = PLACE_TITLES.get(int(arg or 0), title)
+        except ValueError:
+            pass
+    elif key == "rank" and arg:
+        title = f"Лучший в ранге «{arg}»"
+    elif needs and arg:
+        if RULE_ARG_KIND.get(key) == "date":
+            title = f"{title} по {human_day(arg)}"
+        else:
+            title = f"{title}: {arg}"
+    if key in NEEDS_SEASON:
+        where = season_name(season_id)
+        title += f" — {where}" if where else " — сезон не выбран"
+    return title
 
 
 # ─────────────────────────── ачивки ───────────────────────────
@@ -155,7 +195,9 @@ def _shape(row: sqlite3.Row, holders: int = 0) -> Dict[str, Any]:
     got = {k: row[k] for k in row.keys() if k != "image"}
     got["has_image"] = bool(row["image"])
     got["holders"] = holders
-    got["rule_title"] = rule_title(row["rule"], row["rule_arg"])
+    keys = row.keys()
+    got["season_id"] = int(row["season_id"]) if "season_id" in keys else 0
+    got["rule_title"] = rule_title(row["rule"], row["rule_arg"], got["season_id"])
     return got
 
 
@@ -204,7 +246,8 @@ def create(title: str, description: str = "", emoji: str = "",
 def update(ach_id: int, **fields: Any) -> None:
     """Правит поля ачивки. Картинку — через set_image."""
     init()
-    allowed = {"title", "description", "emoji", "rule", "rule_arg", "active"}
+    allowed = {"title", "description", "emoji", "rule", "rule_arg", "active",
+               "season_id"}
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
         return
@@ -447,7 +490,10 @@ def shown_map(user_ids: Sequence[Any]) -> Dict[str, List[Dict[str, Any]]]:
             continue
         mine.append({"id": int(r["id"]), "title": r["title"],
                      "description": r["description"], "emoji": r["emoji"],
-                     "has_image": bool(r["has_image"])})
+                     "has_image": bool(r["has_image"]),
+                     # Владельца кладём рядом: по нажатию фронт спрашивает
+                     # итог сезона именно этого человека, а не вообще.
+                     "owner": str(r["user_id"])})
     return out
 
 
@@ -511,6 +557,104 @@ def _games_played(user_id: Any) -> int:
     return total
 
 
+def _row_of_user(user_id: Any) -> int:
+    """Строка листа «Игроки» этого telegram-человека. Нет привязки — 0."""
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT player_row FROM player_links WHERE tg_user_id = ? LIMIT 1",
+            (str(user_id),)).fetchone()
+    return int(row["player_row"]) if row and row["player_row"] else 0
+
+
+def _season(season_id: Any) -> Optional[Dict[str, Any]]:
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute("SELECT * FROM fantasy_seasons WHERE id = ?",
+                           (int(season_id or 0),)).fetchone()
+    return dict(row) if row else None
+
+
+def _place_winners(season_id: Any, place: int) -> List[Tuple[str, str, int]]:
+    """Кто занял это место. [(user_id, режим, очки)].
+
+    По одному на КАЖДЫЙ включённый режим: режимы играют по разным правилам, и
+    чемпион у каждого свой. Сводить их в одну таблицу нельзя — она сравнивала
+    бы несравнимое, а объявлять чемпионом только одного из двух не за что."""
+    import fantasy
+    import fantasy_modes
+    season = _season(season_id)
+    if not season or place < 1:
+        return []
+    out = []
+    for mode in fantasy_modes.enabled(season):
+        rows = fantasy.season_standings_live(int(season_id), mode=mode)
+        if len(rows) < place:
+            continue
+        row = rows[place - 1]
+        title = fantasy_modes.MODE_TITLES.get(mode, mode)
+        out.append((str(row["user_id"]), title, int(row.get("points") or 0)))
+    return out
+
+
+def _rank_leader(season_id: Any, rank: str) -> Tuple[str, float]:
+    """Лучший по очкам сезона среди игроков этого ранга. (user_id, очки).
+
+    Ранг берём из листа «Игроки» — его ведёт тренер, и он же показывается на
+    карточке. Считаем только тех, кто привязан к telegram: значок надо кому-то
+    вручить, а игроку соперника его не отдать."""
+    import fantasy
+    import fantasy_stats
+    import player_identity
+    season = _season(season_id)
+    if not season or not rank:
+        return "", 0.0
+    weights = fantasy.season_weights(season)
+    scopes = fantasy.effective_scopes(season)
+    agg = fantasy_stats.player_aggregates(weights, scope=scopes)
+    by_row = {int(v["row"]): v for v in sheets_cache.get_player_prices().values()}
+    best, best_fp = "", -1.0
+    for uid in player_identity.linked_users():
+        info = by_row.get(_row_of_user(uid))
+        if not info or str(info.get("tier") or "").strip() != rank:
+            continue
+        points = 0.0
+        for ident in player_identity.get_identities(uid):
+            key = f"{ident['source']}:{ident['player_id']}"
+            points += float((agg.get(key) or {}).get("fp") or 0)
+        if points > best_fp:
+            best, best_fp = str(uid), points
+    return best, max(0.0, best_fp)
+
+
+def season_summary(ach_id: int, user_id: Any) -> Dict[str, Any]:
+    """Краткий итог сезона, за который человеку дали этот значок.
+
+    Показывается при нажатии на значок — любому, кто на него нажал. Значок без
+    этого объяснения выглядит как наклейка: «первое место» само по себе не
+    говорит ни за какой сезон, ни с каким результатом."""
+    init()
+    ach = get(ach_id)
+    if not ach or not ach["season_id"]:
+        return {}
+    out: Dict[str, Any] = {"season": season_name(ach["season_id"]), "lines": []}
+    rule, arg = str(ach["rule"] or ""), str(ach["rule_arg"] or "")
+    try:
+        if rule == "place":
+            place = int(arg or 0)
+            for uid, mode, points in _place_winners(ach["season_id"], place):
+                if str(uid) == str(user_id):
+                    out["lines"].append(f"{PLACE_TITLES.get(place, arg)} · "
+                                        f"режим «{mode}»")
+                    out["lines"].append(f"Очки за сезон: {points}")
+        elif rule == "rank":
+            leader, points = _rank_leader(ach["season_id"], arg)
+            if str(leader) == str(user_id):
+                out["lines"].append(f"Ранг «{arg}» — первый по очкам сезона")
+                out["lines"].append(f"Фэнтези-очки: {round(points, 1)}")
+    except Exception as exc:
+        logger.warning("Итог сезона для значка %s не собрался: %s", ach_id, exc)
+    return out
+
+
 def recount(ach_id: Optional[int] = None) -> Dict[str, int]:
     """Проходит по правилам и выдаёт значки, кому положено.
 
@@ -537,6 +681,19 @@ def recount(ach_id: Optional[int] = None) -> Dict[str, int]:
                 continue
             people = [u for u in player_identity.linked_users()
                       if _games_played(u) >= need]
+        elif rule == "place":
+            if not ach["season_id"]:
+                continue
+            try:
+                place = int(ach["rule_arg"] or 0)
+            except ValueError:
+                continue
+            people = [u for u, _mode, _pts in _place_winners(ach["season_id"], place)]
+        elif rule == "rank":
+            if not ach["season_id"]:
+                continue
+            leader, _pts = _rank_leader(ach["season_id"], str(ach["rule_arg"] or ""))
+            people = [leader] if leader else []
         else:
             continue
         for user in people:

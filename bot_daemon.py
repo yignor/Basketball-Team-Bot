@@ -5541,7 +5541,10 @@ def _train_screen(period: str = "") -> Tuple[str, InlineKeyboardMarkup]:
                                         callback_data=f"coach:train:{nxt}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")])
+    # Экран открывают из «📊 Сводки и правки» — туда и возвращаемся. Раньше
+    # кидало в корень раздела: со второго этажа оплат человек терял место, где
+    # был. Всплыло только в сентябре: до начала учёта взносов экран был пуст.
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:money2")])
     return "\n".join(lines).rstrip(), InlineKeyboardMarkup(buttons)
 
 
@@ -9540,6 +9543,8 @@ def _ach_card(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
               + (" — тяжеловата, грузится у каждого" if heavy else ""),
               f"😀 Запасной значок: {a['emoji'] or 'нет'}",
               f"👥 У кого есть: {a['holders']}"]
+    if a["rule"] in achievements.NEEDS_SEASON and not a["season_id"]:
+        lines += ["", "⚠️ Сезон не выбран — правило не сработает."]
     if not a["active"]:
         lines += ["", "⚠️ Выключена — людям не показывается."]
     rows = [
@@ -9553,6 +9558,11 @@ def _ach_card(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
          InlineKeyboardButton("📝 Описание", callback_data=f"admin:ach:desc:{ach_id}")],
         [InlineKeyboardButton("😀 Значок", callback_data=f"admin:ach:emoji:{ach_id}"),
          InlineKeyboardButton("⚙️ Правило", callback_data=f"admin:ach:rule:{ach_id}")],
+    ]
+    if a["rule"] in achievements.NEEDS_SEASON:
+        rows.append([InlineKeyboardButton(
+            "🏆 Сезон", callback_data=f"admin:ach:season:{ach_id}")])
+    rows += [
         [InlineKeyboardButton("👥 Кому выдана", callback_data=f"admin:ach:who:{ach_id}:0")],
         [InlineKeyboardButton("🔕 Выключить" if a["active"] else "🔔 Включить",
                               callback_data=f"admin:ach:onoff:{ach_id}")],
@@ -9575,6 +9585,60 @@ def _ach_rules(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     return ("⚙️ За что выдавать «{}»?\n\nПравило бот считает сам и выдаёт "
             "значок всем подходящим. «Только вручную» — значит, отмечаете "
             "людей сами.".format(a.get("title", "")), InlineKeyboardMarkup(rows))
+
+
+def _ach_seasons(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """За какой сезон даётся значок. Сезоны берём все, не только активные:
+    значок вручают ПОСЛЕ окончания, когда сезон уже закрыт."""
+    import achievements
+    a = achievements.get(ach_id) or {}
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        seasons = [dict(r) for r in conn.execute(
+            "SELECT id, name, status FROM fantasy_seasons ORDER BY id DESC")]
+    rows = []
+    for one in seasons:
+        here = "✅ " if int(a.get("season_id") or 0) == int(one["id"]) else ""
+        shown = one["name"] or f"сезон {one['id']}"
+        mark = "" if one["status"] == "active" else " (завершён)"
+        rows.append([InlineKeyboardButton(
+            f"{here}{shown}{mark}"[:BTN_TEXT],
+            callback_data=f"admin:ach:setseason:{ach_id}:{one['id']}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"admin:ach:one:{ach_id}")])
+    head = "🏆 За какой сезон этот значок?"
+    if not seasons:
+        head += "\n\nСезонов пока нет."
+    return head, InlineKeyboardMarkup(rows)
+
+
+def _ach_places(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import achievements
+    a = achievements.get(ach_id) or {}
+    rows = [[InlineKeyboardButton(
+        ("✅ " if str(a.get("rule_arg") or "") == str(n) else "") + title,
+        callback_data=f"admin:ach:setarg:{ach_id}:{n}")]
+        for n, title in sorted(achievements.PLACE_TITLES.items())]
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"admin:ach:one:{ach_id}")])
+    return ("🥇 Какое место?\n\nЧемпион считается по каждому включённому "
+            "режиму отдельно: правила у них разные, и сводить их в одну "
+            "таблицу нельзя.", InlineKeyboardMarkup(rows))
+
+
+def _ach_ranks(ach_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import achievements
+    import fantasy_prices
+    a = achievements.get(ach_id) or {}
+    rows = [[InlineKeyboardButton(
+        ("✅ " if str(a.get("rule_arg") or "") == name else "") + name,
+        callback_data=f"admin:ach:setarg:{ach_id}:{name}")]
+        for name in reversed(fantasy_prices.RANK_ORDER)]
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"admin:ach:one:{ach_id}")])
+    return ("🏅 Какой ранг?\n\nЗначок получит тот, кто набрал больше всех "
+            "фэнтези-очков за сезон среди игроков этого ранга.",
+            InlineKeyboardMarkup(rows))
 
 
 def _ach_people(ach_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
@@ -9786,6 +9850,19 @@ async def _ach_admin(query, user, parts: List[str]) -> None:
                 "Передумал — /start.")
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
             "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
+    elif what == "season":
+        text, markup = await asyncio.to_thread(_ach_seasons, int(arg))
+
+    elif what == "setseason" and len(parts) > 4:
+        await asyncio.to_thread(achievements.update, int(arg),
+                                season_id=int(parts[4]))
+        text, markup = await asyncio.to_thread(_ach_card, int(arg))
+
+    elif what == "setarg" and len(parts) > 4:
+        await asyncio.to_thread(achievements.update, int(arg),
+                                rule_arg=parts[4])
+        text, markup = await asyncio.to_thread(_ach_card, int(arg))
+
     elif what == "squeeze":
         ok, note = await asyncio.to_thread(achievements.reshrink, int(arg))
         text, markup = await asyncio.to_thread(_ach_card, int(arg))
@@ -9797,12 +9874,20 @@ async def _ach_admin(query, user, parts: List[str]) -> None:
         rule = "" if parts[4] == "none" else parts[4]
         await asyncio.to_thread(achievements.update, int(arg), rule=rule)
         needs = achievements.RULES.get(rule, ("", False))[1]
-        if needs:
+        kind = achievements.RULE_ARG_KIND.get(rule, "")
+        if rule == "place":
+            text, markup = await asyncio.to_thread(_ach_places, int(arg))
+        elif kind == "rank":
+            text, markup = await asyncio.to_thread(_ach_ranks, int(arg))
+        elif needs:
             _clear_pending(uid)
             _awaiting_ach[uid] = f"arg:{arg}"
-            text = ("🔢 Сколько игр нужно для этой ачивки? Пришли число."
-                    "\n\nПередумал — /start.")
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            # Подсказку берём одну на оба входа: своя копия здесь уже
+            # разъехалась с настоящей и спрашивала про игры у правила,
+            # которому нужна дата.
+            text, extra = await asyncio.to_thread(_ach_arg_ask, int(arg))
+            text += "\n\nПередумал — /start."
+            markup = InlineKeyboardMarkup(extra + [[InlineKeyboardButton(
                 "⬅️ Назад", callback_data=f"admin:ach:one:{arg}")]])
         else:
             text, markup = await asyncio.to_thread(_ach_card, int(arg))
