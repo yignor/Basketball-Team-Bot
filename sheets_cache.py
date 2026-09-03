@@ -63,6 +63,11 @@ SHEET_ERRORS = ("#ERROR!", "#REF!", "#N/A", "#VALUE!", "#DIV/0!", "#NAME?",
                 "#NUM!", "#NULL!")
 
 
+def _tidy(value: Any) -> str:
+    """Значение из листа без краёв и двойных пробелов внутри."""
+    return " ".join(str(value or "").split())
+
+
 def is_sheet_error(value: Any) -> bool:
     """Правда ли, что в клетке ошибка формулы, а не значение."""
     return str(value or "").strip().upper() in SHEET_ERRORS
@@ -1063,16 +1068,20 @@ def sync_players(spreadsheet) -> None:
                     continue
                 rows.append((
                     idx,
-                    str(r.get("Фамилия", "")),
-                    str(r.get("Имя", "")),
-                    str(r.get("Ник", "")),
-                    str(r.get("Telegram ID", "")),
-                    str(r.get(PLAYERS_TG_ID_HEADER, "")),
-                    str(r.get("Дата рождения", "")),
-                    str(r.get("Статус", "")),
-                    str(r.get("Команда", "")),
-                    str(r.get("Дата добавления", "")),
-                    str(r.get("Примечания", "")),
+                    # Края и двойные пробелы срезаем здесь, а не у каждого
+                    # потребителя: «Кондратьев » с хвостом не совпадал с
+                    # «Кондратьев» ни в поиске, ни при сверке с протоколом
+                    # лиги, а глазами такой хвост не виден.
+                    _tidy(r.get("Фамилия")),
+                    _tidy(r.get("Имя")),
+                    _tidy(r.get("Ник")),
+                    _tidy(r.get("Telegram ID")),
+                    _tidy(r.get(PLAYERS_TG_ID_HEADER)),
+                    _tidy(r.get("Дата рождения")),
+                    _tidy(r.get("Статус")),
+                    _tidy(r.get("Команда")),
+                    _tidy(r.get("Дата добавления")),
+                    str(r.get("Примечания", "")).strip(),
                     _to_int(r.get(PLAYERS_PRICE_HEADER)),
                     str(r.get(PLAYERS_TIER_HEADER, "")).strip(),
                     _to_int(r.get(PLAYERS_PAY_SEASON_HEADER)),

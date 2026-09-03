@@ -584,6 +584,25 @@ def test_activity_is_two_buttons() -> None:
           f"в лист уходит 1 и пустота: {calls}")
 
 
+def test_names_lose_stray_spaces() -> None:
+    """Хвост пробела в фамилии не доезжает до зеркала.
+
+    В листе лежало «Кондратьев » — глазами не видно, а совпадать перестаёт всё:
+    поиск игрока, сверка с протоколом лиги, ключ цены."""
+    print("\n=== пробелы в именах ===")
+    check(sheets_cache._tidy("Кондратьев ") == "Кондратьев", "хвост срезан")
+    check(sheets_cache._tidy("  Иван   Иванович ") == "Иван Иванович",
+          "и двойные пробелы внутри")
+    check(sheets_cache._tidy(None) == "", "пустое остаётся пустым")
+
+    # Чистка стоит на пути, который реально наполняет зеркало.
+    src = (ROOT / "sheets_cache.py").read_text()
+    body = src[src.index("                rows.append(("):]
+    body = body[:body.index("conn.execute(\"BEGIN\")")]
+    check("_tidy(r.get(\"Фамилия\"))" in body,
+          "фамилия чистится там же, где кладётся в базу")
+
+
 def main() -> int:
     test_all_columns_editable()
     test_card_shows_every_field()
@@ -602,6 +621,7 @@ def main() -> int:
     test_every_call_site_names_a_real_field()
     test_broken_formula_is_not_a_setting()
     test_activity_is_two_buttons()
+    test_names_lose_stray_spaces()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
