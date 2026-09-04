@@ -149,31 +149,64 @@ def upcoming_games(limit: int = 5) -> List[Dict[str, Any]]:
 KEEP_DAYS = 3
 
 
+def _game_days() -> Dict[str, str]:
+    """{номер игры: настоящая дата}. Из опросов — там она живая.
+
+    Дату берём у ИГРЫ, а не из строки шутки: лига переприсваивает номера, и
+    записанная при создании дата может разойтись с настоящей. Шутка должна
+    уйти вместе со своей игрой, а не со своей копией даты."""
+    marks = ",".join("?" * len(POLL_TYPES))
+    with sheets_cache.get_connection() as conn:
+        rows = conn.execute(
+            f"""SELECT game_id, game_date FROM service_records
+                 WHERE deleted = 0 AND game_id != '' AND game_date != ''
+                   AND data_type IN ({marks})""", POLL_TYPES).fetchall()
+    out: Dict[str, str] = {}
+    for r in rows:
+        iso = _iso(str(r["game_date"]))
+        if iso:
+            out[str(r["game_id"])] = iso
+    return out
+
+
 def drop_past(days: int = KEEP_DAYS) -> Dict[str, int]:
-    """Убирает фразы к сыгранным играм. {игр, фраз}.
+    """Убирает отыгравшие фразы. {игр, фраз}.
 
-    Фраза привязана к конкретной игре и после неё бессмысленна: она уже ушла в
-    сообщение о результате либо не понадобилась вовсе. Оставлять её значит
-    копить в списке автора мусор, который он не может отличить от будущих.
+    Уходят две породы:
 
-    Игру без даты не трогаем: непонятно, прошла она или нет."""
+    * **привязанные к игре** — когда эта игра прошла. Дату берём у самой игры,
+      иначе фраза останется висеть при переносе матча;
+    * **уже отправленные** — по дате отправки. Таких большинство: фраза чаще
+      оставляется «на ближайшую игру», без номера, и без этого правила она
+      висела бы в списке автора вечно, хотя своё уже отыграла.
+
+    Не тронем ту, что ещё ждёт своего часа: не отправлена и к игре не
+    привязана. И ту, чью игру не нашли, — непонятно, прошла она или нет."""
     from datetime import date, timedelta
     sheets_cache.init_db()
     edge = (date.today() - timedelta(days=max(0, int(days)))).isoformat()
+    days_of = _game_days()
     with sheets_cache.get_connection() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT id, game_id, game_date FROM player_jokes "
-            "WHERE game_date != ''")]
-        old = [r for r in rows if str(r["game_date"])[:10] < edge]
-        if old:
+            "SELECT id, game_id, game_date, used_at FROM player_jokes")]
+    gone, games = [], set()
+    for r in rows:
+        game_id = str(r["game_id"] or "")
+        when = ""
+        if game_id:
+            when = days_of.get(game_id) or str(r["game_date"] or "")[:10]
+        if not when and str(r["used_at"] or ""):
+            when = str(r["used_at"])[:10]      # отправлена — своё отыграла
+        if when and when < edge:
+            gone.append(int(r["id"]))
+            games.add(game_id or "без игры")
+    if gone:
+        with sheets_cache.get_connection() as conn:
             conn.executemany("DELETE FROM player_jokes WHERE id = ?",
-                             [(int(r["id"]),) for r in old])
+                             [(i,) for i in gone])
             conn.commit()
-    games = len({str(r["game_id"]) for r in old})
-    if old:
-        logger.info("Шутки к сыгранным играм: убрано %d по %d играм",
-                    len(old), games)
-    return {"games": games, "jokes": len(old)}
+        logger.info("Отыгравшие шутки: убрано %d (игр %d)", len(gone), len(games))
+    return {"games": len(games), "jokes": len(gone)}
 
 
 def add(target_row: int, occasion: str, text: str,

@@ -320,6 +320,17 @@ def test_old_jokes_go_but_fresh_stay() -> None:
         conn.execute("DELETE FROM player_jokes WHERE game_id LIKE 'j-%'")
         conn.commit()
 
+    def used(game_id, when):
+        """Фраза без номера игры, но уже отправленная."""
+        with sheets_cache.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO player_jokes (target_row, occasion, text, "
+                "author_id, author_nick, created_at, active, game_source, "
+                "game_id, game_label, game_date, used_at) VALUES (9, 'game', "
+                "?, '1', '', ?, 1, '', '', '', '', ?)",
+                (game_id, now, when))
+            conn.commit()
+
     old_day = (date.today() - timedelta(days=days + 2)).isoformat()
     edge_day = (date.today() - timedelta(days=max(0, days - 1))).isoformat()
     soon = (date.today() + timedelta(days=2)).isoformat()
@@ -327,22 +338,33 @@ def test_old_jokes_go_but_fresh_stay() -> None:
     joke("j-edge", edge_day)
     joke("j-soon", soon)
     joke("j-nodate", "")
+    # Большинство фраз оставляют «на ближайшую игру», без номера. Отыгравшую
+    # такую надо убирать по дате отправки, иначе она висит вечно.
+    used("j-used-old", old_day + "T20:00:00+00:00")
+    used("j-used-fresh", edge_day + "T20:00:00+00:00")
 
     res = player_jokes.drop_past()
-    check(res["jokes"] == 1, f"убрана одна старая: {res}")
+    check(res["jokes"] == 2, f"убраны старая по игре и старая отправленная: {res}")
 
     with sheets_cache.get_connection() as conn:
         left = sorted(r[0] for r in conn.execute(
             "SELECT game_id FROM player_jokes WHERE game_id LIKE 'j-%'"))
-    check(left == ["j-edge", "j-nodate", "j-soon"],
-          f"осталось нужное: {left}")
+        texts = sorted(r[0] for r in conn.execute(
+            "SELECT text FROM player_jokes WHERE text LIKE 'j-used%'"))
+    check(left == ["j-edge", "j-nodate", "j-soon"], f"осталось нужное: {left}")
     check("j-edge" in left, "свежая игра ещё в запасе: протокол может опоздать")
     check("j-nodate" in left, "игру без даты не трогаем — непонятно, прошла ли")
+    check(texts == ["j-used-fresh"], f"свежая отправленная ещё жива: {texts}")
 
     check(player_jokes.drop_past()["jokes"] == 0, "повторный прогон пуст")
 
+    # Не отправленная и не привязанная — ждёт своего часа, её не трогаем.
+    joke("", "")
+    check(player_jokes.drop_past()["jokes"] == 0, "ждущая своего часа осталась")
+
     with sheets_cache.get_connection() as conn:
-        conn.execute("DELETE FROM player_jokes WHERE game_id LIKE 'j-%'")
+        conn.execute("DELETE FROM player_jokes WHERE game_id LIKE 'j-%' "
+                     "OR text LIKE 'j-%' OR target_row = 9")
         conn.commit()
 
 
