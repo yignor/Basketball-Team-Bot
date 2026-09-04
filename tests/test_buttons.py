@@ -49,6 +49,9 @@ FORBIDDEN = re.compile(
     # Ачивки: give меняет настоящие выдачи, recount перебирает всю
     # статистику лиг, del2 сносит значок у всех.
     r"|admin:ach:(give|recount|del2|onoff|setrule):"
+    # Взносы за турнир: paid пишет живой платёж, t меняет состав,
+    # del2 сносит сбор, remind рассылает команде.
+    r"|coach:fee:(paid|t|del2|onoff|setlg|remind):"
     # Частные занятия: это чужие деньги. Обход ходит по настоящей базе, и
     # начислить долг или снять оплату «просто чтобы проверить кнопку» нельзя.
     r"|pl:(t|done|paid|offok|arch|back|rm|repon|repoff2):"

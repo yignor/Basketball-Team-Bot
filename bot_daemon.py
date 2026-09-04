@@ -2334,6 +2334,7 @@ def _clear_pending(uid: int) -> None:
     _group_letter.pop(uid, None)
     _awaiting_ach.pop(uid, None)
     _awaiting_badge.pop(uid, None)
+    _awaiting_fee.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -4889,6 +4890,7 @@ def _money_markup() -> InlineKeyboardMarkup:
                               callback_data="coach:remind:season")],
         [InlineKeyboardButton("📨 Напомнить про игры",
                               callback_data="coach:remind:game")],
+        [InlineKeyboardButton("🏆 Взносы за турнир", callback_data="coach:fee:list")],
         [InlineKeyboardButton("📊 Сводки и правки", callback_data="coach:money2")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
@@ -5252,8 +5254,7 @@ def _delpay_screen(page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
              "остаётся историей.", ""]
     rows = []
     for it in items:
-        what = ("игра" if it["kind"] == coach_payments.KIND_GAME else
-                "тренировки" if it["kind"] == coach_payments.KIND_SEASON else "?")
+        what = coach_payments.KIND_TITLES.get(it["kind"], "?")
         extra = f" ×{it['games']}" if it["games"] else ""
         lines.append(f"• {coach_payments._human_date(it['paid_at'])} — {it['title']}: "
                      f"{it['amount']} ₽ ({what}{extra})")
@@ -5284,8 +5285,7 @@ def _delpay_ask(payment_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMark
     if not found:
         return _delpay_screen(page)
     it = found[0]
-    what = ("игру" if it["kind"] == coach_payments.KIND_GAME else
-            "тренировки" if it["kind"] == coach_payments.KIND_SEASON else "?")
+    what = coach_payments.KIND_TITLES.get(it["kind"], "?")
     return (f"🗑 Удалить платёж?\n\n{it['title']} — {it['amount']} ₽ за {what}, "
             f"{coach_payments._human_date(it['paid_at'])}.\n\n"
             "Запись уйдёт из расчётов, и человек снова станет должником за "
@@ -6288,6 +6288,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     what = parts[1] if len(parts) > 1 else "main"
     # Лист «Игроки» правит и тренер: это его команда и его таблица. Экраны те
     # же, что в админке, отличается только адрес возврата.
+    if what == "fee":
+        await _fee_admin(query, context, user, parts)
+        return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
         return
@@ -10156,6 +10159,322 @@ async def _recount_achievements() -> None:
         log.info(f"Ачивки: выдано по правилам {res['given']}")
 
 
+# ─────────────────── взносы за турнир ───────────────────
+
+# Что тренер вводит по сбору: uid -> «что:id[:строка]».
+_awaiting_fee: Dict[int, str] = {}
+
+FEE_HEAD = ("🏆 Взносы за турнир\n\nОплата за сезон целиком — там, где лига не "
+            "берёт за каждую игру. Живёт рядом с ежемесячными взносами и "
+            "оплатой игр, ничего не отменяя.")
+
+
+def _fee_list() -> Tuple[str, InlineKeyboardMarkup]:
+    import season_fees
+    got = season_fees.all_fees()
+    rows = []
+    for f in got:
+        t = season_fees.totals(int(f["id"]))
+        mark = "" if f["active"] else " (закрыт)"
+        rows.append([InlineKeyboardButton(
+            f"{f['title']} · {t['debt']} ₽ ждём{mark}"[:BTN_TEXT],
+            callback_data=f"coach:fee:one:{f['id']}")])
+    rows.append([InlineKeyboardButton("➕ Новый сбор", callback_data="coach:fee:new")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:money")])
+    text = FEE_HEAD if got else FEE_HEAD + "\n\nПока ни одного."
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _fee_card(fee_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import season_fees
+    f = season_fees.fee(fee_id)
+    if not f:
+        return _fee_list()
+    t = season_fees.totals(fee_id)
+    lines = [f"🏆 {f['title']}", ""]
+    lines.append(f"💰 Базовая сумма: {f['amount'] or '—'} ₽")
+    lines.append(f"🏅 Лига: {f['league'] or 'не привязана'}")
+    if f["due_date"]:
+        lines.append(f"📅 Срок: до {season_fees.human_day(f['due_date'])}")
+    lines.append(f"👥 Платят: {t['people']} чел.")
+    if t["people"]:
+        lines.append(f"✅ Внесено: {t['paid']} из {t['need']} ₽ · "
+                     f"осталось {t['debt']} ₽")
+    if not f["amount"]:
+        lines += ["", "⚠️ Сумма не задана — с людей ничего не ждём."]
+    owing = season_fees.debtors(fee_id)
+    if owing:
+        lines += ["", "Не внесли: " + ", ".join(r["title"] for r in owing[:10])
+                  + ("…" if len(owing) > 10 else "")]
+    rows = [
+        [InlineKeyboardButton("👥 Кто платит", callback_data=f"coach:fee:who:{fee_id}:0")],
+        [InlineKeyboardButton("💳 Отметить оплату",
+                              callback_data=f"coach:fee:pay:{fee_id}:0")],
+        [InlineKeyboardButton("📨 Напомнить должникам",
+                              callback_data=f"coach:fee:remind:{fee_id}")],
+        [InlineKeyboardButton("💰 Сумма", callback_data=f"coach:fee:amount:{fee_id}"),
+         InlineKeyboardButton("📅 Срок", callback_data=f"coach:fee:due:{fee_id}")],
+        [InlineKeyboardButton("🏅 Лига", callback_data=f"coach:fee:lg:{fee_id}"),
+         InlineKeyboardButton("✏️ Название", callback_data=f"coach:fee:title:{fee_id}")],
+        [InlineKeyboardButton("🔕 Закрыть сбор" if f["active"] else "🔔 Открыть",
+                              callback_data=f"coach:fee:onoff:{fee_id}")],
+        [InlineKeyboardButton("🗑 Удалить", callback_data=f"coach:fee:del:{fee_id}")],
+        [InlineKeyboardButton("⬅️ К сборам", callback_data="coach:fee:list")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _fee_people(fee_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кто платит за турнир. Состав собирает тренер: кто едет, знает только он."""
+    import coach_payments
+    import season_fees
+    f = season_fees.fee(fee_id)
+    if not f:
+        return _fee_list()
+    inside = set(season_fees.member_rows(fee_id))
+    people = coach_payments.players()
+    pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(
+        ("✅ " if int(p["row"]) in inside else "▫️ ") + p["title"][:BTN_TEXT - 3],
+        callback_data=f"coach:fee:t:{fee_id}:{p['row']}:{page}")] for p in chunk]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "◀️", callback_data=f"coach:fee:who:{fee_id}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}",
+                                        callback_data="coach:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(
+                "▶️", callback_data=f"coach:fee:who:{fee_id}:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("✅ Готово",
+                                      callback_data=f"coach:fee:one:{fee_id}")])
+    return (f"👥 Кто платит за «{f['title']}»\n\nНажми на человека, чтобы "
+            f"добавить или убрать. Сейчас платят {len(inside)}.",
+            InlineKeyboardMarkup(rows))
+
+
+def _fee_debtors(fee_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кому отметить оплату. Показываем только тех, кто ещё должен."""
+    import season_fees
+    f = season_fees.fee(fee_id)
+    if not f:
+        return _fee_list()
+    owing = season_fees.debtors(fee_id)
+    if not owing:
+        return (f"💳 «{f['title']}»\n\nВсе внесли — отмечать нечего.",
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Назад", callback_data=f"coach:fee:one:{fee_id}")]]))
+    pages = max(1, (len(owing) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = owing[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(
+        f"{r['title']} · {r['debt']} ₽"[:BTN_TEXT],
+        callback_data=f"coach:fee:paid:{fee_id}:{r['row']}:{page}")] for r in chunk]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                "◀️", callback_data=f"coach:fee:pay:{fee_id}:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}",
+                                        callback_data="coach:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton(
+                "▶️", callback_data=f"coach:fee:pay:{fee_id}:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"coach:fee:one:{fee_id}")])
+    return (f"💳 Кто внёс за «{f['title']}»\n\nНажми — запишу полную сумму его "
+            "долга. Частичную оплату задай своей суммой в «Кто платит».",
+            InlineKeyboardMarkup(rows))
+
+
+def _fee_leagues(fee_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import season_fees
+    f = season_fees.fee(fee_id) or {}
+    rows = []
+    for i, item in enumerate(season_fees.leagues()):
+        here = "✅ " if (item["source"] == f.get("source")
+                        and item["team_id"] == str(f.get("team_id"))) else ""
+        rows.append([InlineKeyboardButton(
+            f"{here}{item['title']}"[:BTN_TEXT],
+            callback_data=f"coach:fee:setlg:{fee_id}:{i}")])
+    rows.append([InlineKeyboardButton("🚫 Без лиги",
+                                      callback_data=f"coach:fee:setlg:{fee_id}:-1")])
+    rows.append([InlineKeyboardButton("⬅️ Назад",
+                                      callback_data=f"coach:fee:one:{fee_id}")])
+    return ("🏅 К какой лиге относится сбор?\n\nПривязка ничего не рассылает — "
+            "она говорит, за какой турнир эти деньги.", InlineKeyboardMarkup(rows))
+
+
+async def _fee_remind(app: Application, fee_id: int) -> str:
+    """Рассылает напоминание должникам сбора. Только в личку."""
+    import season_fees
+    import training_dues
+    owing = await asyncio.to_thread(season_fees.debtors, fee_id)
+    sent = skipped = 0
+    for row in owing:
+        uid = await asyncio.to_thread(training_dues.chat_id_of, int(row["row"]))
+        if not uid:
+            skipped += 1
+            continue
+        try:
+            text = await asyncio.to_thread(season_fees.reminder, fee_id, row)
+            await app.bot.send_message(chat_id=int(uid), text=text)
+            sent += 1
+        except Exception as e:
+            log.info(f"Взнос за турнир: не дошло до строки {row['row']}: {e}")
+            skipped += 1
+    out = f"📨 Отправлено: {sent}."
+    if skipped:
+        out += f" Не дошло: {skipped} (бота не запускали или закрыли личку)."
+    return out
+
+
+async def _fee_admin(query, context, user, parts: List[str]) -> None:
+    """Кнопки раздела взносов за турнир."""
+    import season_fees
+    what = parts[2] if len(parts) > 2 else "list"
+    arg = parts[3] if len(parts) > 3 else ""
+    uid = user.id
+
+    if what == "list":
+        _clear_pending(uid)
+        text, markup = await asyncio.to_thread(_fee_list)
+    elif what == "one":
+        text, markup = await asyncio.to_thread(_fee_card, int(arg))
+    elif what == "new":
+        _clear_pending(uid)
+        _awaiting_fee[uid] = "new"
+        text = ("🏆 Как назвать сбор?\n\nНапример: «Зимний кубок 2027». Сумму и "
+                "состав добавим следующим шагом.\n\nПередумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data="coach:fee:list")]])
+    elif what in ("amount", "due", "title"):
+        _clear_pending(uid)
+        _awaiting_fee[uid] = f"{what}:{arg}"
+        asks = {"amount": "💰 Сколько стоит участие? Пришли число — это базовая "
+                          "сумма, своя у человека задаётся отдельно.",
+                "due": "📅 До какого числа собираем? Пришли дату: «30.09.2026». "
+                       "«-» — убрать срок.",
+                "title": "✏️ Новое название сбора."}
+        text = asks[what] + "\n\nПередумал — /start."
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"coach:fee:one:{arg}")]])
+    elif what == "who":
+        page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+        text, markup = await asyncio.to_thread(_fee_people, int(arg), page)
+    elif what == "t" and len(parts) > 4:
+        page = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+        await asyncio.to_thread(season_fees.toggle, int(arg), int(parts[4]))
+        text, markup = await asyncio.to_thread(_fee_people, int(arg), page)
+    elif what == "pay":
+        page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+        text, markup = await asyncio.to_thread(_fee_debtors, int(arg), page)
+    elif what == "paid" and len(parts) > 4:
+        page = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+        res = await asyncio.to_thread(season_fees.mark_paid, int(arg),
+                                      int(parts[4]), None, str(uid))
+        await query.answer(res.get("error") or "Записал",
+                           show_alert=bool(res.get("error")))
+        asyncio.create_task(_rebuild_payments_sheet())
+        text, markup = await asyncio.to_thread(_fee_debtors, int(arg), page)
+    elif what == "remind":
+        await query.edit_message_text("📨 Рассылаю…")
+        note = await _fee_remind(context.application, int(arg))
+        text, markup = await asyncio.to_thread(_fee_card, int(arg))
+        text = note + "\n\n" + text
+    elif what == "lg":
+        text, markup = await asyncio.to_thread(_fee_leagues, int(arg))
+    elif what == "setlg" and len(parts) > 4:
+        idx = int(parts[4])
+        items = await asyncio.to_thread(season_fees.leagues)
+        if idx < 0 or idx >= len(items):
+            await asyncio.to_thread(season_fees.update, int(arg), source="", team_id="")
+        else:
+            await asyncio.to_thread(season_fees.update, int(arg),
+                                    source=items[idx]["source"],
+                                    team_id=items[idx]["team_id"])
+        text, markup = await asyncio.to_thread(_fee_card, int(arg))
+    elif what == "onoff":
+        f = await asyncio.to_thread(season_fees.fee, int(arg)) or {}
+        await asyncio.to_thread(season_fees.update, int(arg),
+                                active=0 if f.get("active") else 1)
+        text, markup = await asyncio.to_thread(_fee_card, int(arg))
+    elif what == "del":
+        f = await asyncio.to_thread(season_fees.fee, int(arg)) or {}
+        text = (f"🗑 Удалить сбор «{f.get('title', '?')}»?\n\nУйдёт сам сбор и "
+                "его состав. Внесённые платежи останутся: деньги были, и "
+                "стирать их вместе с настройкой нельзя.")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 Да, удалить",
+                                  callback_data=f"coach:fee:del2:{arg}")],
+            [InlineKeyboardButton("⬅️ Назад",
+                                  callback_data=f"coach:fee:one:{arg}")]])
+    elif what == "del2":
+        await asyncio.to_thread(season_fees.delete, int(arg))
+        text, markup = await asyncio.to_thread(_fee_list)
+        text = "🗑 Удалил.\n\n" + text
+    else:
+        text, markup = await asyncio.to_thread(_fee_list)
+
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ввод по сбору: название, сумма, срок."""
+    import season_fees
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_fee:
+        return
+    if not _can_see_reports(user):
+        _awaiting_fee.pop(user.id, None)
+        return
+    pending = _awaiting_fee.pop(user.id)
+    text = (msg.text or "").strip()
+    kind, _, arg = pending.partition(":")
+
+    if kind == "new":
+        fee_id, note = await asyncio.to_thread(season_fees.create, text)
+        if not fee_id:
+            _awaiting_fee[user.id] = pending
+            await msg.reply_text(note + "\n\nПришли другое название.")
+            raise ApplicationHandlerStop
+        screen, markup = await asyncio.to_thread(_fee_card, fee_id)
+        await msg.reply_text(f"{note}\n\n{screen}", reply_markup=markup)
+        raise ApplicationHandlerStop
+
+    if kind == "amount":
+        if not text.isdigit():
+            _awaiting_fee[user.id] = pending
+            await msg.reply_text("Нужно число. Например «7000».")
+            raise ApplicationHandlerStop
+        await asyncio.to_thread(season_fees.update, int(arg), amount=int(text))
+    elif kind == "due":
+        if text in ("-", "—"):
+            await asyncio.to_thread(season_fees.update, int(arg), due_date="")
+        else:
+            day = season_fees.parse_day(text)
+            if not day:
+                _awaiting_fee[user.id] = pending
+                await msg.reply_text("Не понял дату. Напиши «30.09.2026» "
+                                     "или «-», чтобы убрать срок.")
+                raise ApplicationHandlerStop
+            await asyncio.to_thread(season_fees.update, int(arg), due_date=day)
+    elif kind == "title":
+        if not season_fees.clean(text):
+            _awaiting_fee[user.id] = pending
+            await msg.reply_text("Название не может быть пустым.")
+            raise ApplicationHandlerStop
+        await asyncio.to_thread(season_fees.update, int(arg),
+                                title=season_fees.clean(text))
+    screen, markup = await asyncio.to_thread(_fee_card, int(arg))
+    await msg.reply_text(screen, reply_markup=markup)
+    raise ApplicationHandlerStop
+
+
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -10766,6 +11085,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_ach_text), group=15)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_fee_text), group=17)
     # Картинка значка приходит фотографией или файлом — своя группа, с
     # текстовыми диалогами не пересекается.
     app.add_handler(MessageHandler(

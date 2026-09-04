@@ -23,7 +23,8 @@ SUITES = ["test_buttons.py", "test_flows.py", "test_private.py",
           "test_fantasy.py", "test_video.py", "test_access.py",
           "test_moments.py", "test_webapp.py", "test_calendar.py", "test_league_push.py", "test_players_edit.py", "test_templates.py", "test_protocol_pdf.py", "test_protocol_import.py",
           "test_groups.py",
-          "test_achievements.py"]
+          "test_achievements.py",
+          "test_season_fees.py"]
 
 
 def main() -> int:
