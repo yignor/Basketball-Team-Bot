@@ -5472,7 +5472,9 @@ def _roster_screen(source: str, game_id: str) -> Tuple[str, InlineKeyboardMarkup
     game_roster.ensure_state(game)
     picked = game_roster.roster(source, game_id)
     picked_rows = {p["row"] for p in picked}
-    ready = game_roster.voters(str(game_id))
+    # Дату передаём намеренно: под одним номером игры могут лежать голоса
+    # двух разных матчей — лига переприсваивает номера.
+    ready = game_roster.voters(str(game_id), game_date=str(game.get("date") or ""))
 
     lines = [f"🏀 Состав на игру: {game_roster.game_label(game)}", ""]
     if picked:
@@ -6008,7 +6010,10 @@ def _ready_but_out(source: str, game_id: str) -> List[Dict[str, Any]]:
     некуда — их тренер видит отдельной строкой на экране состава."""
     import game_roster
     picked = {p["row"] for p in game_roster.roster(source, game_id)}
-    return [v for v in game_roster.voters(str(game_id))
+    game = next((g for g in game_roster.games()
+                 if g["source"] == source and g["game_id"] == str(game_id)), None)
+    day = str((game or {}).get("date") or "")
+    return [v for v in game_roster.voters(str(game_id), game_date=day)
             if v["linked"] and v["row"] not in picked]
 
 

@@ -135,17 +135,38 @@ def game_label(game: Dict[str, Any]) -> str:
     return f"{opp} · {when}{time}"
 
 
-def voters(game_id: str, vote_type: str = VOTE_READY) -> List[Dict[str, Any]]:
+def voters(game_id: str, vote_type: str = VOTE_READY,
+           game_date: str = "") -> List[Dict[str, Any]]:
     """Кто отметился в опросе. Заодно ищем, чья это строка в листе «Игроки».
 
     Не опознали (человек не привязан к строке) — всё равно показываем: тренеру
-    важно видеть, кто вызвался, а привязать можно потом."""
+    важно видеть, кто вызвался, а привязать можно потом.
+
+    game_date отсекает чужие голоса. Лига переприсваивает номера игр, и под
+    одним id накопились два опроса: 12 голосов за 01.09 и 17 за 05.09. На
+    экране состава они складывались, и проголосовавший в обоих показывался
+    дважды. Даты нет или под неё голосов не нашлось — берём все: показать
+    лишнее лучше, чем потерять весь список.
+
+    Один человек — один голос в любом случае: оставляем последний. Даже когда
+    даты нет, дважды «Готов» от одного человека не бывает."""
     sheets_cache.init_db()
+    want = str(game_date or "")[:10]
     with sheets_cache.get_connection() as conn:
-        rows = conn.execute(
-            """SELECT user_id, username, first_name, last_name FROM game_votes
-               WHERE game_id = ? AND vote_type = ?""",
-            (str(game_id), vote_type)).fetchall()
+        rows = [dict(r) for r in conn.execute(
+            """SELECT user_id, username, first_name, last_name, game_date,
+                      updated_at, synced_at FROM game_votes
+               WHERE game_id = ? AND vote_type = ?
+               ORDER BY synced_at, updated_at""",
+            (str(game_id), vote_type))]
+    if want:
+        mine = [r for r in rows if str(r.get("game_date") or "")[:10] == want]
+        if mine:
+            rows = mine
+    seen: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        seen[str(r["user_id"])] = r          # последний побеждает
+    rows = list(seen.values())
     out = []
     for r in rows:
         link = sheets_cache.get_player_link(str(r["user_id"]))

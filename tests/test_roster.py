@@ -181,10 +181,52 @@ def test_roster_reads_sheet_once() -> None:
     check(len(rows) > 0, f"состав при этом собран: {len(rows)}")
 
 
+def test_votes_of_another_match_do_not_leak() -> None:
+    """Голоса чужого матча не попадают в состав, и один человек — один раз.
+
+    Жалоба 04.09.2026: в списке «отметились, но не в составе» Шлепикас Роман
+    стоял дважды. Лига переприсваивает номера игр, и под id 1086119 накопились
+    два опроса — 12 голосов за 01.09 и 17 за 05.09. Экран складывал оба."""
+    print("\n=== голоса двух матчей под одним номером ===")
+    import game_roster
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM game_votes WHERE game_id = 'dup-1'")
+        for poll, day, uid in (("p1", "2026-09-01", "700001"),
+                               ("p2", "2026-09-05", "700001"),
+                               ("p2", "2026-09-05", "700002")):
+            conn.execute(
+                "INSERT INTO game_votes (tg_poll_id, user_id, username, "
+                "first_name, last_name, vote_text, vote_type, game_id, "
+                "game_date, updated_at, synced_at) VALUES (?, ?, '', ?, '', "
+                "'✅ Готов', ?, 'dup-1', ?, ?, ?)",
+                (poll, uid, "Имя" + uid[-1], game_roster.VOTE_READY, day, now, now))
+        conn.commit()
+
+    both = game_roster.voters("dup-1")
+    check(len(both) == 2, f"без даты — по одному на человека: {len(both)}")
+
+    fifth = game_roster.voters("dup-1", game_date="2026-09-05")
+    check(len(fifth) == 2, f"за 05.09 двое: {len(fifth)}")
+    first = game_roster.voters("dup-1", game_date="2026-09-01")
+    check(len(first) == 1, f"за 01.09 один: {len(first)}")
+    check([v["user_id"] for v in first] == ["700001"], "и это тот, кто голосовал")
+
+    # Дата, под которую голосов нет: показываем всё, а не пустоту.
+    none_day = game_roster.voters("dup-1", game_date="2026-12-31")
+    check(len(none_day) == 2, "под неизвестную дату показываем всех, а не никого")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM game_votes WHERE game_id = 'dup-1'")
+        conn.commit()
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
     test_guest_in_roster()
+    test_votes_of_another_match_do_not_leak()
     test_guest_not_in_money()
     test_guest_to_start()
     test_rename_guest()
