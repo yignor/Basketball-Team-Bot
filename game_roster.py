@@ -670,7 +670,11 @@ def game_debts() -> List[Dict[str, Any]]:
             continue
         owed = len(owed_games)
         player = coach_payments.player_by_row(row) or {}
-        price = coach_payments.game_price(player)
+        # Своя цена, без подстановки типовой: убранная тренером цена — это
+        # «с этого не берём», и требовать с него типовые 900 ₽ нельзя.
+        price = coach_payments.own_game_price(player)
+        if not price:
+            continue
         out.append({"row": row, "title": player.get("title") or f"строка {row}",
                     "games": owed, "amount": owed * price,
                     "last": owed_games[-1][2],
@@ -727,9 +731,12 @@ def debts_by_game() -> List[Dict[str, Any]]:
         people = []
         for player_row in who:
             player = coach_payments.player_by_row(player_row) or {}
+            amount = coach_payments.own_game_price(player)
+            if not amount:
+                continue        # цена убрана — с человека не ждём
             people.append({"row": player_row,
                            "title": player.get("title") or f"строка {player_row}",
-                           "amount": coach_payments.game_price(player)})
+                           "amount": amount})
         people.sort(key=lambda p: p["title"])
         out.append({"game": game, "rows": people,
                     "total": sum(p["amount"] for p in people)})

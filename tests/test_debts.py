@@ -411,11 +411,11 @@ def test_wrong_payment_can_be_taken_back() -> None:
 
 
 def test_active_without_fee_is_flagged() -> None:
-    """Отметка стоит, а взноса нет — тренеру говорят прямо.
+    """Взнос убран — с человека не ждём, и это видно списком.
 
-    Самый тихий способ потерять деньги: человек выглядит занимающимся, но
-    должником не считается вовсе, потому что считать нечего. За игры бот хотя
-    бы подставит типовую цену команды, за тренировки — нет."""
+    Тренер работает через бота, и стёртая сумма — его решение «с этого не
+    берём», а не забытое поле. Поэтому на экране факт, а не требование
+    заполнить: но состав сбора должен быть виден целиком."""
     print("\n=== активен, но без суммы ===")
     import bot_daemon as bd
     import training_dues as td
@@ -432,7 +432,9 @@ def test_active_without_fee_is_flagged() -> None:
     check(mine and not mine[0]["debt"], "должником не считается — считать нечего")
 
     text, _ = bd._train_screen(period)
-    check("взнос не проставлен" in text, "и тренеру про это сказано")
+    check("не ждём" in text, "и тренеру про это сказано — фактом, не упрёком")
+    check("проставь" not in text.lower(),
+          "убранная сумма — решение тренера, а не пропуск: не подгоняем")
     check("Безсуммы" in text, f"с именем: {text[-160:]!r}"[:120])
 
     with sheets_cache.get_connection() as conn:
@@ -441,11 +443,77 @@ def test_active_without_fee_is_flagged() -> None:
     # В заготовке хватает и других безденежных, поэтому проверяем не всю
     # жалобу, а конкретного человека: он должен из неё пропасть.
     text, _ = bd._train_screen(period)
-    warn = text[text.index("взнос не проставлен"):] if "взнос не проставлен" in text else ""
+    warn = text[text.index("Взнос не задан"):] if "Взнос не задан" in text else ""
     check("Безсуммы" not in warn, "проставили сумму — из жалобы пропал")
 
     with sheets_cache.get_connection() as conn:
         conn.execute("DELETE FROM players WHERE row_index = 702")
+        conn.commit()
+
+
+def test_cleared_game_price_means_no_demand() -> None:
+    """Убрал цену игры — с человека не требуем.
+
+    Тренер работает через бота, и стёртая цена — решение «с этого не берём».
+    За тренировки так было всегда, а за игры бот подставлял самую частую цену
+    команды и требовал её с того, у кого поле пустое."""
+    print("\n=== убранная цена игры ===")
+    import coach_payments
+    import game_roster
+
+    seed_player(703, "Безцены")
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_game = 0 WHERE row_index = 703")
+        conn.commit()
+    person = coach_payments.player_by_row(703) or {}
+
+    check(coach_payments.own_game_price(person) == 0, "своя цена — ноль")
+    check(coach_payments.game_price(person) > 0,
+          "а типовая по команде осталась: она нужна для разбора СМС")
+
+    owing = [d for d in game_roster.game_debts() if int(d["row"]) == 703]
+    check(not owing, f"в должниках за игры его нет: {owing}")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_game = 900 WHERE row_index = 703")
+        conn.commit()
+    check(coach_payments.own_game_price(
+        coach_payments.player_by_row(703) or {}) == 900,
+        "вернули цену — вернулась и своя сумма")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players WHERE row_index = 703")
+        conn.commit()
+
+
+def test_marking_twice_does_not_double(bd=None) -> None:
+    """Двойной тычок «отметил тренер» не заводит второй взнос.
+
+    Пятеро оказались «оплатившими» игру 09.08 дважды: отпечаток собирался из
+    текущей МИНУТЫ, и нажатия в 10:26:43 и 10:27:00 прошли как разные. Для игр
+    это починили тогда же, для взносов — нет."""
+    print("\n=== двойная отметка взноса ===")
+    import training_dues as td
+
+    seed_player(704, "Дважды")
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_season = 5500, active_mark = '1' "
+                     "WHERE row_index = 704")
+        conn.commit()
+
+    period = td.FIRST_PERIOD
+    first = td.mark_paid(704, period, by="test")
+    second = td.mark_paid(704, period, by="test")
+    check(not first.get("duplicate"), "первая отметка прошла")
+    check(second.get("duplicate"), "вторая распознана как повтор")
+
+    rows = [r for r in td.status(period) if int(r["row"]) == 704]
+    check(rows and rows[0]["paid"] == 5500,
+          f"внесено ровно раз: {rows[0]['paid'] if rows else '?'}")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM payments WHERE player_row = 704")
+        conn.execute("DELETE FROM players WHERE row_index = 704")
         conn.commit()
 
 
@@ -564,6 +632,8 @@ def main() -> int:
     test_no_debt_for_an_untracked_month()
     test_wrong_payment_can_be_taken_back()
     test_active_without_fee_is_flagged()
+    test_cleared_game_price_means_no_demand()
+    test_marking_twice_does_not_double()
     test_grouping()
     test_debt_names_the_game()
     test_debt_title_without_tournament()

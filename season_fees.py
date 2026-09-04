@@ -276,10 +276,16 @@ def mark_paid(fee_id: int, player_row: int, amount: Optional[int] = None,
     need = amount if amount is not None else int((person or {}).get("debt") or 0)
     if need <= 0:
         return {"error": "Платить нечего: сумма не задана или взнос уже закрыт."}
+    today = date.today().isoformat()
     rec = coach_payments.record(
         int(player_row), int(need), KIND, 0,
-        paid_at=date.today().isoformat(), bank="", note="взнос за турнир",
-        added_by=str(by), by_coach=True, period=ref(fee_id))
+        paid_at=today, bank="", note="взнос за турнир",
+        added_by=str(by), by_coach=True, period=ref(fee_id),
+        # Отпечаток по смыслу, а не по текущей минуте: тычок через минуту
+        # иначе заводил бы второй взнос за тот же турнир. Оплату частями это
+        # не мешает — другая сумма или другой день дают другой отпечаток.
+        fp=coach_payments.fingerprint(
+            f"fee|{fee_id}|{player_row}|{need}|{today}"))
     return rec or {}
 
 

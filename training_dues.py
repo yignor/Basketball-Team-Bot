@@ -198,7 +198,15 @@ def mark_paid(player_row: int, period: str, by: str = "",
     rec = coach_payments.record(
         player_row, need, coach_payments.KIND_SEASON, 0,
         paid_at=date.today().isoformat(), bank="", note="отметил тренер",
-        added_by=str(by), fp="", period=period, by_coach=True)
+        added_by=str(by), period=period, by_coach=True,
+        # Отпечаток по человеку, месяцу, сумме и дню — а не по текущей минуте.
+        # Поминутный защищал только от двойного нажатия подряд: тычок через
+        # минуту заводил второй взнос за тот же месяц. Ровно так пятеро
+        # оказались «оплатившими» игру 09.08 дважды, пока то же самое не
+        # починили в game_roster. Взнос частями это не мешает: другая сумма
+        # или другой день — другой отпечаток.
+        fp=coach_payments.fingerprint(
+            f"dues|{player_row}|{period}|{need}|{date.today().isoformat()}"))
     return rec
 
 
