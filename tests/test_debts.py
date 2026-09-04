@@ -410,6 +410,45 @@ def test_wrong_payment_can_be_taken_back() -> None:
                if int(p["player_row"]) == 701], "заготовка убрана")
 
 
+def test_active_without_fee_is_flagged() -> None:
+    """Отметка стоит, а взноса нет — тренеру говорят прямо.
+
+    Самый тихий способ потерять деньги: человек выглядит занимающимся, но
+    должником не считается вовсе, потому что считать нечего. За игры бот хотя
+    бы подставит типовую цену команды, за тренировки — нет."""
+    print("\n=== активен, но без суммы ===")
+    import bot_daemon as bd
+    import training_dues as td
+
+    seed_player(702, "Безсуммы")
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET active_mark = '1', pay_season = 0 "
+                     "WHERE row_index = 702")
+        conn.commit()
+
+    period = td.FIRST_PERIOD
+    rows = td.status(period)
+    mine = [r for r in rows if int(r["row"]) == 702]
+    check(mine and not mine[0]["debt"], "должником не считается — считать нечего")
+
+    text, _ = bd._train_screen(period)
+    check("взнос не проставлен" in text, "и тренеру про это сказано")
+    check("Безсуммы" in text, f"с именем: {text[-160:]!r}"[:120])
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("UPDATE players SET pay_season = 5500 WHERE row_index = 702")
+        conn.commit()
+    # В заготовке хватает и других безденежных, поэтому проверяем не всю
+    # жалобу, а конкретного человека: он должен из неё пропасть.
+    text, _ = bd._train_screen(period)
+    warn = text[text.index("взнос не проставлен"):] if "взнос не проставлен" in text else ""
+    check("Безсуммы" not in warn, "проставили сумму — из жалобы пропал")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM players WHERE row_index = 702")
+        conn.commit()
+
+
 def test_grouping() -> None:
     """Долги разбиты по играм и по месяцам, а не одним списком.
 
@@ -524,6 +563,7 @@ def main() -> int:
     test_confirmed_text()
     test_no_debt_for_an_untracked_month()
     test_wrong_payment_can_be_taken_back()
+    test_active_without_fee_is_flagged()
     test_grouping()
     test_debt_names_the_game()
     test_debt_title_without_tournament()
