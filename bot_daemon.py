@@ -1756,6 +1756,8 @@ def _service_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 Лог действий", callback_data="admin:menu:log")],
         [InlineKeyboardButton("🧾 Что бот прочитал в Конфиге", callback_data="admin:menu:config")],
         [InlineKeyboardButton("🔌 Каналы связи", callback_data="admin:doors:list")],
+        [InlineKeyboardButton("🧹 Хвосты перенесённых игр",
+                              callback_data="admin:tails:list")],
         _back_button(),
     ])
 
@@ -7788,6 +7790,18 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
+        if parts[1] == "tails":
+            import game_roster
+            if len(parts) > 2 and parts[2] == "go":
+                res = await asyncio.to_thread(game_roster.drop_stale_votes)
+                text, markup = await asyncio.to_thread(_tails_screen)
+                text = (f"🧹 Убрал {res['rows']} строк по {res['games']} "
+                        f"играм.\n\n{text}")
+            else:
+                text, markup = await asyncio.to_thread(_tails_screen)
+            await query.edit_message_text(text, reply_markup=markup)
+            return
+
         if parts[1] == "ach":
             await _ach_admin(query, user, parts)
             return
@@ -10170,6 +10184,34 @@ _awaiting_fee: Dict[int, str] = {}
 FEE_HEAD = ("🏆 Взносы за турнир\n\nОплата за сезон целиком — там, где лига не "
             "берёт за каждую игру. Живёт рядом с ежемесячными взносами и "
             "оплатой игр, ничего не отменяя.")
+
+
+def _tails_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Что за хвосты нашлись и сколько строк уберём."""
+    import game_roster
+    found = game_roster.stale_votes()
+    lines = ["🧹 Хвосты перенесённых игр", "",
+             "Лига переприсваивает номера игр, и под одним номером скапливаются "
+             "голоса двух разных матчей. Они путают состав и недельный отчёт: "
+             "человек значится готовым к матчу, которого не было.", ""]
+    if not found:
+        lines.append("Сейчас чисто — убирать нечего.")
+        return "\n".join(lines), InlineKeyboardMarkup([_back_button("admin:menu:service")])
+    total = sum(f["rows"] for f in found)
+    for f in found[:10]:
+        chunks = ", ".join(f"{d} — {n}" for d, n in sorted(f["drop"].items()))
+        lines.append(f"• игра {f['game_id']}: настоящая дата {f['keep']}, "
+                     f"лишние голоса {chunks}")
+    if len(found) > 10:
+        lines.append(f"…и ещё {len(found) - 10} игр")
+    lines += ["", f"Всего уберём строк: {total}.",
+              "Голоса под настоящей датой остаются. Если под ней голосов нет "
+              "вовсе, игра не трогается: значит, дату сдвинули после опроса, и "
+              "старые голоса — единственные настоящие."]
+    rows = [[InlineKeyboardButton(f"🧹 Убрать {total} строк",
+                                  callback_data="admin:tails:go")],
+            _back_button("admin:menu:service")]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _fee_list() -> Tuple[str, InlineKeyboardMarkup]:

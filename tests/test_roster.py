@@ -222,11 +222,82 @@ def test_votes_of_another_match_do_not_leak() -> None:
         conn.commit()
 
 
+def test_stale_tails_are_found_and_dropped() -> None:
+    """Хвосты перенесённых игр находятся и убираются — но осторожно.
+
+    Условия жёсткие намеренно: дальше это удаляют. Если под настоящей датой
+    голосов нет, значит дату сдвинули уже после опроса, и старые голоса —
+    единственные настоящие; трогать их нельзя."""
+    print("\n=== чистка хвостов ===")
+    import game_roster
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+
+    def vote(game_id, day, uid):
+        with sheets_cache.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO game_votes (tg_poll_id, user_id, username, "
+                "first_name, last_name, vote_text, vote_type, game_id, "
+                "game_date, updated_at, synced_at) VALUES (?, ?, '', '', '', "
+                "'✅ Готов', ?, ?, ?, ?, ?)",
+                (f"p{game_id}{day}", uid, game_roster.VOTE_READY, game_id, day,
+                 now, now))
+            conn.commit()
+
+    def poll(game_id, day):
+        with sheets_cache.get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO service_records (unique_key, logged_at, "
+                "created_at, updated_at, data_type, game_id, game_date, "
+                "game_time, deleted) VALUES (?, ?, ?, ?, 'ОПРОС_ИГРА', ?, ?, "
+                "'20:00', 0)",
+                (f"ОПРОС_ИГРА_{game_id}", now, now, now, game_id, day))
+            conn.commit()
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM game_votes WHERE game_id LIKE 'tail-%'")
+        conn.execute("DELETE FROM service_records WHERE game_id LIKE 'tail-%'")
+        conn.commit()
+
+    # Игра переехала: есть голоса и под настоящей датой, и под старой.
+    poll("tail-1", "05.09.2026")
+    vote("tail-1", "2026-09-05", "800001")
+    vote("tail-1", "2026-09-01", "800002")
+    # Игра, где под настоящей датой голосов НЕТ: трогать нельзя.
+    poll("tail-2", "10.09.2026")
+    vote("tail-2", "2026-09-02", "800003")
+
+    found = {f["game_id"]: f for f in game_roster.stale_votes()}
+    check("tail-1" in found, "хвост у переехавшей игры найден")
+    check(found.get("tail-1", {}).get("rows") == 1, "ровно одна лишняя строка")
+    check("tail-2" not in found,
+          "игра без голосов под настоящей датой не трогается")
+
+    res = game_roster.drop_stale_votes()
+    check(res["rows"] == 1, f"убрана одна строка: {res}")
+    with sheets_cache.get_connection() as conn:
+        left = [r[0] for r in conn.execute(
+            "SELECT game_date FROM game_votes WHERE game_id = 'tail-1'")]
+        kept = [r[0] for r in conn.execute(
+            "SELECT game_date FROM game_votes WHERE game_id = 'tail-2'")]
+    check(left == ["2026-09-05"], f"остались голоса настоящей даты: {left}")
+    check(kept == ["2026-09-02"], "у второй игры всё на месте")
+
+    check(game_roster.drop_stale_votes()["rows"] == 0,
+          "повторная чистка ничего не удаляет")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM game_votes WHERE game_id LIKE 'tail-%'")
+        conn.execute("DELETE FROM service_records WHERE game_id LIKE 'tail-%'")
+        conn.commit()
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
     test_guest_in_roster()
     test_votes_of_another_match_do_not_leak()
+    test_stale_tails_are_found_and_dropped()
     test_guest_not_in_money()
     test_guest_to_start()
     test_rename_guest()

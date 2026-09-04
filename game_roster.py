@@ -181,6 +181,75 @@ def voters(game_id: str, vote_type: str = VOTE_READY,
     return out
 
 
+def stale_votes() -> List[Dict[str, Any]]:
+    """Хвосты от перенесённых игр: голоса под чужой датой.
+
+    Лига переприсваивает номера игр, и под одним номером скапливаются голоса
+    двух разных матчей. Они путают не только экран состава — недельный отчёт
+    по играм считает их наравне с настоящими, и человек значится готовым к
+    матчу, которого не было.
+
+    Условия жёсткие намеренно, потому что дальше это удаляют:
+
+    * у игры должна быть известна настоящая дата — из опроса или календаря;
+    * под этой датой должны БЫТЬ голоса.
+
+    Если голосов под настоящей датой нет, значит, дату у игры сдвинули уже
+    после опроса, и старые голоса — единственные настоящие. Тогда не трогаем
+    ничего: потерять голоса хуже, чем оставить хвост."""
+    sheets_cache.init_db()
+    marks = ",".join("?" * len(POLL_TYPES))
+    with sheets_cache.get_connection() as conn:
+        real: Dict[str, str] = {}
+        for r in conn.execute(
+                f"""SELECT game_id, game_date FROM service_records
+                     WHERE deleted = 0 AND game_id != '' AND game_date != ''
+                       AND data_type IN ({marks})""", POLL_TYPES):
+            day = _parse_date(r["game_date"])
+            if day:
+                real[str(r["game_id"])] = day.isoformat()
+        rows = [dict(r) for r in conn.execute(
+            "SELECT game_id, game_date, COUNT(*) AS n FROM game_votes "
+            "WHERE game_id != '' GROUP BY game_id, game_date")]
+    by_game: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        by_game.setdefault(str(r["game_id"]), []).append(r)
+    out = []
+    for game_id, items in by_game.items():
+        keep = real.get(game_id) or real.get(f"slpro-{game_id}")
+        if not keep:
+            continue
+        dates = {str(i["game_date"] or "")[:10]: int(i["n"]) for i in items}
+        if keep not in dates:
+            continue                      # настоящих голосов нет — не трогаем
+        drop = {d: n for d, n in dates.items() if d and d != keep}
+        if drop:
+            out.append({"game_id": game_id, "keep": keep, "drop": drop,
+                        "rows": sum(drop.values())})
+    out.sort(key=lambda x: x["game_id"])
+    return out
+
+
+def drop_stale_votes() -> Dict[str, int]:
+    """Удаляет найденные хвосты. Возвращает, сколько игр и строк тронули."""
+    found = stale_votes()
+    if not found:
+        return {"games": 0, "rows": 0}
+    sheets_cache.init_db()
+    gone = 0
+    with sheets_cache.get_connection() as conn:
+        for item in found:
+            for day in item["drop"]:
+                cur = conn.execute(
+                    "DELETE FROM game_votes WHERE game_id = ? AND game_date = ?",
+                    (item["game_id"], day))
+                gone += cur.rowcount
+        conn.commit()
+    logger.info("Хвосты перенесённых игр: убрано строк %d по %d играм",
+                gone, len(found))
+    return {"games": len(found), "rows": gone}
+
+
 # ─────────────────────────── Состав ────────────────────────────────────────
 
 def guest_card(source: str, game_id: str, row: int) -> Optional[Dict[str, Any]]:
