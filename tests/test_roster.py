@@ -292,12 +292,83 @@ def test_stale_tails_are_found_and_dropped() -> None:
         conn.commit()
 
 
+def test_old_jokes_go_but_fresh_stay() -> None:
+    """Шутки к сыгранным играм убираются, к свежим и будущим — нет.
+
+    Фраза привязана к игре и после неё бессмысленна. Но удалять в ту же ночь
+    нельзя: протокол приходит с опозданием — 22.08.2026 счёт лёг через двое
+    суток, — а фразы уходят вместе с сообщением о результате."""
+    print("\n=== шутки к прошедшим играм ===")
+    import player_jokes
+    from datetime import date, timedelta
+
+    sheets_cache.init_db()
+    now = sheets_cache.now_iso()
+    days = player_jokes.KEEP_DAYS
+
+    def joke(game_id, day):
+        with sheets_cache.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO player_jokes (target_row, occasion, text, "
+                "author_id, author_nick, created_at, active, game_source, "
+                "game_id, game_label, game_date) VALUES (9, 'game', 'ха', "
+                "'1', '', ?, 1, 'infobasket', ?, '', ?)",
+                (now, game_id, day))
+            conn.commit()
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM player_jokes WHERE game_id LIKE 'j-%'")
+        conn.commit()
+
+    old_day = (date.today() - timedelta(days=days + 2)).isoformat()
+    edge_day = (date.today() - timedelta(days=max(0, days - 1))).isoformat()
+    soon = (date.today() + timedelta(days=2)).isoformat()
+    joke("j-old", old_day)
+    joke("j-edge", edge_day)
+    joke("j-soon", soon)
+    joke("j-nodate", "")
+
+    res = player_jokes.drop_past()
+    check(res["jokes"] == 1, f"убрана одна старая: {res}")
+
+    with sheets_cache.get_connection() as conn:
+        left = sorted(r[0] for r in conn.execute(
+            "SELECT game_id FROM player_jokes WHERE game_id LIKE 'j-%'"))
+    check(left == ["j-edge", "j-nodate", "j-soon"],
+          f"осталось нужное: {left}")
+    check("j-edge" in left, "свежая игра ещё в запасе: протокол может опоздать")
+    check("j-nodate" in left, "игру без даты не трогаем — непонятно, прошла ли")
+
+    check(player_jokes.drop_past()["jokes"] == 0, "повторный прогон пуст")
+
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM player_jokes WHERE game_id LIKE 'j-%'")
+        conn.commit()
+
+
+def test_night_sweep_is_daily_and_logged() -> None:
+    """Уборка идёт раз в сутки, ночью, и оставляет след в журнале."""
+    print("\n=== ночная уборка ===")
+    src = (ROOT / "bot_daemon.py").read_text()
+    body = src[src.index("async def _night_sweep"):]
+    body = body[:body.index("\nasync def ", 1)]
+    check("_swept_on == today" in body, "дважды за сутки не запустится")
+    check("now.hour != NIGHT_HOUR" in body, "работает в свой час, а не когда попало")
+    check("drop_stale_votes" in body and "drop_past" in body,
+          "убирает и хвосты голосов, и шутки")
+    check("log.info" in body, "и пишет в журнал, сколько убрано")
+    check(body.count("except Exception") == 2,
+          "падение одной уборки не отменяет вторую")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     seed()
     test_guest_in_roster()
     test_votes_of_another_match_do_not_leak()
     test_stale_tails_are_found_and_dropped()
+    test_old_jokes_go_but_fresh_stay()
+    test_night_sweep_is_daily_and_logged()
     test_guest_not_in_money()
     test_guest_to_start()
     test_rename_guest()

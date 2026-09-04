@@ -23,6 +23,7 @@
 import html
 import random
 import re
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import sheets_cache
@@ -34,6 +35,9 @@ MAX_PER_AUTHOR = 20    # чтобы один человек не забил ле
 # В блоке шесть показателей; подписываем половину. Все шесть — балаган, одна —
 # теряется. Какие именно, решает жребий (Jokes.plan), а не порядок строк.
 MAX_PER_MESSAGE = 3
+
+
+logger = logging.getLogger(__name__)
 
 
 def _norm(text: str) -> str:
@@ -136,6 +140,40 @@ def upcoming_games(limit: int = 5) -> List[Dict[str, Any]]:
         d = g["date"]
         g["label"] = f"{d[8:10]}.{d[5:7]} · {g['opponent']} · {g['league']}"
     return games[:limit]
+
+
+# Сколько дней после игры фраза ещё нужна. Не ноль: протокол приходит с
+# опозданием — 22.08.2026 счёт лёг в базу через двое суток, — а фразы уходят
+# вместе с сообщением о результате. Удалить их в ту же ночь значило бы лишить
+# людей ровно того, ради чего они их оставляли.
+KEEP_DAYS = 3
+
+
+def drop_past(days: int = KEEP_DAYS) -> Dict[str, int]:
+    """Убирает фразы к сыгранным играм. {игр, фраз}.
+
+    Фраза привязана к конкретной игре и после неё бессмысленна: она уже ушла в
+    сообщение о результате либо не понадобилась вовсе. Оставлять её значит
+    копить в списке автора мусор, который он не может отличить от будущих.
+
+    Игру без даты не трогаем: непонятно, прошла она или нет."""
+    from datetime import date, timedelta
+    sheets_cache.init_db()
+    edge = (date.today() - timedelta(days=max(0, int(days)))).isoformat()
+    with sheets_cache.get_connection() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, game_id, game_date FROM player_jokes "
+            "WHERE game_date != ''")]
+        old = [r for r in rows if str(r["game_date"])[:10] < edge]
+        if old:
+            conn.executemany("DELETE FROM player_jokes WHERE id = ?",
+                             [(int(r["id"]),) for r in old])
+            conn.commit()
+    games = len({str(r["game_id"]) for r in old})
+    if old:
+        logger.info("Шутки к сыгранным играм: убрано %d по %d играм",
+                    len(old), games)
+    return {"games": games, "jokes": len(old)}
 
 
 def add(target_row: int, occasion: str, text: str,

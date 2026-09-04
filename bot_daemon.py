@@ -10155,6 +10155,45 @@ async def _tell_about_badges(app: Application) -> None:
             log.info(f"Ачивка {ach_id} не доставлена {uid}: {e}")
 
 
+# Ночная уборка: раз в сутки, в тихий час. Отметка — дата последнего прогона,
+# чтобы перезапуск демона не гонял её по десять раз за ночь.
+NIGHT_HOUR = 3
+_swept_on = ""
+
+
+async def _night_sweep() -> None:
+    """Убирает то, что накопилось за день: хвосты игр и отыгравшие шутки.
+
+    Ночью, а не по ходу дня, по двум причинам. Обе задачи удаляют, и делать
+    это в момент, когда тренер смотрит экран, значит менять список у него под
+    руками. И обе не срочные: лишний день хвоста никому не мешает.
+
+    Что убрано — пишем в журнал числами. Удаление без следа в журнале нельзя
+    отличить от поломки: «а куда делись голоса?» — вопрос, на который должен
+    быть ответ."""
+    global _swept_on
+    from datetime_utils import get_moscow_time
+    now = get_moscow_time()
+    today = now.date().isoformat()
+    if _swept_on == today or now.hour != NIGHT_HOUR:
+        return
+    _swept_on = today
+    import game_roster
+    import player_jokes
+    try:
+        tails = await asyncio.to_thread(game_roster.drop_stale_votes)
+    except Exception as e:
+        log.warning(f"Ночная уборка: хвосты игр не убраны: {e}")
+        tails = {"games": 0, "rows": 0}
+    try:
+        jokes = await asyncio.to_thread(player_jokes.drop_past)
+    except Exception as e:
+        log.warning(f"Ночная уборка: шутки не убраны: {e}")
+        jokes = {"games": 0, "jokes": 0}
+    log.info("Ночная уборка: хвостов голосов %d (игр %d), шуток %d (игр %d)",
+             tails["rows"], tails["games"], jokes["jokes"], jokes["games"])
+
+
 async def _recount_achievements() -> None:
     """Раздаёт значки, которые выдаются по правилу.
 
@@ -10822,6 +10861,7 @@ async def _background_loop(app: Application) -> None:
             except Exception as e:
                 log.warning(f"Уборка доступов: {e}")
             await _send_group_repeats(app)
+            await _night_sweep()
             await _recount_achievements()
             await _tell_about_badges(app)
             await _catch_up_prices()
