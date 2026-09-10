@@ -50,6 +50,9 @@ PLAYERS_ACTIVE_HEADER = "Активность"
 # Амплуа: «1»…«5», «Разыгрывающий», «Большой». Ведёт тренер — из бота или в
 # листе, бот только читает и пишет по его команде.
 PLAYERS_ROLE_HEADER = "Амплуа"
+# Отчество: его просит бланк заявки в лигу. Столбец бот заводит сам, а
+# заполняет тренер — из бота или подтягивая из Инфобаскета.
+PLAYERS_PATRONYMIC_HEADER = "Отчество"
 PLAYERS_ACTIVE_MARK = "1"
 # «+» стоял в столбце до 03.08.2026 и означал то же самое. Читаем его наравне
 # с «1», пока лист не переписан; сам лист бот переписывает при старте.
@@ -141,6 +144,7 @@ CREATE TABLE IF NOT EXISTS players (
     pay_game      INTEGER NOT NULL DEFAULT 0,   -- «Оплата игры»: цена одной игры
     active_mark   TEXT NOT NULL DEFAULT '',     -- «Активность»: «+» или пусто
     role          TEXT NOT NULL DEFAULT '',     -- «Амплуа»: 1–5, разыгрывающий, большой
+    patronymic    TEXT NOT NULL DEFAULT '',     -- «Отчество» — для заявки в лигу
     synced_at     TEXT NOT NULL
 );
 
@@ -999,6 +1003,7 @@ def init_db() -> None:
         _ensure_column(conn, "game_shifts", "start_left", "INTEGER NOT NULL", "0")
         _ensure_column(conn, "game_roster_state", "form", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "role", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "players", "patronymic", "TEXT NOT NULL", "''")
         _ensure_column(conn, "feature_access", "until", "TEXT NOT NULL", "''")
         # Долг человеку, которого нет в листе «Игроки»: гость на одну игру,
         # соперник, кто угодно. Тогда player_row = 0, а имя лежит здесь.
@@ -1088,6 +1093,7 @@ def sync_players(spreadsheet) -> None:
                     _to_int(r.get(PLAYERS_PAY_GAME_HEADER)),
                     str(r.get(PLAYERS_ACTIVE_HEADER, "")).strip(),
                     str(r.get(PLAYERS_ROLE_HEADER, "")).strip(),
+                    _tidy(r.get(PLAYERS_PATRONYMIC_HEADER)),
                     now,
                 ))
             conn.execute("BEGIN")
@@ -1095,8 +1101,8 @@ def sync_players(spreadsheet) -> None:
             conn.executemany(
                 """
                 INSERT INTO players
-                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, active_mark, role, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (row_index, surname, name, nickname, telegram_id, tg_user_id, birthday, status, team, added_date, notes, price, tier, pay_season, pay_game, active_mark, role, patronymic, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -1423,6 +1429,7 @@ PLAYER_FIELDS = {
     # ради строчки. ФИО тоже правится: люди меняют фамилии, и опечатки бывают.
     "surname": ("Фамилия", "surname", "👤 Фамилия"),
     "name": ("Имя", "name", "👤 Имя"),
+    "patronymic": (PLAYERS_PATRONYMIC_HEADER, "patronymic", "👤 Отчество"),
     "status": ("Статус", "status", "📋 Статус"),
     "team": ("Команда", "team", "🏳️ Команда"),
     "active": (PLAYERS_ACTIVE_HEADER, "active_mark", "✅ Активность"),

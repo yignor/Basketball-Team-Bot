@@ -251,8 +251,8 @@ def players() -> List[Dict[str, Any]]:
     with sheets_cache.get_connection() as conn:
         rows = conn.execute(
             "SELECT row_index, surname, name, nickname, birthday, role, status, "
-            "team, pay_season, pay_game, active_mark, price, tier FROM players "
-            "ORDER BY surname, name").fetchall()
+            "team, pay_season, pay_game, active_mark, price, tier, patronymic "
+            "FROM players ORDER BY surname, name").fetchall()
     people = [r for r in rows if (r["surname"] or "").strip()
               or (r["name"] or "").strip()]
     # Пока отметка не стоит НИ У КОГО, столбцом просто не пользуются — ждём
@@ -284,12 +284,33 @@ def players() -> List[Dict[str, Any]]:
             # всегда стояли бы прочерком, что бы ни было в таблице.
             "price": int(r["price"] or 0),
             "tier": (r["tier"] or "").strip(),
+            "patronymic": (r["patronymic"] or "").strip(),
+            # Ушёл из команды — глубокий инактив. Строку НЕ удаляем: вернётся —
+            # вернём одной кнопкой. Но в сборах, заявках и рассылках его нет.
+            "gone": is_gone(r["status"]),
             # Ждём ли с человека взнос за сезон (он же за тренировки). К оплате
             # игр отношения не имеет: за игры платят те, кто был в составе.
             "pays_season": sheets_cache.is_active_mark(mark) if column_in_use
                            else _is_active_by_status(r["status"]),
         })
     return out
+
+
+# Глубокий инактив: человек покинул команду и точно не будет ни заниматься, ни
+# играть. Живёт в столбце «Статус» — он пустой у всех, виден тренеру в самом
+# листе и переживает любую синхронизацию. Отдельный столбец ради одного
+# признака был бы лишним.
+GONE_STATUS = "Ушёл из команды"
+
+
+def is_gone(status: Any) -> bool:
+    """Покинул ли человек команду.
+
+    Узнаём и то, что ставит бот, и то, что тренер мог написать руками: «ушёл»,
+    «выбыл», «архив». А вот «неактивен» и «заморожен» — это временно, человек
+    в команде, просто на паузе, и прятать его нельзя."""
+    s = _norm(str(status or "")).replace("ё", "е")
+    return any(w in s for w in ("ушел", "выбыл", "архив"))
 
 
 def _is_active_by_status(status: Any) -> bool:
@@ -730,7 +751,8 @@ def ensure_player_columns(spreadsheet) -> List[str]:
     wanted = (sheets_cache.PLAYERS_PAY_SEASON_HEADER,
               sheets_cache.PLAYERS_PAY_GAME_HEADER,
               sheets_cache.PLAYERS_ACTIVE_HEADER,
-              sheets_cache.PLAYERS_ROLE_HEADER)
+              sheets_cache.PLAYERS_ROLE_HEADER,
+              sheets_cache.PLAYERS_PATRONYMIC_HEADER)
     missing = [t for t in wanted if t not in header]
     if not missing:
         return []

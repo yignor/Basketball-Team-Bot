@@ -285,7 +285,12 @@ class PlayersManager:
             print(f"👥 Игроков в листе: {len(active_players)}")
             
             birthday_players = []
+            import coach_payments
             for player in active_players:
+                # Ушедшего из команды в общем чате не поздравляем: он больше
+                # не свой. Временно выпавший — поздравляем, это совсем другое.
+                if coach_payments.is_gone(player.get('status')):
+                    continue
                 birthday = player.get('birthday', '')
                 name = player.get('name', 'Unknown')
                 surname = player.get('surname', '')

@@ -161,6 +161,10 @@ def status(period: str, everyone: bool = False) -> List[Dict[str, Any]]:
     paid = _paid_map(period)
     out = []
     for p in coach_payments.players():
+        # Ушедшего из команды не спрашиваем «будешь заниматься?» и не ждём с
+        # него взноса — даже если «Активность» по ошибке осталась стоять.
+        if p.get("gone"):
+            continue
         if not everyone and not p["pays_season"]:
             continue
         need = fee_of(p)

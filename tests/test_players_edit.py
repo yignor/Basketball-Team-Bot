@@ -107,17 +107,19 @@ def test_card_shows_every_field() -> None:
         conn.execute(
             "INSERT INTO players (row_index, surname, name, nickname, birthday, "
             "role, status, team, active_mark, pay_season, pay_game, price, tier, "
-            "synced_at) VALUES (2,'Абрамов','Платон','plat','2001-09-22','центровой',"
-            "'основа','Farm','+',5500,900,55,'Золото',?)", (now,))
+            "patronymic, synced_at) VALUES (2,'Абрамов','Платон','plat','2001-09-22',"
+            "'центровой','основа','Farm','+',5500,900,55,'Золото','Игоревич',?)",
+            (now,))
         conn.commit()
 
     text, markup = bd._field_card(2)
     for value in ("plat", "2001-09-22", "центровой", "основа", "Farm",
-                  "5500", "900", "55", "Золото"):
+                  "5500", "900", "55", "Золото", "Игоревич"):
         check(value in text, f"«{value}» видно на карточке")
     check(text.count("—") == 0, f"прочерков нет ни у одного заполненного поля:\n{text}")
-    check(sum(len(r) for r in markup.inline_keyboard) == len(bd.FIELD_ORDER) + 1,
-          "кнопок по числу полей плюс возврат")
+    # Поля, плюс «Ушёл из команды», плюс возврат к списку.
+    check(sum(len(r) for r in markup.inline_keyboard) == len(bd.FIELD_ORDER) + 2,
+          "кнопок по числу полей плюс «ушёл» и возврат")
 
 
 def test_write_goes_to_sheet_and_mirror() -> None:

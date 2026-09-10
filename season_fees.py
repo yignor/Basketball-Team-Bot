@@ -309,7 +309,8 @@ def status(fee_id: int) -> List[Dict[str, Any]]:
     out = []
     for p in coach_payments.players():
         row = int(p["row"])
-        if row not in own:
+        # Ушедший из команды в сборах не участвует: турнир он играть не будет.
+        if row not in own or p.get("gone"):
             continue
         need = own[row] or base
         got = paid.get(row, 0)

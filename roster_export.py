@@ -41,6 +41,7 @@ COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("№", "_index"),
     ("Фамилия", "surname"),
     ("Имя", "name"),
+    ("Отчество", "patronymic"),
     ("Игровой номер", "shirt"),
     ("Дата рождения", "birthday"),
     ("Роль", "role"),
@@ -253,9 +254,12 @@ def build(people: Sequence[Dict[str, Any]], what: str) -> Tuple[bytes, str]:
 
 
 def team_people() -> List[Dict[str, Any]]:
-    """Все из листа «Игроки» — по алфавиту, как в самом листе."""
+    """Все из листа «Игроки» — по алфавиту, кроме ушедших из команды.
+
+    Ушедший в заявке лиге не нужен: он не будет играть. Строка его остаётся
+    в листе, и вернётся он в выгрузку сам, как только его вернут в команду."""
     import coach_payments
-    return coach_payments.players()
+    return [p for p in coach_payments.players() if not p.get("gone")]
 
 
 def group_people(group_id: int) -> List[Dict[str, Any]]:

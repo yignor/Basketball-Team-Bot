@@ -2691,7 +2691,7 @@ def _search_is_spent(uid: int) -> bool:
     if not want:
         return False
     found = [p for p in coach_payments.players()
-             if want in _search_norm(p.get("title"))]
+             if not p.get("gone") and want in _search_norm(p.get("title"))]
     return len(found) == 1
 
 
@@ -2700,7 +2700,12 @@ def _fields_screen(offset: int = 0, prefix: str = "admin:field",
     """Лист «Игроки» списком. Экран общий для тренера и админа: две копии
     разъехались бы при первой же правке, а правят они один и тот же лист."""
     import coach_payments
-    everyone = coach_payments.players()
+    # Ушедшие из команды — отдельным списком: в общем они только мешают
+    # найти тех, кто в строю. Поиск их тоже не находит — вернуть можно из
+    # «🚪 Ушедшие».
+    listed = coach_payments.players()
+    gone = sum(1 for p in listed if p.get("gone"))
+    everyone = [p for p in listed if not p.get("gone")]
     want = _search_norm(query)
     # Ищем по любой части фамилии ИЛИ имени: тренер помнит человека по-разному,
     # а заставлять набирать с первой буквы — лишний повод не пользоваться.
@@ -2737,6 +2742,9 @@ def _fields_screen(offset: int = 0, prefix: str = "admin:field",
         find.append(InlineKeyboardButton("✖️ Сбросить",
                                          callback_data=f"{prefix}:clear"))
     rows.append(find)
+    if gone:
+        rows.append([InlineKeyboardButton(f"🚪 Ушедшие ({gone})",
+                                          callback_data=f"{prefix}:gone:0")])
     rows.append([InlineKeyboardButton("➕ Завести игрока",
                                       callback_data=f"{prefix}:new")])
     rows.append(_back_button("coach:main" if prefix.startswith("coach") else
@@ -2753,6 +2761,8 @@ _FIELD_ASK = {
     "bd": "🎂 Пришли дату рождения: «22.09.2001» или без года «22.09».",
     "nick": "✏️ Пришли ник — как к человеку обращаются в команде.",
     "role": "🎽 Пришли амплуа: разыгрывающий, атакующий, лёгкий, тяжёлый, центровой.",
+    "patronymic": ("👤 Пришли отчество — оно уйдёт в заявку в лигу. «-» — "
+                   "очистить."),
     "active": "✅ Поставь «+», если человек занимается и с него ждём взнос. "
               "Пусто — не ждём.",
     "season": "🏋️ Пришли сумму взноса за тренировки числом, например «3000».",
@@ -2761,7 +2771,7 @@ _FIELD_ASK = {
     "tier": "🏅 Пришли уровень: Платина, Золото, Серебро, Бронза.",
 }
 
-FIELD_ORDER = ("surname", "name", "nick", "bd", "role", "team",
+FIELD_ORDER = ("surname", "name", "patronymic", "nick", "bd", "role", "team",
                "status", "active", "season", "game", "price", "tier")
 
 
@@ -2821,8 +2831,72 @@ def _field_card(row: int, prefix: str = "admin:field") -> Tuple[str, InlineKeybo
             rows.append(pair); pair = []
     if pair:
         rows.append(pair)
-    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data=f"{prefix}:list:0")])
+    # Глубокий инактив — отдельной кнопкой, а не правкой «Статуса» руками:
+    # уход — это два поля сразу (статус и активность), и забыть одно из них
+    # значит оставить человека в сборе взносов.
+    if p.get("gone"):
+        rows.append([InlineKeyboardButton("↩️ Вернуть в команду",
+                                          callback_data=f"{prefix}:back:{row}")])
+        back_to = f"{prefix}:gone:0"
+    else:
+        rows.append([InlineKeyboardButton("🚪 Ушёл из команды",
+                                          callback_data=f"{prefix}:leave:{row}")])
+        back_to = f"{prefix}:list:0"
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data=back_to)])
+    if p.get("gone"):
+        lines.insert(1, "🚪 Ушёл из команды — в сборах, заявках и рассылках его "
+                        "нет. Строка на месте, вернуть можно кнопкой ниже.")
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _set_gone(row: int, gone: bool) -> bool:
+    """Ставит или снимает глубокий инактив: статус и активность вместе.
+
+    Уход — это «Ушёл из команды» в «Статусе» и снятая «Активность», чтобы
+    взнос за тренировки перестали ждать. Возврат — наоборот: статус пустой,
+    активность стоит. Одно без другого оставило бы человека наполовину в
+    команде: в сборе, но без рассылок, или наоборот."""
+    import coach_payments
+    try:
+        import report_common
+        book = report_common.init_sheets()
+    except Exception as exc:
+        log.warning(f"Инактив строки {row}: таблица недоступна: {exc}")
+        return False
+    person = coach_payments.player_by_row(int(row)) or {}
+    title = person.get("title", "")
+    ok = sheets_cache.write_player_field(
+        book, int(row), "status", coach_payments.GONE_STATUS if gone else "", title)
+    ok = ok and sheets_cache.write_player_field(
+        book, int(row), "active", "" if gone else sheets_cache.PLAYERS_ACTIVE_MARK,
+        title)
+    return ok
+
+
+def _gone_screen(prefix: str = "admin:field", page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    """Ушедшие из команды — отсюда их возвращают."""
+    import coach_payments
+    people = [p for p in coach_payments.players() if p.get("gone")]
+    pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
+    rows = [[InlineKeyboardButton(f"🚪 {p['title']}"[:BTN_TEXT],
+                                  callback_data=f"{prefix}:pick:{p['row']}")]
+            for p in chunk]
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"{prefix}:gone:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="coach:noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}:gone:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data=f"{prefix}:list:0")])
+    head = ("🚪 Ушедшие из команды\n\nВ сборах, заявках и рассылках их нет, но "
+            "строки в листе на месте. Нажми на человека — там кнопка «Вернуть».")
+    if not people:
+        head += "\n\nНикто не уходил."
+    return head, InlineKeyboardMarkup(rows)
 
 
 def _norm_birthday(text: str) -> Optional[str]:
@@ -4756,6 +4830,8 @@ def _offline_players() -> Dict[str, List[Dict[str, Any]]]:
     import training_dues
     out: Dict[str, List[Dict[str, Any]]] = {"ok": [], "no_start": [], "unknown": []}
     for p in coach_payments.players():
+        if p.get("gone"):
+            continue            # ушедшему писать и не нужно
         if training_dues.chat_id_of(p["row"]):
             out["ok"].append(p)
         elif str(p.get("nickname") or "").strip():
@@ -4946,6 +5022,7 @@ def _team_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👪 Группы и рассылки", callback_data="pg:main")],
         [InlineKeyboardButton("🔕 Кто вне бота", callback_data="coach:offline")],
         [InlineKeyboardButton("📄 Выгрузить для заявки", callback_data="coach:csv")],
+        [InlineKeyboardButton("📇 Отчества из Инфобаскета", callback_data="coach:patro")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -5033,6 +5110,41 @@ async def _send_roster_csv(query, people: List[Dict[str, Any]], what: str) -> No
                       + ". Впишите её в «👥 Игроки» — иначе заявку вернут."]
     await query.message.reply_document(document=bio, filename=name,
                                        caption="\n".join(lines))
+
+
+async def _fill_patronymics() -> str:
+    """Подтягивает отчества из Инфобаскета и вписывает в лист тем, у кого пусто."""
+    import coach_payments
+    import patronymics
+    try:
+        league = await patronymics.from_infobasket()
+    except Exception as e:
+        log.warning(f"Отчества: Инфобаскет не ответил: {e}")
+        return "⚠️ Инфобаскет не ответил. Попробуй позже."
+    people = await asyncio.to_thread(coach_payments.players)
+    found, missing = patronymics.match(
+        [p for p in people if not p.get("gone")], league)
+    if not found:
+        return ("📇 Вписывать нечего: у кого отчество есть в Инфобаскете, у тех "
+                "оно уже стоит в листе.")
+    try:
+        import report_common
+        book = await asyncio.to_thread(report_common.init_sheets)
+        res = await asyncio.to_thread(patronymics.write, book, found)
+    except Exception as e:
+        log.warning(f"Отчества: в лист не записались: {e}")
+        return f"⚠️ В таблицу записать не вышло: {e}"
+    lines = [f"📇 Вписал отчеств: {res['written']}."]
+    if res["skipped"]:
+        lines.append(f"Пропустил {res['skipped']}: строка в листе сдвинулась, "
+                     "а писать наугад не стану.")
+    if missing:
+        lines += ["", f"Не нашёл в Инфобаскете ({len(missing)}) — впиши руками в "
+                      "«👥 Игроки»: " + ", ".join(missing[:15])
+                  + ("…" if len(missing) > 15 else "")]
+        lines.append("У SLPRO отчеств нет вовсе, так что игроки только второй "
+                     "лиги найтись не могли.")
+    return "\n".join(lines)
 
 
 def _played_games(limit: int = 6) -> List[Dict[str, Any]]:
@@ -6298,6 +6410,33 @@ async def _players_editor(query, user, parts: List[str], prefix: str) -> None:
     if what == "pick" and len(parts) > 3:
         text, markup = await asyncio.to_thread(_field_card, int(parts[3]), prefix)
         await query.edit_message_text(text, reply_markup=markup)
+    elif what == "gone":
+        page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        text, markup = await asyncio.to_thread(_gone_screen, prefix, page)
+        await query.edit_message_text(text, reply_markup=markup)
+    elif what == "leave" and len(parts) > 3:
+        row = parts[3]
+        person = await asyncio.to_thread(_player_by_row_safe, row)
+        await query.edit_message_text(
+            f"🚪 {person.get('title', 'Игрок')} ушёл из команды?\n\n"
+            "Уйдёт из сборов взносов, заявок, рассылок и списков — как будто его "
+            "нет. Строка в листе останется, и вернуть его можно одной кнопкой.\n\n"
+            "Долги за прошлые игры, если есть, не списываю: деньги остаются "
+            "деньгами, их видно в «💸 Долги».",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚪 Да, ушёл",
+                                      callback_data=f"{prefix}:leave2:{row}")],
+                [InlineKeyboardButton("⬅️ Отмена",
+                                      callback_data=f"{prefix}:pick:{row}")]]))
+    elif what in ("leave2", "back") and len(parts) > 3:
+        row = int(parts[3])
+        ok = await asyncio.to_thread(_set_gone, row, what == "leave2")
+        text, markup = await asyncio.to_thread(_field_card, row, prefix)
+        head = ("🚪 Отметил: ушёл из команды." if what == "leave2"
+                else "↩️ Вернул в команду — снова в сборах и рассылках.")
+        if not ok:
+            head = "⚠️ В таблицу записать не вышло — попробуй ещё раз."
+        await query.edit_message_text(f"{head}\n\n{text}", reply_markup=markup)
     elif what == "find":
         _clear_pending(user.id)
         _awaiting_search[user.id] = prefix
@@ -6602,6 +6741,13 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
             people = await asyncio.to_thread(roster_export.team_people)
             await _send_roster_csv(query, people, "Вся команда")
             return
+
+        elif what == "patro":
+            await query.edit_message_text(
+                "📇 Спрашиваю у Инфобаскета отчества нашей заявки… Это до минуты: "
+                "лига — чужой сервер, и дёргать её разом нельзя.")
+            note = await _fill_patronymics()
+            await query.edit_message_text(note, reply_markup=_team_markup())
 
         elif what == "cfg":
             await query.edit_message_text(
@@ -9316,7 +9462,8 @@ def _pg_members(gid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
     if not g:
         return _pg_main()
     inside = set(pg.member_rows(gid))
-    people = coach_payments.players()
+    # Ушедших из команды в выбор не зовём — они никуда не поедут.
+    people = [p for p in coach_payments.players() if not p.get("gone")]
     pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
     page = max(0, min(page, pages - 1))
     chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]
@@ -10694,7 +10841,7 @@ def _fee_people(fee_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
     if not f:
         return _fee_list()
     inside = set(season_fees.member_rows(fee_id))
-    people = coach_payments.players()
+    people = [p for p in coach_payments.players() if not p.get("gone")]
     pages = max(1, (len(people) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
     page = max(0, min(page, pages - 1))
     chunk = people[page * PLAYERS_PER_PAGE:(page + 1) * PLAYERS_PER_PAGE]

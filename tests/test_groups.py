@@ -414,8 +414,10 @@ async def test_shirt_numbers_in_export(bd, gid: int) -> None:
 
     people = roster_export.group_people(gid)
     table = roster_export.rows(people)
-    check(table[0][3] == "Игровой номер", f"столбец на месте: {table[0]}")
-    shirts = {line[1]: line[3] for line in table[1:]}
+    # По названию столбца, не по номеру: их состав меняется.
+    at = table[0].index("Игровой номер") if "Игровой номер" in table[0] else -1
+    check(at > 0, f"столбец на месте: {table[0]}")
+    shirts = {line[1]: line[at] for line in table[1:]}
     check(shirts.get("Иванов") == "7", f"номер попал в строку: {shirts}")
     check(shirts.get("Сидоров") == "", "чужой номер никому не приписали")
 

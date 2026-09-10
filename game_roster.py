@@ -557,7 +557,9 @@ def search(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     Отдаём полные карточки (с суммами оплат), а не голые строки: состав потом
     идёт в расчёт долгов, и цена игры у людей разная."""
     import player_search
-    by_row = {p["row"]: p for p in coach_payments.players()}
+    # Ушедшего из команды в состав на игру не предлагаем: играть он не будет.
+    # Понадобится — сначала вернуть в команду, это одна кнопка в его карточке.
+    by_row = {p["row"]: p for p in coach_payments.players() if not p.get("gone")}
     out = []
     for hit in player_search.find(query, limit=limit):
         card = by_row.get(hit["row"])

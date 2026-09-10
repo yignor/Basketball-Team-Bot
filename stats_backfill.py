@@ -351,6 +351,13 @@ async def fetch_infobasket_person_info(person_id: Any) -> Dict[str, str]:
         "name": " ".join(x for x in (data.get("PersonLastNameRu"),
                                      data.get("PersonFirstNameRu")) if x).strip(),
         "birth": str(data.get("PersonBirth") or ""),
+        # Раздельно — чтобы сверять фамилию и имя с листом по отдельности, а не
+        # по склейке, где «Иван Сергей» и «Иван-Сергей» уже разные строки.
+        "last": str(data.get("PersonLastNameRu") or "").strip(),
+        "first": str(data.get("PersonFirstNameRu") or "").strip(),
+        # Отчество — только для своих, в лист тренера, по его кнопке
+        # (patronymics.py). Сам этот ответ по-прежнему транзитный.
+        "second": str(data.get("PersonSecondNameRu") or "").strip(),
     }
 
 

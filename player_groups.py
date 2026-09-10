@@ -343,10 +343,15 @@ def member_rows(gid: int) -> List[int]:
 
 
 def members(gid: int) -> List[Dict[str, Any]]:
-    """Состав группы с подписями. Порядок — как в списке игроков."""
+    """Состав группы с подписями. Порядок — как в списке игроков.
+
+    Ушедших из команды здесь нет: им не нужны ни рассылки, ни заявка, ни
+    взнос. Членство при этом НЕ стираем — вернётся человек в команду, и
+    вернётся во все свои группы сам, без повторной расстановки."""
     import coach_payments
     inside = set(member_rows(gid))
-    return [p for p in coach_payments.players() if int(p["row"]) in inside]
+    return [p for p in coach_payments.players()
+            if int(p["row"]) in inside and not p.get("gone")]
 
 
 def add(gid: int, player_row: int) -> None:
