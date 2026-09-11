@@ -2420,6 +2420,8 @@ def _clear_pending(uid: int) -> None:
     _awaiting_ach.pop(uid, None)
     _awaiting_badge.pop(uid, None)
     _awaiting_fee.pop(uid, None)
+    _awaiting_note.pop(uid, None)
+    _note_draft.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -5242,6 +5244,7 @@ def _play_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ Создать игру", callback_data="coach:ng")],
         [InlineKeyboardButton("📈 Разбор игр", callback_data="coach:prog")],
         [InlineKeyboardButton("📣 Объявить результат", callback_data="coach:repub")],
+        [InlineKeyboardButton("🎬 Разбор записи", callback_data="coach:vn:list")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -6519,6 +6522,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
     # же, что в админке, отличается только адрес возврата.
     if what == "fee":
         await _fee_admin(query, context, user, parts)
+        return
+    if what == "vn":
+        await _vn_admin(query, user, parts)
         return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
@@ -11085,6 +11091,434 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     raise ApplicationHandlerStop
 
 
+# ─────────────────── разбор записи: заметки тренера по тайм-кодам ───────────────────
+
+# Что тренер сейчас вводит: uid -> {"stage", "src", "gid", ...}.
+_awaiting_note: Dict[int, Dict[str, Any]] = {}
+# Заметка, собранная, но ещё не сохранённая: uid -> {src, gid, sec, text, row, by_voice, id}.
+_note_draft: Dict[int, Dict[str, Any]] = {}
+
+NOTE_ASK_TIME = ("⏱ На какой секунде записи момент?\n\nПришли время, как в "
+                 "плеере ВК: «12:34» или «1:02:15». Можно сразу с комментарием — "
+                 "«12:34 Иванов не закрыл», — а можно после времени прислать "
+                 "голосовое.\n\nПередумал — /start.")
+
+
+def _vn_ref(src: str, gid: str) -> str:
+    return f"{src}:{gid}"
+
+
+def _vn_games() -> Tuple[str, InlineKeyboardMarkup]:
+    import video_notes as vn
+    games = vn.games_with_video()
+    have = vn.counts()
+    rows = []
+    for g in games:
+        n = have.get((g["source"], str(g["game_id"])), 0)
+        tail = f" · {n} зам." if n else ""
+        rows.append([InlineKeyboardButton(
+            f"{vn.game_title(g)}{tail}"[:BTN_TEXT],
+            callback_data=f"coach:vn:g:{g['source']}:{g['game_id']}")])
+    rows.append([InlineKeyboardButton("⬅️ К играм", callback_data="coach:play")])
+    text = ("🎬 Разбор записи\n\nВыбери игру. Смотришь запись, останавливаешь на "
+            "моменте — присылаешь время и голосом или текстом, что там. Из "
+            "заметок бот соберёт разбор со ссылками прямо на эти секунды.")
+    if not games:
+        text = "🎬 Разбор записи\n\nИгр с записью пока нет — ссылку на запись бот находит сам после игры."
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _vn_names() -> Dict[int, str]:
+    import coach_payments
+    return {int(p["row"]): p["title"] for p in coach_payments.players()}
+
+
+def _vn_game(src: str, gid: str) -> Tuple[str, InlineKeyboardMarkup]:
+    import video_notes as vn
+    game = vn.game_of(src, gid)
+    if not game:
+        return _vn_games()
+    notes = vn.of_game(src, gid)
+    names = _vn_names()
+    lines = [f"🎬 {vn.game_title(game)}", ""]
+    if notes:
+        for n in notes[:25]:
+            who = names.get(int(n["player_row"]), "команда") if n["player_row"] else "команда"
+            first = str(n["text"]).split("\n")[0][:60]
+            lines.append(f"▶️ {vn.human_time(n['at_sec'])} · {who}: {first}")
+        if len(notes) > 25:
+            lines.append(f"…и ещё {len(notes) - 25}")
+    else:
+        lines.append("Заметок пока нет.")
+    ref = _vn_ref(src, gid)
+    rows = [[InlineKeyboardButton("➕ Заметка", callback_data=f"coach:vn:add:{ref}")]]
+    for n in notes[:12]:
+        rows.append([InlineKeyboardButton(
+            f"✏️ {vn.human_time(n['at_sec'])} {str(n['text'])[:24]}"[:BTN_TEXT],
+            callback_data=f"coach:vn:n:{n['id']}")])
+    if notes:
+        rows.append([InlineKeyboardButton("📤 Разбор для команды",
+                                          callback_data=f"coach:vn:out:{ref}:0")])
+        rows.append([InlineKeyboardButton("👤 Разбор для игрока",
+                                          callback_data=f"coach:vn:outp:{ref}")])
+    rows.append([InlineKeyboardButton("⬅️ К играм с записью", callback_data="coach:vn:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _vn_people(src: str, gid: str) -> List[Dict[str, Any]]:
+    """Кого предлагать в «кому»: состав этой игры, а нет его — вся команда.
+
+    Номер игры в записи и в составе у SLPRO пишется по-разному — с приставкой
+    и без, — поэтому пробуем оба."""
+    import coach_payments
+    import game_roster
+    people = game_roster.roster(src, gid) or game_roster.roster(src, f"slpro-{gid}")
+    people = [p for p in people if int(p.get("row") or 0) > 0]
+    if not people:
+        people = [p for p in coach_payments.players() if not p.get("gone")]
+    return people
+
+
+def _vn_pick_who(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Кому заметка: команде или кому-то из состава игры."""
+    draft = _note_draft.get(uid) or {}
+    people = _vn_people(draft.get("src", ""), draft.get("gid", ""))
+    rows = [[InlineKeyboardButton("👥 Команде", callback_data="coach:vn:who:0")]]
+    for p in people[:24]:
+        rows.append([InlineKeyboardButton(p["title"][:BTN_TEXT],
+                                          callback_data=f"coach:vn:who:{p['row']}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="coach:vn:draft")])
+    return "👤 Про кого эта заметка?", InlineKeyboardMarkup(rows)
+
+
+def _vn_draft_screen(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Заметка перед сохранением: время, текст, кому. Сохраняет только кнопка."""
+    import video_notes as vn
+    draft = _note_draft.get(uid) or {}
+    names = _vn_names()
+    row = int(draft.get("row") or 0)
+    who = names.get(row, "команда") if row else "команда"
+    lines = ["📝 Заметка", "",
+             f"⏱ {vn.human_time(int(draft.get('sec') or 0))} · 👤 {who}", "",
+             str(draft.get("text") or "")]
+    if draft.get("by_voice"):
+        lines += ["", "🎙 Распознано по голосу — проверь фамилии и термины, "
+                      "модель их иногда путает. Не так — «✏️ Текстом»."]
+    rows = [[InlineKeyboardButton("✅ Сохранить", callback_data="coach:vn:save")],
+            [InlineKeyboardButton("👤 Кому", callback_data="coach:vn:whom"),
+             InlineKeyboardButton("✏️ Текстом", callback_data="coach:vn:retext")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="coach:vn:cancel")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _vn_note(note_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import video_notes as vn
+    n = vn.get(note_id)
+    if not n:
+        return _vn_games()
+    game = vn.game_of(n["source"], n["game_id"]) or {}
+    names = _vn_names()
+    row = int(n["player_row"] or 0)
+    who = names.get(row, "команда") if row else "команда"
+    lines = [f"📝 {vn.human_time(n['at_sec'])} · {who}", "", str(n["text"])]
+    if game.get("video"):
+        lines += ["", f"▶️ {vn.link(game['video'], n['at_sec'])}"]
+    ref = _vn_ref(n["source"], n["game_id"])
+    rows = [[InlineKeyboardButton("✏️ Текст", callback_data=f"coach:vn:etext:{note_id}"),
+             InlineKeyboardButton("⏱ Время", callback_data=f"coach:vn:etime:{note_id}")],
+            [InlineKeyboardButton("👤 Кому", callback_data=f"coach:vn:ewho:{note_id}")],
+            [InlineKeyboardButton("🗑 Удалить", callback_data=f"coach:vn:del:{note_id}")],
+            [InlineKeyboardButton("⬅️ К заметкам игры", callback_data=f"coach:vn:g:{ref}")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _vn_send(query, src: str, gid: str, player_row: Optional[int]) -> None:
+    """Готовый разбор — тренеру, отдельными сообщениями, чтобы переслать.
+
+    Только тренеру: кому пересылать, он решает сам. Сообщением, а не файлом —
+    так ссылки на секунды кликаются прямо в Telegram, где их и смотрят."""
+    import video_notes as vn
+    pages = await asyncio.to_thread(vn.breakdown, src, gid, player_row)
+    for page in pages:
+        await query.message.reply_text(page, parse_mode="HTML",
+                                       disable_web_page_preview=True)
+
+
+async def _vn_admin(query, user, parts: List[str]) -> None:
+    """Кнопки раздела «Разбор записи»."""
+    import video_notes as vn
+    what = parts[2] if len(parts) > 2 else "list"
+    uid = user.id
+
+    if what == "list":
+        _clear_pending(uid)
+        text, markup = await asyncio.to_thread(_vn_games)
+    elif what == "g" and len(parts) > 4:
+        text, markup = await asyncio.to_thread(_vn_game, parts[3], parts[4])
+    elif what == "add" and len(parts) > 4:
+        _clear_pending(uid)
+        _awaiting_note[uid] = {"stage": "time", "src": parts[3], "gid": parts[4]}
+        text = NOTE_ASK_TIME
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"coach:vn:g:{parts[3]}:{parts[4]}")]])
+    elif what == "draft":
+        text, markup = _vn_draft_screen(uid)
+    elif what == "whom":
+        text, markup = await asyncio.to_thread(_vn_pick_who, uid)
+    elif what == "who" and len(parts) > 3:
+        draft = _note_draft.get(uid)
+        if draft is not None:
+            draft["row"] = int(parts[3])
+            if draft.get("id"):
+                # Правка «кому» у сохранённой заметки — сразу в базу.
+                await asyncio.to_thread(vn.update, int(draft["id"]),
+                                        player_row=int(parts[3]))
+                _note_draft.pop(uid, None)
+                text, markup = await asyncio.to_thread(_vn_note, int(draft["id"]))
+                await query.edit_message_text(text, reply_markup=markup,
+                                              disable_web_page_preview=True)
+                return
+        text, markup = _vn_draft_screen(uid)
+    elif what == "retext":
+        _awaiting_note[uid] = {"stage": "retext"}
+        text = "✏️ Пришли текст заметки целиком.\n\nПередумал — /start."
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data="coach:vn:draft")]])
+    elif what == "save":
+        draft = _note_draft.pop(uid, None)
+        _awaiting_note.pop(uid, None)
+        if not draft or not str(draft.get("text") or "").strip():
+            text, markup = await asyncio.to_thread(_vn_games)
+            text = "Заметка потерялась — начни заново.\n\n" + text
+        else:
+            await asyncio.to_thread(
+                vn.add, draft["src"], draft["gid"], int(draft["sec"]),
+                draft["text"], int(draft.get("row") or 0), str(uid),
+                bool(draft.get("by_voice")))
+            text, markup = await asyncio.to_thread(_vn_game, draft["src"], draft["gid"])
+            text = "✅ Сохранил.\n\n" + text
+    elif what == "cancel":
+        draft = _note_draft.pop(uid, None) or {}
+        _awaiting_note.pop(uid, None)
+        if draft.get("src"):
+            text, markup = await asyncio.to_thread(_vn_game, draft["src"], draft["gid"])
+        else:
+            text, markup = await asyncio.to_thread(_vn_games)
+    elif what == "n" and len(parts) > 3:
+        text, markup = await asyncio.to_thread(_vn_note, int(parts[3]))
+    elif what in ("etext", "etime") and len(parts) > 3:
+        _clear_pending(uid)
+        _awaiting_note[uid] = {"stage": what, "id": int(parts[3])}
+        text = ("✏️ Пришли новый текст заметки." if what == "etext"
+                else "⏱ Пришли новое время: «12:34».") + "\n\nПередумал — /start."
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"coach:vn:n:{parts[3]}")]])
+    elif what == "ewho" and len(parts) > 3:
+        _clear_pending(uid)
+        n = await asyncio.to_thread(vn.get, int(parts[3])) or {}
+        _note_draft[uid] = {"id": int(parts[3]), "src": n.get("source", ""),
+                            "gid": n.get("game_id", ""),
+                            "row": int(n.get("player_row") or 0)}
+        text, markup = await asyncio.to_thread(_vn_pick_who, uid)
+    elif what == "del" and len(parts) > 3:
+        n = await asyncio.to_thread(vn.get, int(parts[3])) or {}
+        await asyncio.to_thread(vn.delete, int(parts[3]))
+        if n:
+            text, markup = await asyncio.to_thread(_vn_game, n["source"], n["game_id"])
+            text = "🗑 Удалил.\n\n" + text
+        else:
+            text, markup = await asyncio.to_thread(_vn_games)
+    elif what == "out" and len(parts) > 5:
+        row = int(parts[5])
+        await _vn_send(query, parts[3], parts[4], row or None)
+        text, markup = await asyncio.to_thread(_vn_game, parts[3], parts[4])
+        text = ("📤 Разбор выше — перешли его, кому нужно.\n\n" + text)
+    elif what == "outp" and len(parts) > 4:
+        people = await asyncio.to_thread(_vn_people, parts[3], parts[4])
+        notes = await asyncio.to_thread(vn.of_game, parts[3], parts[4])
+        with_notes = {int(n["player_row"]) for n in notes}
+        ref = _vn_ref(parts[3], parts[4])
+        # Сначала те, про кого есть заметки: ради них разбор и собирают.
+        people.sort(key=lambda p: (int(p["row"]) not in with_notes, p["title"]))
+        rows = [[InlineKeyboardButton(
+            (("📝 " if int(p["row"]) in with_notes else "") + p["title"])[:BTN_TEXT],
+            callback_data=f"coach:vn:out:{ref}:{p['row']}")] for p in people[:24]]
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"coach:vn:g:{ref}")])
+        text = ("👤 Для кого разбор?\n\nВ нём будут его моменты и общие для "
+                "команды. 📝 — про него есть заметки.")
+        markup = InlineKeyboardMarkup(rows)
+    else:
+        text, markup = await asyncio.to_thread(_vn_games)
+
+    await query.edit_message_text(text, reply_markup=markup,
+                                  disable_web_page_preview=True)
+
+
+# Слова, которые тренер говорит в разборе, а модель без подсказки пишет как
+# попало.
+NOTE_TERMS = ("заслон, пик-н-ролл, подбор, трёхочковый, фол, прессинг, зона, "
+              "личная опека, переход, отрыв, блокшот, передача, проход")
+
+
+def _vn_hint() -> str:
+    """Подсказка распознаванию: фамилии своих и слова игры.
+
+    Имена берём из листа тренера — это его команда; наружу подсказка не
+    уходит, модель работает на нашем же сервере."""
+    import coach_payments
+    names = sorted({str(p.get("surname") or p["title"].split(" ")[0])
+                    for p in coach_payments.players() if not p.get("gone")})
+    return f"Разбор баскетбольной игры. Игроки: {', '.join(names[:40])}. {NOTE_TERMS}."
+
+
+async def _vn_voice_to_text(msg) -> Tuple[str, str]:
+    """Голосовое → текст. (текст, ошибка). Файл голоса удаляем сразу."""
+    import speech
+    ok, why = speech.available()
+    if not ok:
+        return "", why
+    source = msg.voice or msg.audio
+    tmp_dir = speech.ROOT / "data" / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    path = tmp_dir / f"note-{msg.message_id}.ogg"
+    try:
+        handle = await source.get_file()
+        await handle.download_to_drive(str(path))
+        hint = await asyncio.to_thread(_vn_hint)
+        text, _dur = await asyncio.to_thread(speech.transcribe, str(path), "ru", hint)
+    except Exception as e:
+        log.warning(f"Разбор записи: голос не распознался: {e}")
+        return "", f"не получилось распознать: {e}"
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if not text:
+        return "", "в записи не нашлось слов — попробуй ещё раз или текстом"
+    return text, ""
+
+
+async def _vn_take(msg, uid: int, text: str, by_voice: bool) -> None:
+    """Принимает текст заметки (набранный или распознанный) по текущему шагу."""
+    import video_notes as vn
+    state = _awaiting_note.get(uid) or {}
+    stage = state.get("stage")
+
+    if stage == "time":
+        got = vn.split_time(text) if not by_voice else None
+        if got:
+            sec, rest = got
+            if rest:
+                _note_draft[uid] = {"src": state["src"], "gid": state["gid"],
+                                    "sec": sec, "text": rest, "row": 0,
+                                    "by_voice": False}
+                _awaiting_note.pop(uid, None)
+                screen, markup = _vn_draft_screen(uid)
+                await msg.reply_text(screen, reply_markup=markup)
+                return
+            _awaiting_note[uid] = {**state, "stage": "body", "sec": sec}
+            await msg.reply_text(
+                f"⏱ {vn.human_time(sec)}. Теперь голосом или текстом — что в этом "
+                "моменте.\n\nПередумал — /start.")
+            return
+        if by_voice:
+            # Прислал голос раньше времени — не теряем его, спрашиваем время.
+            _awaiting_note[uid] = {**state, "stage": "time_after", "text": text}
+            await msg.reply_text(
+                f"🎙 Записал:\n{text}\n\n⏱ А на какой секунде записи? Пришли время: "
+                "«12:34».")
+            return
+        await msg.reply_text("Не понял время. Пришли как в плеере: «12:34» или "
+                             "«1:02:15».")
+        return
+
+    if stage == "time_after":
+        sec = vn.parse_time(text)
+        if sec is None:
+            await msg.reply_text("Не понял время. Пришли как в плеере: «12:34».")
+            return
+        _note_draft[uid] = {"src": state["src"], "gid": state["gid"], "sec": sec,
+                            "text": state.get("text", ""), "row": 0, "by_voice": True}
+        _awaiting_note.pop(uid, None)
+        screen, markup = _vn_draft_screen(uid)
+        await msg.reply_text(screen, reply_markup=markup)
+        return
+
+    if stage == "body":
+        _note_draft[uid] = {"src": state["src"], "gid": state["gid"],
+                            "sec": int(state["sec"]), "text": text, "row": 0,
+                            "by_voice": by_voice}
+        _awaiting_note.pop(uid, None)
+        screen, markup = _vn_draft_screen(uid)
+        await msg.reply_text(screen, reply_markup=markup)
+        return
+
+    if stage == "retext":
+        draft = _note_draft.get(uid)
+        _awaiting_note.pop(uid, None)
+        if draft is not None:
+            draft["text"], draft["by_voice"] = text, False
+            screen, markup = _vn_draft_screen(uid)
+            await msg.reply_text(screen, reply_markup=markup)
+        return
+
+    if stage in ("etext", "etime"):
+        note_id = int(state["id"])
+        if stage == "etime":
+            sec = vn.parse_time(text)
+            if sec is None:
+                await msg.reply_text("Не понял время. Пришли: «12:34».")
+                return
+            await asyncio.to_thread(vn.update, note_id, at_sec=sec)
+        else:
+            await asyncio.to_thread(vn.update, note_id, text=text)
+        _awaiting_note.pop(uid, None)
+        screen, markup = await asyncio.to_thread(_vn_note, note_id)
+        await msg.reply_text(screen, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def handle_note_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_note:
+        return
+    if not _can_see_reports(user):
+        _awaiting_note.pop(user.id, None)
+        return
+    text = (msg.text or "").strip()
+    if text:
+        await _vn_take(msg, user.id, text, by_voice=False)
+    raise ApplicationHandlerStop
+
+
+async def handle_note_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Голосовое в разборе записи. Вне разбора голос бот не трогает."""
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_note:
+        return
+    if not _can_see_reports(user):
+        _awaiting_note.pop(user.id, None)
+        return
+    state = _awaiting_note.get(user.id) or {}
+    if state.get("stage") not in ("time", "body", "retext", "etext"):
+        await msg.reply_text("Сейчас жду время текстом: «12:34».")
+        raise ApplicationHandlerStop
+    wait = await msg.reply_text("🎙 Распознаю…")
+    text, error = await _vn_voice_to_text(msg)
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    if error:
+        await msg.reply_text(f"⚠️ {error[:1].upper() + error[1:]}.")
+        raise ApplicationHandlerStop
+    if state.get("stage") == "etext":
+        await _vn_take(msg, user.id, text, by_voice=False)
+    else:
+        await _vn_take(msg, user.id, text, by_voice=True)
+    raise ApplicationHandlerStop
+
+
 async def _catch_up_prices() -> None:
     """Двигает цены по играм, которые сыграны, но в движении цен не учтены.
 
@@ -11388,6 +11822,11 @@ async def _background_loop(app: Application) -> None:
                 log.warning(f"Уборка доступов: {e}")
             await _send_group_repeats(app)
             await _night_sweep()
+            try:
+                import speech
+                await asyncio.to_thread(speech.unload_if_idle)
+            except Exception as e:
+                log.warning(f"Распознавание: выгрузка модели не прошла: {e}")
             await _recount_achievements()
             await _tell_about_badges(app)
             await _catch_up_prices()
@@ -11699,6 +12138,14 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_fee_text), group=17)
+    # Разбор записи: текст и голос — своими группами, чтобы голос тренера не
+    # перехватил никто другой, а текст не утёк в чужой диалог.
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_note_text), group=18)
+    app.add_handler(MessageHandler(
+        (filters.VOICE | filters.AUDIO) & filters.ChatType.PRIVATE,
+        handle_note_voice), group=19)
     # Картинка значка приходит фотографией или файлом — своя группа, с
     # текстовыми диалогами не пересекается.
     app.add_handler(MessageHandler(
