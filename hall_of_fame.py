@@ -358,6 +358,67 @@ async def look_up(source: str, season_id: Any, stage_id: Any, team_id: Any,
             "shared": bool(mine.get("shared"))}
 
 
+# ─────────────────────────── наши команды в лигах ───────────────────────────
+
+# Ключ настройки: id наших команд в Инфобаскете, которые бот нашёл сам или
+# получил от тренера.
+TEAMS_SETTING = "hof_team_ids"
+
+
+def extra_team_ids() -> List[str]:
+    raw = str(sheets_cache.get_setting(TEAMS_SETTING, "") or "")
+    return [t for t in (x.strip() for x in raw.split(",")) if t]
+
+
+def add_team_id(team_id: Any) -> bool:
+    """Запоминает ещё одну нашу команду в лиге. True — если её не было.
+
+    За годы команда заводилась в лиге заново: «Pull Up» (32086) играл НБЛ и
+    ВСЕСМАРТ, «PULL UP» (36502) — летнюю. Для лиги это разные команды, для
+    зала славы — одна и та же."""
+    tid = str(team_id).strip()
+    if not tid.isdigit():
+        return False
+    have = extra_team_ids()
+    if tid in have:
+        return False
+    sheets_cache.set_setting(TEAMS_SETTING, ",".join(have + [tid]))
+    return True
+
+
+def drop_team_id(team_id: Any) -> None:
+    tid = str(team_id).strip()
+    sheets_cache.set_setting(
+        TEAMS_SETTING, ",".join(t for t in extra_team_ids() if t != tid))
+
+
+def team_ids() -> List[str]:
+    """Все наши id в Инфобаскете: из справочника команд, из своих игр и те,
+    что бот нашёл или тренер добавил руками."""
+    import league_sync
+    ids = {str(t["team_id"]) for t in
+           league_sync.our_teams("infobasket", include_closed=True)}
+    ids |= {t["team_id"] for t in tracked()
+            if t["source"] == "infobasket" and str(t["team_id"] or "").isdigit()}
+    ids |= set(extra_team_ids())
+    return sorted(ids)
+
+
+async def team_name(team_id: Any) -> str:
+    """Как команда называется в лиге — чтобы тренер видел, что добавляет."""
+    import aiohttp
+    url = (f"https://reg.infobasket.su/Widget/TeamPage/{team_id}"
+           "?format=json&lang=ru")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                data = await r.json(content_type=None) if r.status == 200 else None
+    except Exception as exc:
+        logger.warning("Зал славы: имя команды %s — %s", team_id, exc)
+        return ""
+    return str((data or {}).get("TeamNameRu") or "")
+
+
 # ─────────────────────────── поиск прошлых турниров ───────────────────────────
 
 
@@ -613,6 +674,12 @@ async def _infobasket_row(team_id: str, comp_id: str, org: str, stage: str,
         mine = next((r for r in table if is_ours(r["name"])), None)
     if not mine:
         return None
+    # В таблице команда может стоять под другим id: в лигу её заводили заново.
+    # Запоминаем — со следующего поиска её сезоны тоже попадут в зал славы.
+    if mine["team_id"] and mine["team_id"] != str(team_id) and add_team_id(mine["team_id"]):
+        # В журнал — только id: правило одно на весь проект, имена туда не
+        # пишем, даже клубные.
+        logger.info("Зал славы: нашлась наша команда под id %s", mine["team_id"])
     wins, losses, last = _our_record("infobasket", comp_id, "", str(team_id))
     if not last:
         good = sorted(d for d in days if len(d) == 10)
@@ -698,11 +765,7 @@ async def scan() -> Tuple[int, int]:
     он видел награждение, а бот — таблицу."""
     init()
     known = tracked()
-    import league_sync
-    ib_teams = sorted({str(t["team_id"]) for t in
-                       league_sync.our_teams("infobasket", include_closed=True)}
-                      | {t["team_id"] for t in known
-                         if t["source"] == "infobasket" and t["team_id"]})
+    ib_teams = team_ids()
     ib_tracked = [t for t in known if t["source"] == "infobasket"]
     both = await asyncio.gather(scan_slpro(),
                                 scan_infobasket(ib_teams, ib_tracked))

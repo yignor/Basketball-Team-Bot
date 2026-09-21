@@ -68,7 +68,7 @@ FORBIDDEN = re.compile(
     r"|coach:lg:(close2|open):"
     # Зал славы: «найти турниры» — это поход в лиги по сети (полминуты), а
     # set/ok/del/show меняют записи и шлют фото.
-    r"|coach:hof:(scan|set:|ok:|del:|show:)"
+    r"|coach:hof:(scan|set:|ok:|del:|show:|rmteam:)"
     # Частные занятия: это чужие деньги. Обход ходит по настоящей базе, и
     # начислить долг или снять оплату «просто чтобы проверить кнопку» нельзя.
     r"|pl:(t|done|paid|offok|arch|back|rm|repon|repoff2):"

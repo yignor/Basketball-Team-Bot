@@ -2424,6 +2424,7 @@ def _clear_pending(uid: int) -> None:
     _note_draft.pop(uid, None)
     _awaiting_hof.pop(uid, None)
     _awaiting_place.pop(uid, None)
+    _awaiting_team.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -11105,6 +11106,8 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # Кто сейчас присылает фото с награждения: uid -> ключ турнира.
 _awaiting_hof: Dict[int, str] = {}
+# Кто добавляет id нашей команды в лиге.
+_awaiting_team: Dict[int, bool] = {}
 # Кто вводит место числом: uid -> ключ турнира.
 _awaiting_place: Dict[int, str] = {}
 
@@ -11178,9 +11181,38 @@ def _hof_screen() -> Tuple[str, InlineKeyboardMarkup]:
     lines += ["", "<i>Нажми на лигу — там стадии, фото и место, которое можно "
                   "поправить.</i>"]
     buttons.append([InlineKeyboardButton("🔎 Найти турниры",
-                                         callback_data="coach:hof:scan")])
+                                         callback_data="coach:hof:scan"),
+                    InlineKeyboardButton("👥 Команды",
+                                         callback_data="coach:hof:teams")])
     buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:team")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _hof_teams_screen(found: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    """Наши команды в Инфобаскете: под какими id лига нас знает.
+
+    Команду в лигу заводили заново не раз, и у каждой записи свой id. Бот
+    находит их сам, когда видит наше имя в таблице, но старый сезон, куда он
+    ни разу не заглядывал, так не найти — id можно добавить руками."""
+    import hall_of_fame as hof
+    ids = hof.team_ids()
+    extra = set(hof.extra_team_ids())
+    lines = ["👥 Наши команды в лигах", "",
+             "Инфобаскет заводит команду заново каждый раз, когда она "
+             "возвращается: у «Pull Up» и «PULL UP» разные id, а зал славы "
+             "должен помнить оба.", ""]
+    for tid in ids:
+        lines.append(f"• {tid}" + (" — добавлен руками" if tid in extra else ""))
+    if not ids:
+        lines.append("Пока ни одной.")
+    if found:
+        lines += ["", found]
+    rows = [[InlineKeyboardButton("➕ Добавить id", callback_data="coach:hof:addteam")]]
+    for tid in sorted(extra):
+        rows.append([InlineKeyboardButton(f"🗑 Убрать {tid}",
+                                          callback_data=f"coach:hof:rmteam:{tid}")])
+    rows.append([InlineKeyboardButton("⬅️ К залу славы", callback_data="coach:hof")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def _hof_group(key: str) -> Tuple[str, InlineKeyboardMarkup]:
@@ -11300,6 +11332,19 @@ async def _hof_admin(query, context, user, parts: List[str]) -> None:
         text, markup = await asyncio.to_thread(_hof_screen)
         text = (f"Просмотрел турниров: {found}. Новых записей: {added}.\n\n"
                 + text)
+    elif what == "teams":
+        text, markup = await asyncio.to_thread(_hof_teams_screen)
+    elif what == "addteam":
+        _clear_pending(uid)
+        _awaiting_team[uid] = True
+        text = ("👥 Пришли id команды в Инфобаскете — число из адреса её "
+                "страницы (teamId=36502).\n\nПередумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data="coach:hof:teams")]])
+    elif what == "rmteam" and len(parts) > 3:
+        await asyncio.to_thread(hof.drop_team_id, parts[3])
+        text, markup = await asyncio.to_thread(_hof_teams_screen,
+                                               f"🗑 Убрал {parts[3]}.")
     elif what == "grp" and len(parts) > 3:
         text, markup = await asyncio.to_thread(_hof_group, parts[3])
     elif what == "one" and key:
@@ -11372,6 +11417,35 @@ async def handle_hof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text, markup = await asyncio.to_thread(_hof_card, key)
     await msg.reply_text("📷 Сохранил.\n\n" + text, reply_markup=markup,
                          parse_mode="HTML")
+    raise ApplicationHandlerStop
+
+
+async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """id нашей команды в лиге, присланный тренером."""
+    import hall_of_fame as hof
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_team:
+        return
+    if not _can_see_reports(user):
+        _awaiting_team.pop(user.id, None)
+        return
+    raw = (msg.text or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        await msg.reply_text("Нужно число — id команды из адреса её страницы.")
+        raise ApplicationHandlerStop
+    _awaiting_team.pop(user.id, None)
+    name = await hof.team_name(digits)
+    added = await asyncio.to_thread(hof.add_team_id, digits)
+    if not name:
+        note = f"⚠️ Лига про команду {digits} ничего не знает — но id запомнил."
+    elif not hof.is_ours(name):
+        # Не запрещаем: в лиге команда могла называться иначе, чем помнит бот.
+        note = f"⚠️ В лиге это «{name}» — на нашу не похоже. Запомнил, проверь."
+    else:
+        note = f"✅ {digits} — это «{name}»." + ("" if added else " Уже был в списке.")
+    text, markup = await asyncio.to_thread(_hof_teams_screen, note)
+    await msg.reply_text(text, reply_markup=markup, parse_mode="HTML")
     raise ApplicationHandlerStop
 
 
@@ -12627,6 +12701,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_hof_place), group=21)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_hof_team), group=22)
     # Картинка значка приходит фотографией или файлом — своя группа, с
     # текстовыми диалогами не пересекается.
     app.add_handler(MessageHandler(

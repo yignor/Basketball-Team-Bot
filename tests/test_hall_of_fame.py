@@ -264,6 +264,54 @@ async def test_screens(bd) -> None:
           "подтвердили — пометки «бот посчитал» больше нет")
 
 
+async def test_team_ids(bd) -> None:
+    print("\n=== наши команды в лигах ===")
+    import hall_of_fame as hof
+    text, markup, _ = await press(bd, "coach:hof")
+    check("coach:hof:teams" in cbs(markup), "с зала славы есть вход в «Команды»")
+
+    text, markup, _ = await press(bd, "coach:hof:teams")
+    check("coach:hof:addteam" in cbs(markup), "id можно добавить")
+
+    await press(bd, "coach:hof:addteam")
+    real = hof.team_name
+
+    async def fake_name(team_id):
+        return "Pull Up" if str(team_id) == "32086" else "Кураж"
+
+    hof.team_name = fake_name
+    try:
+        msg = FakeMessage(text="32086", bot=BOT, user=COACH)
+        try:
+            await bd.handle_hof_team(FakeUpdate(message=msg, user=COACH),
+                                     FakeContext(BOT))
+        except Exception as exc:
+            if type(exc).__name__ != "ApplicationHandlerStop":
+                raise
+        check("32086" in hof.team_ids(), "id запомнен")
+        check(any("Pull Up" in r["text"] for r in msg.replies),
+              "и сказано, что это за команда")
+
+        # Чужая команда: не запрещаем, но предупреждаем — в лиге нас могли
+        # записать как угодно.
+        await press(bd, "coach:hof:addteam")
+        msg = FakeMessage(text="9999", bot=BOT, user=COACH)
+        try:
+            await bd.handle_hof_team(FakeUpdate(message=msg, user=COACH),
+                                     FakeContext(BOT))
+        except Exception as exc:
+            if type(exc).__name__ != "ApplicationHandlerStop":
+                raise
+        check(any("на нашу не похоже" in r["text"] for r in msg.replies),
+              "про чужое имя предупредили")
+    finally:
+        hof.team_name = real
+
+    await press(bd, "coach:hof:rmteam:9999")
+    check("9999" not in hof.team_ids(), "лишний id убирается кнопкой")
+    check("32086" in hof.team_ids(), "а нужный остаётся")
+
+
 async def test_photo(bd) -> None:
     print("\n=== фото с награждения ===")
     import hall_of_fame as hof
@@ -323,6 +371,7 @@ def main() -> int:
     asyncio.run(test_hidden_stays_hidden())
     asyncio.run(test_scan_keeps_confirmed())
     asyncio.run(test_screens(bd))
+    asyncio.run(test_team_ids(bd))
     asyncio.run(test_photo(bd))
     asyncio.run(test_close_asks_place(bd))
     print("\n" + "=" * 60)
