@@ -105,6 +105,26 @@ def setup() -> Any:
             conn.execute(
                 "INSERT INTO game_rosters (source, game_id, player_row, "
                 "added_at) VALUES ('infobasket', '1094941', ?, ?)", (row, now))
+        # «Конфиг»: два турнира Инфобаскета на одну команду. В справочнике
+        # команд живёт только первый, название второго есть лишь здесь.
+        rows = [["--- START GAME ---", "", "", ""],
+                ["инфобаскет", "140825", "36502", "Ночная лига"],
+                ["инфобаскет", "142849", "36502", "Ночная лига · Плей-офф"],
+                ["slpro", "SUMC", "PullUp Farm", "Осенняя лига"],
+                ["--- END  GAME---", "", "", ""],
+                # Пустые маркеры остальных блоков: без них парсер «Конфига»
+                # ругается в журнал на каждом чтении, и настоящая беда в этом
+                # шуме потеряется.
+                ["--- START VOTING ---", "", "", ""],
+                ["1", "Тренировки", "Среда, 20:30", "Воскресенье"],
+                ["--- END VOTING ---", "", "", ""],
+                ["--- START AUTOMATIONS ---", "", "", ""],
+                ["Опросы на игры", "1282", "", "Нет"],
+                ["--- END AUTOMATIONS ---", "", "", ""]]
+        for i, row in enumerate(rows, start=2):
+            conn.execute(
+                "INSERT INTO config_rows (row_index, col_a, col_b, col_c, col_d, "
+                "synced_at) VALUES (?, ?, ?, ?, ?, ?)", (i, *row, now))
         conn.commit()
     import coach_lineup
     return coach_lineup
@@ -155,6 +175,17 @@ def test_future_game_counts(cl) -> None:
           "подпись называет турнир будущей игры")
 
 
+def test_tourney_name(cl) -> None:
+    print("\n=== как назван турнир ===")
+    known = cl.scope_title([{"source": "infobasket", "season_id": "142849",
+                             "stage_id": ""}])
+    check(known == "по турниру «Ночная лига · Плей-офф»",
+          f"второй турнир лиги назван по «Конфигу»: {known}")
+    unknown = cl.scope_title([{"source": "slpro", "season_id": "S99",
+                               "stage_id": ""}])
+    check(unknown == "по этому турниру", f"имени нет — говорим просто: {unknown}")
+
+
 def test_other_league_not_mixed(cl) -> None:
     print("\n=== вторая лига не подмешивается ===")
     ib = cl.averages([{"row": 2}], [{"source": "infobasket", "season_id": "140825",
@@ -172,6 +203,7 @@ def main() -> int:
     test_scope_of_game(cl)
     test_lineup_counts(cl)
     test_future_game_counts(cl)
+    test_tourney_name(cl)
     test_other_league_not_mixed(cl)
     print("\n" + "=" * 60)
     if bad:

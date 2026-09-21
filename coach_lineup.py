@@ -247,22 +247,47 @@ def game_scope(source: str, game_id: Any) -> List[Dict[str, str]]:
     return [sc for sc in current_scopes() if sc["source"] == str(source)]
 
 
+def _config_labels() -> Dict[Tuple[str, str], str]:
+    """{(источник, турнир): как он назван в «Конфиге»}.
+
+    Тренер завёл эти названия сам («Летняя лига · Группа 4»), и в боте турнир
+    должен называться так же — иначе он не узнает в подписи свой турнир."""
+    out: Dict[Tuple[str, str], str] = {}
+    try:
+        import config_sheet
+        for row in config_sheet.split(_config_rows()).get(config_sheet.GAME, []):
+            kind = str(row[0] if row else "").strip().lower()
+            comp = str(row[1] if len(row) > 1 else "").strip()
+            label = str(row[3] if len(row) > 3 else "").strip()
+            source = ("infobasket" if kind.startswith("инфобаскет")
+                      else "slpro" if kind.startswith("slpro") else "")
+            if source and comp and label:
+                out[(source, comp)] = label
+    except Exception as exc:
+        logger.warning("Названия турниров из «Конфига» не прочитались: %s", exc)
+    return out
+
+
 def scope_title(scopes: List[Dict[str, str]]) -> str:
     """Как назвать турнир в подписи под составом.
 
-    Название берём из справочника команд — там оно записано так, как турнир
-    назван у нас в «Конфиге». Не нашлось — говорим «по этому турниру»:
+    Название берём из справочника команд, а если там его нет — прямо из
+    «Конфига», где у каждого турнира есть столбец «как показывать в боте».
+    У Инфобаскета турниров на одну команду бывает несколько, и справочник
+    знает только первый. Не нашлось нигде — говорим «по этому турниру»:
     сказать, по чему посчитано, важнее, чем назвать это точным именем."""
     if not scopes:
         return "по текущим турнирам"
     names: List[str] = []
+    labels = _config_labels()
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         for sc in scopes:
             row = conn.execute(
                 "SELECT league FROM league_teams WHERE ours = 1 AND source = ? "
                 "AND season_id = ?", (sc["source"], sc["season_id"])).fetchone()
-            label = str((row["league"] if row else "") or "").strip()
+            label = (str((row["league"] if row else "") or "").strip()
+                     or labels.get((sc["source"], sc["season_id"]), ""))
             if label and label not in names:
                 names.append(label)
     if len(scopes) == 1:
