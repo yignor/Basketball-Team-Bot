@@ -206,14 +206,62 @@ def _config_rows() -> List[List[str]]:
     return [[str(r[c] or "") for c in cols] for r in rows]
 
 
+def game_scope(source: str, game_id: Any) -> List[Dict[str, str]]:
+    """Турнир ОДНОЙ игры: сезон и стадия из справочника матчей.
+
+    Пятёрку ставят на конкретную игру конкретной лиги, и цифры рядом с
+    фамилией должны быть из неё же. Команда играет в двух лигах сразу, и
+    сложенные вместе 12 игр в одной и 2 в другой давали «14 игр» — тренер
+    читал это как опыт в турнире, куда прямо сейчас ставит состав.
+
+    Игры, заведённой руками, в справочнике ещё нет: она попадёт туда, когда
+    лига объявит расписание. До тех пор берём турниры её лиги из «Конфига» —
+    это всё равно уже, чем все лиги разом."""
+    import vk_video
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT season_id, stage_id FROM game_meta WHERE source = ? "
+            "AND game_id = ?", (str(source), vk_video.meta_id(game_id))).fetchone()
+    season = str(row["season_id"] or "") if row else ""
+    if season:
+        return [{"source": str(source), "season_id": season,
+                 "stage_id": str(row["stage_id"] or "")}]
+    return [sc for sc in current_scopes() if sc["source"] == str(source)]
+
+
+def scope_title(scopes: List[Dict[str, str]]) -> str:
+    """Как назвать турнир в подписи под составом.
+
+    Название берём из справочника команд — там оно записано так, как турнир
+    назван у нас в «Конфиге». Не нашлось — говорим «по этому турниру»:
+    сказать, по чему посчитано, важнее, чем назвать это точным именем."""
+    if not scopes:
+        return "по текущим турнирам"
+    names: List[str] = []
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        for sc in scopes:
+            row = conn.execute(
+                "SELECT league FROM league_teams WHERE ours = 1 AND source = ? "
+                "AND season_id = ?", (sc["source"], sc["season_id"])).fetchone()
+            label = str((row["league"] if row else "") or "").strip()
+            if label and label not in names:
+                names.append(label)
+    if len(scopes) == 1:
+        return f"по турниру «{names[0]}»" if names else "по этому турниру"
+    return "по турнирам этой лиги"
+
+
 def averages(rows: List[Dict[str, Any]],
              scopes: Optional[List[Dict[str, str]]] = None) -> Dict[int, Dict[str, float]]:
     """{строка листа: средние за игру} — очки, подборы, потери.
 
-    Считаем ТОЛЬКО по турнирам, которые команда играет сейчас (лист «Конфиг»).
-    По всей истории выходило нечестно: у одного 137 игр за четыре года, у
-    другого 7 за этот месяц, и рядом эти средние сравнивать нельзя — состав
-    соперников и роль игрока за годы меняются полностью.
+    Турниры задаёт тот, кто зовёт: экран пятёрки передаёт турнир САМОЙ игры
+    (см. game_scope). Без них считаются те, что команда играет сейчас (лист
+    «Конфиг»). По всей истории выходило нечестно: у одного 137 игр за четыре
+    года, у другого 7 за этот месяц, и рядом эти средние сравнивать нельзя —
+    состав соперников и роль игрока за годы меняются полностью.
 
     Мост от строки листа к статистике лиг — price_refs: там уже сведено, кто
     из листа кем играет в лиге (связку ведёт фэнтези-пул). Через
@@ -283,7 +331,8 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
     for p in people:
         rows.append({**p, "trainings": counts.get(int(p["row"]), 0),
                      "role": str(p.get("role") or "")})
-    stats = averages(rows)
+    scopes = game_scope(source, game_id)
+    stats = averages(rows, scopes)
     for r in rows:
         r["avg"] = stats.get(r["row"], {})
     picked = start_five(source, str(game_id))
@@ -298,6 +347,7 @@ def lineup(source: str, game_id: str, sort: str = "name") -> Dict[str, Any]:
     else:
         rows.sort(key=game_roster._by_surname)
     return {"game": game, "rows": rows, "sort": sort, "day": day,
+            "scopes": scopes, "tourney": scope_title(scopes),
             # Порядок пятёрки — как выбирал тренер, а не как отсортирован список.
             "start": [r for r in picked if any(x["row"] == r for x in rows)]}
 
@@ -370,7 +420,7 @@ def text(data: Dict[str, Any], title: str = "🏁 Стартовый соста�
     else:
         lines += ["Пусто.", ""]
     lines.append(f"<i>Тренировки — за {WINDOW_DAYS} дней до игры, "
-                 "средние — по текущим турнирам.</i>")
+                 f"средние — {data.get('tourney') or 'по текущим турнирам'}.</i>")
     return "\n".join(lines)
 
 

@@ -366,18 +366,22 @@ async def test_start_five(bd) -> List[str]:
     for must in ("СТАРТ ·", "СКАМЕЙКА ·", "трен."):
         if must not in card:
             bad.append(f"в карточке нет «{must}»")
-    # Средние — только по турнирам из «Конфига», не по всей истории.
-    scopes = cl.current_scopes()
-    if not scopes:
+    # Средние — по турниру ИМЕННО ЭТОЙ игры, а не по всем, что команда играет
+    # сейчас: тренер ставит состав на одну игру одной лиги.
+    if not cl.current_scopes():
         bad.append("турниры из «Конфига» не читаются — средних не будет ни у кого")
-    rows_now = cl.lineup(source, gid, "name")["rows"]
-    all_time = cl.averages(rows_now, scopes=None if not scopes else [
-        {"source": s_["source"], "season_id": s_["season_id"], "stage_id": s_["stage_id"]}
-        for s_ in scopes])
+    scope = cl.game_scope(source, gid)
+    if not scope:
+        bad.append(f"турнир игры {gid} не определился — по чему тогда средние?")
+    data_now = cl.lineup(source, gid, "name")
+    rows_now = data_now["rows"]
+    if data_now.get("scopes") != scope:
+        bad.append(f"экран считает не по турниру игры: {data_now.get('scopes')}")
+    mine = cl.averages(rows_now, scopes=scope)
     for r in rows_now:
         got = (r.get("avg") or {}).get("games", 0)
-        if got and got != (all_time.get(r["row"], {}) or {}).get("games", 0):
-            bad.append(f"экран считает не по «Конфигу»: {r['title']}")
+        if got and got != (mine.get(r["row"], {}) or {}).get("games", 0):
+            bad.append(f"экран считает не по турниру игры: {r['title']}")
     # У кого цифр нет — карточка обязана объяснить почему, а не молчать.
     for r in rows_now:
         avg = r.get("avg") or {}
