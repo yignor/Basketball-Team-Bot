@@ -143,7 +143,7 @@ async def test_scan_keeps_confirmed() -> None:
                  "place": 2, "teams": 12, "wins": 14, "losses": 2,
                  "last_day": "2026-08-15", "guess": 1}]
 
-    async def fake_ib(comps):
+    async def fake_ib(team_ids, extra=None):
         return []
 
     async def fake_ctx():
@@ -169,6 +169,55 @@ async def test_scan_keeps_confirmed() -> None:
     check(str((old or {}).get("league") or "") == "B", "но с названием турнира")
 
 
+def test_league_label() -> None:
+    print("\n=== какая лига ===")
+    import hall_of_fame as hof
+    check(hof.league_of({"source": "slpro", "season": "2025-2026"}) == "SLPRO · 2025-2026",
+          "у SLPRO лига называется собой")
+    check(hof.league_of({"source": "infobasket", "org": "Летняя лига",
+                         "season": "25/26"}) == "Летняя лига · 25/26",
+          "у Инфобаскета — та лига, в которой играли")
+    check(hof.league_of({"source": "infobasket"}) == "Инфобаскет",
+          "лига неизвестна — говорим хотя бы источник")
+    check(hof._season_label("Сезон 2024/2025") == "24/25",
+          "сезон в подписи коротко")
+
+
+async def test_hidden_stays_hidden() -> None:
+    print("\n=== убранное не возвращается ===")
+    import hall_of_fame as hof
+    hof.save("infobasket", "999", "", "36502", org="Летняя лига", league="Квалификация",
+             place=32, teams=44)
+    hof.forget("infobasket", "999", "", "36502")
+    check(all(r["season_id"] != "999" for r in hof.results()), "убрали — в списке нет")
+
+    async def fake_slpro():
+        return []
+
+    async def fake_ib(team_ids, extra=None):
+        return [{"source": "infobasket", "season_id": "999", "stage_id": "",
+                 "team_id": "36502", "team_name": "PULL UP", "org": "Летняя лига",
+                 "league": "Квалификация", "season": "25/26", "place": 32,
+                 "teams": 44, "wins": 5, "losses": 3, "last_day": "2026-08-02",
+                 "guess": 0}]
+
+    async def fake_ctx():
+        # Тот же справочник стадий, что и в соседнем тесте: старый турнир
+        # заводится один раз, и заводиться он должен с названием.
+        return {("5", "8"): {"season_id": 5, "stage_id": 8, "season": "2023-2024",
+                             "division_name": "B"}}
+
+    real = hof.scan_slpro, hof.scan_infobasket, hof._slpro_stage_ctx
+    hof.scan_slpro, hof.scan_infobasket, hof._slpro_stage_ctx = (
+        fake_slpro, fake_ib, fake_ctx)
+    try:
+        await hof.scan()
+    finally:
+        hof.scan_slpro, hof.scan_infobasket, hof._slpro_stage_ctx = real
+    check(all(r["season_id"] != "999" for r in hof.results()),
+          "поиск по лигам не принёс его обратно")
+
+
 async def test_screens(bd) -> None:
     print("\n=== экраны ===")
     import hall_of_fame as hof
@@ -177,11 +226,13 @@ async def test_screens(bd) -> None:
 
     text, markup, _ = await press(bd, "coach:hof")
     check("Летний Кубок" in text and "🥇" in text, "турнир с медалью в списке")
+    check("<b>SLPRO" in text, "турниры разложены по лигам, лига — заголовком")
     key = "slpro:17:160:707"
     check(f"coach:hof:one:{key}" in cbs(markup), "в турнир можно зайти")
 
     text, markup, _ = await press(bd, f"coach:hof:one:{key}")
     check("Место: 1" in text, "на карточке место")
+    check("Лига: SLPRO" in text, "и в какой лиге это было")
     # Победы на карточке — те, что записаны у турнира: их кладёт поиск или
     # закрытие лиги (в этом тесте — поиск, 14-2).
     check("14 побед" in text and "2 поражен" in text, "и баланс побед")
@@ -257,6 +308,8 @@ def main() -> int:
     test_names()
     test_places_and_record()
     test_tracked()
+    test_league_label()
+    asyncio.run(test_hidden_stays_hidden())
     asyncio.run(test_scan_keeps_confirmed())
     asyncio.run(test_screens(bd))
     asyncio.run(test_photo(bd))

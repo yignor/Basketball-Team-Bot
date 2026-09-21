@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS league_results (
     season_id   TEXT NOT NULL,
     stage_id    TEXT NOT NULL DEFAULT '',
     team_id     TEXT NOT NULL,
-    league      TEXT NOT NULL DEFAULT '',   -- как турнир назван в лиге
+    org         TEXT NOT NULL DEFAULT '',   -- ЛИГА: SLPRO, Летняя лига, ВСЕСМАРТ, НБЛ
+    league      TEXT NOT NULL DEFAULT '',   -- стадия внутри лиги: «Группа 4», «Первая лига»
     season      TEXT NOT NULL DEFAULT '',   -- «2025-2026», «Сезон 2025/2026»
     team_name   TEXT NOT NULL DEFAULT '',   -- как команда называлась тогда
     place       INTEGER NOT NULL DEFAULT 0, -- 0 — место ещё не записано
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS league_results (
     photo_id    TEXT NOT NULL DEFAULT '',   -- file_id фото с награждения
     note        TEXT NOT NULL DEFAULT '',
     guess       INTEGER NOT NULL DEFAULT 0, -- место посчитано ботом, не подтверждено
+    hidden      INTEGER NOT NULL DEFAULT 0, -- тренер убрал: поиск не возвращает обратно
     set_by      TEXT NOT NULL DEFAULT '',
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (source, season_id, stage_id, team_id)
@@ -69,6 +71,10 @@ def init() -> None:
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         conn.executescript(SCHEMA)
+        # Лига и «убрано» появились позже самой таблицы.
+        sheets_cache._ensure_column(conn, "league_results", "org", "TEXT NOT NULL", "''")
+        sheets_cache._ensure_column(conn, "league_results", "hidden",
+                                    "INTEGER NOT NULL", "0")
         conn.commit()
     _ready = True
 
@@ -92,8 +98,8 @@ def save(source: str, season_id: Any, stage_id: Any, team_id: Any,
          **fields: Any) -> None:
     """Заводит запись турнира или дополняет её. Пустое поле не затирает."""
     init()
-    keys = ("league", "season", "team_name", "place", "teams", "wins", "losses",
-            "last_day", "photo_id", "note", "guess", "set_by")
+    keys = ("org", "league", "season", "team_name", "place", "teams", "wins",
+            "losses", "last_day", "photo_id", "note", "guess", "hidden", "set_by")
     vals = {k: fields[k] for k in keys if k in fields}
     ident = (str(source), str(season_id), str(stage_id or ""), str(team_id))
     with sheets_cache.get_connection() as conn:
@@ -122,13 +128,11 @@ def get(source: str, season_id: Any, stage_id: Any,
 
 
 def forget(source: str, season_id: Any, stage_id: Any, team_id: Any) -> None:
-    init()
-    with sheets_cache.get_connection() as conn:
-        conn.execute(
-            "DELETE FROM league_results WHERE source = ? AND season_id = ? "
-            "AND stage_id = ? AND team_id = ?",
-            (str(source), str(season_id), str(stage_id or ""), str(team_id)))
-        conn.commit()
+    """Убирает турнир из зала славы.
+
+    Не удаляем, а прячем: иначе следующий поиск по лигам принёс бы его назад,
+    и тренер убирал бы одно и то же каждый раз."""
+    save(source, season_id, stage_id, team_id, hidden=1)
 
 
 def results() -> List[Dict[str, Any]]:
@@ -136,13 +140,26 @@ def results() -> List[Dict[str, Any]]:
     они ждут, и тренер допишет место одной кнопкой."""
     init()
     with sheets_cache.get_connection() as conn:
-        rows = [dict(r) for r in conn.execute("SELECT * FROM league_results")]
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM league_results WHERE COALESCE(hidden, 0) = 0")]
     rows.sort(key=lambda r: (str(r["last_day"] or ""), str(r["season"] or "")),
               reverse=True)
     return rows
 
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def league_of(row: Dict[str, Any]) -> str:
+    """Лига и сезон одной строкой: «Летняя лига · 25/26», «SLPRO · 2025-2026».
+
+    Без лиги зал славы читается как список загадок: «Группа 4», «Первая лига»,
+    «B» — а тренер держит в голове именно лиги, их у команды несколько сразу."""
+    org = str(row.get("org") or "").strip()
+    if not org:
+        org = "SLPRO" if row.get("source") == "slpro" else "Инфобаскет"
+    season = str(row.get("season") or "").strip()
+    return f"{org} · {season}" if season else org
 
 
 def title(row: Dict[str, Any]) -> str:
@@ -285,6 +302,7 @@ async def scan_slpro() -> List[Dict[str, Any]]:
             "source": "slpro", "season_id": str(stage.get("season_id") or ""),
             "stage_id": str(stage.get("stage_id") or ""),
             "team_id": mine["team_id"], "team_name": mine["name"],
+            "org": "SLPRO",
             "league": str(stage.get("division_name") or stage.get("division") or ""),
             "season": str(stage.get("season") or ""),
             "place": mine["place"], "teams": len(table),
@@ -387,28 +405,197 @@ def tracked() -> List[Dict[str, str]]:
     return list(out.values())
 
 
-async def scan_infobasket(comps: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """Турниры Инфобаскета с местами из таблицы лиги."""
+async def _team_games(team_id: Any, season_comp: str = "") -> List[Dict[str, Any]]:
+    """Игры команды по справочнику лиги. season_comp — сезон (compId).
+
+    Здесь у каждой игры написано, какая это ЛИГА («Летняя Лига», «ВСЕСМАРТ»)
+    и какая внутри неё стадия («Группа 4», «Первая лига»). Своего справочника
+    турниров у Инфобаскета нет: тот, что есть, отдаёт один текущий сезон."""
+    import aiohttp
+    tail = f"compId={season_comp}&" if season_comp else ""
+    url = (f"https://reg.infobasket.su/Widget/TeamGames/{team_id}?{tail}"
+           "format=json&lang=ru")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                data = await r.json(content_type=None) if r.status == 200 else None
+    except Exception as exc:
+        logger.warning("Зал славы: игры команды %s — %s", team_id, exc)
+        return []
+    return data if isinstance(data, list) else []
+
+
+async def _team_seasons(team_id: Any) -> List[Dict[str, str]]:
+    """Сезоны, в которых команда играла: [{comp_id, name}]."""
+    import aiohttp
+    url = (f"https://reg.infobasket.su/Widget/GetTeamSeasons/{team_id}"
+           "?format=json&lang=ru")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                data = await r.json(content_type=None) if r.status == 200 else None
+    except Exception as exc:
+        logger.warning("Зал славы: сезоны команды %s — %s", team_id, exc)
+        return []
+    out = []
+    for row in data if isinstance(data, list) else []:
+        comp = row.get("CompID") or row.get("CompId")
+        if comp:
+            out.append({"comp_id": str(comp),
+                        "name": str(row.get("SeasonName") or "")})
+    return out
+
+
+async def _comp_of_game(game_id: Any) -> str:
+    """Турнир одной игры. В списке игр его id нет — спрашиваем у онлайна."""
+    import aiohttp
+    url = (f"https://reg.infobasket.su/Widget/GetOnline/{game_id}"
+           "?format=json&lang=ru")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                data = await r.json(content_type=None) if r.status == 200 else None
+    except Exception as exc:
+        logger.warning("Зал славы: турнир игры %s — %s", game_id, exc)
+        return ""
+    return str((data or {}).get("CompID") or "")
+
+
+# Уровни, которые лигой не являются: пол и город. У Инфобаскета имя турнира
+# разложено по дереву, и эти два уровня попадаются всегда.
+_NOT_A_LEAGUE = {"мужчины", "женщины", "санкт-петербург", "спб"}
+
+
+def _clean_org(name: str) -> str:
+    """«ЛИГА "Все Смарт". Мужчины» → «Все Смарт».
+
+    Лига в справочнике записана как придётся: с приставкой «ЛИГА», в кавычках,
+    с полом через точку. Тренеру нужно короткое имя, по которому он её узнаёт."""
+    text = str(name or "").strip()
+    quoted = re.search(r"[«\"']([^«»\"']{2,})[»\"']", text)
+    if quoted:
+        text = quoted.group(1)
+    text = re.sub(r"^\s*лига\s+", "", text, flags=re.IGNORECASE)
+    text = re.split(r"[.,]\s*(?:мужчины|женщины)\b", text, flags=re.IGNORECASE)[0]
+    return text.strip(" .\"'«»")
+
+
+async def _org_of_comp(comp_id: Any) -> str:
+    """Какой лиге принадлежит турнир.
+
+    У Инфобаскета имя разложено по дереву: «Санкт-Петербург» → «ВСЕСМАРТ» →
+    «Мужчины» → «Квалификация…» → «Первая лига». Лига — это уровень сразу под
+    городом: именно его человек называет, говоря «мы играем во ВСЕСМАРТе»."""
+    import aiohttp
+    names: List[str] = []
+    cur, seen = str(comp_id), set()
+    try:
+        async with aiohttp.ClientSession() as session:
+            for _ in range(7):
+                if not cur or cur in seen:
+                    break
+                seen.add(cur)
+                url = (f"https://reg.infobasket.su/Widget/CompIssue/{cur}"
+                       "?format=json&lang=ru")
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                    data = await r.json(content_type=None) if r.status == 200 else None
+                parent = (data or {}).get("ParentComp") or {}
+                if not parent:
+                    break
+                names.append(str(parent.get("CompShortNameRu") or "").strip())
+                cur = str(parent.get("CompIDparent") or "")
+    except Exception as exc:
+        logger.warning("Зал славы: лига турнира %s — %s", comp_id, exc)
+        return ""
+    # Снизу вверх: город последний, лига — перед ним.
+    good = [n for n in names if n and n.lower() not in _NOT_A_LEAGUE]
+    return _clean_org(good[-1]) if good else ""
+
+
+def _season_label(name: str) -> str:
+    """«Сезон 2024/2025» → «24/25». В строке зала славы важен год, не слово."""
+    digits = re.findall(r"\d{4}", str(name or ""))
+    if len(digits) >= 2:
+        return f"{digits[0][2:]}/{digits[1][2:]}"
+    return str(name or "").strip()
+
+
+async def _infobasket_row(team_id: str, comp_id: str, org: str, stage: str,
+                          season: str, days: List[str]) -> Optional[Dict[str, Any]]:
+    """Одна строка зала славы по турниру Инфобаскета. None — если нас там нет."""
+    table = await infobasket_table(comp_id)
+    # Пары в таблице — это отдельная игра плей-офф («1/4 финала»), а не турнир:
+    # «1 место из 2» в зале славы только сбивает.
+    if len(table) < 3:
+        return None
+    mine = next((r for r in table if r["team_id"] == str(team_id)), None)
+    if not mine:
+        mine = next((r for r in table if is_ours(r["name"])), None)
+    if not mine:
+        return None
+    wins, losses, last = _our_record("infobasket", comp_id, "", str(team_id))
+    if not last:
+        good = sorted(d for d in days if len(d) == 10)
+        if good:
+            d = good[-1]
+            last = f"{d[6:]}-{d[3:5]}-{d[:2]}"
+    return {"source": "infobasket", "season_id": str(comp_id), "stage_id": "",
+            "team_id": str(team_id), "team_name": mine["name"], "org": org,
+            "league": stage or mine["name"], "season": season,
+            "place": mine["place"], "teams": len(table), "wins": wins,
+            "losses": losses, "last_day": last, "guess": 0}
+
+
+async def scan_infobasket(team_ids: List[str],
+                          extra: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, Any]]:
+    """Турниры Инфобаскета: все лиги и стадии, где команда играла.
+
+    Идём от игр команды, а не от «Конфига»: в «Конфиге» стоят только те лиги,
+    за которыми бот следит сейчас, а зал славы должен помнить и НБЛ, и
+    ВСЕСМАРТ, и летнюю — за все сезоны."""
     found: List[Dict[str, Any]] = []
-    for comp in comps:
-        table = await infobasket_table(comp["season_id"])
-        if not table:
+    for team_id in team_ids:
+        seasons = await _team_seasons(team_id)
+        # Пустой сезон — текущий: у него свой ответ без compId.
+        for season in [{"comp_id": "", "name": ""}] + seasons:
+            games = await _team_games(team_id, season["comp_id"])
+            groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for game in games:
+                org = str(game.get("LeagueNameRu") or "").strip()
+                stage = str(game.get("CompNameRu") or "").strip()
+                key = (org, stage)
+                box = groups.setdefault(key, {"game_id": game.get("GameID"),
+                                              "days": []})
+                box["days"].append(str(game.get("GameDate") or ""))
+            # Лигу узнаём по одному турниру на группу: у всех стадий одной
+            # лиги она общая, а дерево имён стоит шести запросов.
+            org_by_name: Dict[str, str] = {}
+            for (org, stage), box in groups.items():
+                comp_id = await _comp_of_game(box["game_id"])
+                if not comp_id:
+                    continue
+                if org not in org_by_name:
+                    org_by_name[org] = await _org_of_comp(comp_id) or _clean_org(org)
+                row = await _infobasket_row(
+                    team_id, comp_id, org_by_name[org], stage,
+                    _season_label(season["name"]), box["days"])
+                if row:
+                    found.append(row)
+
+    # Турниры, которые бот вёл сам: в списке игр лиги их может не быть (старый
+    # сезон, переигровка), а места в них мы знаем — они в таблице лиги.
+    seen = {(r["team_id"], r["season_id"]) for r in found}
+    for one in extra or []:
+        key = (str(one.get("team_id") or ""), str(one.get("season_id") or ""))
+        if not key[1] or key in seen:
             continue
-        mine = next((r for r in table if r["team_id"] == str(comp.get("team_id"))), None)
-        if not mine:
-            mine = next((r for r in table if is_ours(r["name"])), None)
-        if not mine:
-            continue
-        league, season = await _infobasket_title(comp["season_id"])
-        wins, losses, last = _our_record("infobasket", comp["season_id"], "",
-                                         mine["team_id"])
-        found.append({
-            "source": "infobasket", "season_id": comp["season_id"], "stage_id": "",
-            "team_id": mine["team_id"], "team_name": mine["name"],
-            "league": league, "season": season, "place": mine["place"],
-            "teams": len(table), "wins": wins, "losses": losses,
-            "last_day": last, "guess": 0,
-        })
+        stage, season = await _infobasket_title(key[1])
+        stage = stage.rpartition(" · ")[2] or stage
+        row = await _infobasket_row(key[0], key[1], await _org_of_comp(key[1]),
+                                    stage, _season_label(season) or season, [])
+        if row:
+            found.append(row)
+            seen.add(key)
     return found
 
 
@@ -431,8 +618,14 @@ async def scan() -> Tuple[int, int]:
     он видел награждение, а бот — таблицу."""
     init()
     known = tracked()
-    ib = [t for t in known if t["source"] == "infobasket"]
-    both = await asyncio.gather(scan_slpro(), scan_infobasket(ib))
+    import league_sync
+    ib_teams = sorted({str(t["team_id"]) for t in
+                       league_sync.our_teams("infobasket", include_closed=True)}
+                      | {t["team_id"] for t in known
+                         if t["source"] == "infobasket" and t["team_id"]})
+    ib_tracked = [t for t in known if t["source"] == "infobasket"]
+    both = await asyncio.gather(scan_slpro(),
+                                scan_infobasket(ib_teams, ib_tracked))
     found = [row for part in both for row in part]
     added = 0
     for row in found:
@@ -441,7 +634,7 @@ async def scan() -> Tuple[int, int]:
             # Место подтверждено человеком — оставляем как есть, дополняем
             # только справочное.
             save(row["source"], row["season_id"], row["stage_id"], row["team_id"],
-                 league=row["league"], season=row["season"],
+                 org=row.get("org", ""), league=row["league"], season=row["season"],
                  team_name=row["team_name"], teams=row["teams"],
                  wins=row["wins"], losses=row["losses"],
                  last_day=row.get("last_day", ""))
@@ -449,10 +642,10 @@ async def scan() -> Tuple[int, int]:
         if not was:
             added += 1
         save(row["source"], row["season_id"], row["stage_id"], row["team_id"],
-             league=row["league"], season=row["season"], team_name=row["team_name"],
-             place=row["place"], teams=row["teams"], wins=row["wins"],
-             losses=row["losses"], last_day=row.get("last_day", ""),
-             guess=int(row.get("guess") or 0))
+             org=row.get("org", ""), league=row["league"], season=row["season"],
+             team_name=row["team_name"], place=row["place"], teams=row["teams"],
+             wins=row["wins"], losses=row["losses"],
+             last_day=row.get("last_day", ""), guess=int(row.get("guess") or 0))
 
     # Турниры, которые бот вёл, но в таблице лиги нас под нашим именем нет:
     # команда играла под другим названием, стадию переигрывали, лига правила
@@ -466,13 +659,16 @@ async def scan() -> Tuple[int, int]:
             continue
         if t["source"] == "slpro":
             ctx = ctxs.get((t["season_id"], t["stage_id"])) or {}
+            org = "SLPRO"
             league = str(ctx.get("division_name") or ctx.get("division") or "")
             season = str(ctx.get("season") or "")
         else:
             league, season = await _infobasket_title(t["season_id"])
+            org, _, league = league.rpartition(" · ")
+            org = org.split(" · ")[0] or "Инфобаскет"
         wins, losses, last = _our_record(t["source"], t["season_id"], t["stage_id"],
                                          t["team_id"])
-        save(*key, league=league, season=season, team_name=t["team_name"],
-             wins=wins, losses=losses, last_day=last)
+        save(*key, org=org, league=league, season=season,
+             team_name=t["team_name"], wins=wins, losses=losses, last_day=last)
         added += 1
     return len(found), added
