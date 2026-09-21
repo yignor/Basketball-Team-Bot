@@ -11327,11 +11327,14 @@ async def _teams_admin(query, user, parts: List[str]) -> None:
             text, markup = await asyncio.to_thread(_teams_screen,
                                                    "Команда потерялась — начни заново.")
         else:
+            # Разные стадии одного турнира ведут на один и тот же этап —
+            # в журнале считаем то, за чем реально следим.
+            track = sorted({c["track"] for c in draft.get("comps") or []})
             await asyncio.to_thread(
                 league_setup.add, draft["team_id"], draft.get("name", ""),
-                [c["track"] for c in draft.get("comps") or []], str(uid))
+                track, str(uid))
             log.info(f"Команда в лиге добавлена: {draft['team_id']} "
-                     f"(турниров {len(draft.get('comps') or [])}, тренер {uid})")
+                     f"(турниров {len(track)}, тренер {uid})")
             text, markup = await asyncio.to_thread(
                 _teams_screen, f"✅ Слежу за командой {draft['team_id']}.")
     elif what == "slpro":
