@@ -1366,10 +1366,24 @@ class EnhancedDuplicateProtection:
     def get_full_config(self) -> Dict[str, Any]:
         config_data = self._read_config_from_config_sheet()
         if config_data.get('has_data'):
-            return config_data['payload']
+            return self._with_bot_teams(config_data['payload'])
 
         print(f"⚠️ Лист '{CONFIG_WORKSHEET_NAME}' пуст — читаем настройки из 'Сервисного' (временный режим)")
-        return self._read_config_from_service_sheet()
+        return self._with_bot_teams(self._read_config_from_service_sheet())
+
+    @staticmethod
+    def _with_bot_teams(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Добавляет команды, заведённые тренером через бота.
+
+        Единственное место, где это можно сделать один раз на весь проект:
+        конфигурацию все читают отсюда. Лист «Конфиг» при этом не трогаем — он
+        остаётся за человеком."""
+        try:
+            import league_setup
+            return league_setup.merge_config(payload)
+        except Exception as exc:
+            print(f"⚠️ Команды, добавленные через бота, не подмешались: {exc}")
+            return payload
 
     def _get_config_rows(self) -> List[List[str]]:
         """Строки листа 'Конфиг': сначала локальное зеркало (обновляется

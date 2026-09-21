@@ -2425,6 +2425,7 @@ def _clear_pending(uid: int) -> None:
     _awaiting_hof.pop(uid, None)
     _awaiting_place.pop(uid, None)
     _awaiting_team.pop(uid, None)
+    _team_draft.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -5039,6 +5040,7 @@ def _cfg_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
         [InlineKeyboardButton("🏆 Лиги", callback_data="coach:lg:list")],
+        [InlineKeyboardButton("👥 Команды в лигах", callback_data="coach:tm:list")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -6536,6 +6538,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     if what == "hof":
         await _hof_admin(query, context, user, parts)
+        return
+    if what == "tm":
+        await _teams_admin(query, user, parts)
         return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
@@ -11106,8 +11111,9 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # Кто сейчас присылает фото с награждения: uid -> ключ турнира.
 _awaiting_hof: Dict[int, str] = {}
-# Кто добавляет id нашей команды в лиге.
+# Кто добавляет id нашей команды в лиге, и что бот про неё нашёл.
 _awaiting_team: Dict[int, bool] = {}
+_team_draft: Dict[int, Dict[str, Any]] = {}
 # Кто вводит место числом: uid -> ключ турнира.
 _awaiting_place: Dict[int, str] = {}
 
@@ -11183,36 +11189,111 @@ def _hof_screen() -> Tuple[str, InlineKeyboardMarkup]:
     buttons.append([InlineKeyboardButton("🔎 Найти турниры",
                                          callback_data="coach:hof:scan"),
                     InlineKeyboardButton("👥 Команды",
-                                         callback_data="coach:hof:teams")])
+                                         callback_data="coach:tm:list")])
     buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:team")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
-def _hof_teams_screen(found: str = "") -> Tuple[str, InlineKeyboardMarkup]:
-    """Наши команды в Инфобаскете: под какими id лига нас знает.
+def _teams_screen(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    """Команды в лигах: за кем бот следит.
 
-    Команду в лигу заводили заново не раз, и у каждой записи свой id. Бот
-    находит их сам, когда видит наше имя в таблице, но старый сезон, куда он
-    ни разу не заглядывал, так не найти — id можно добавить руками."""
-    import hall_of_fame as hof
-    ids = hof.team_ids()
-    extra = set(hof.extra_team_ids())
-    lines = ["👥 Наши команды в лигах", "",
-             "Инфобаскет заводит команду заново каждый раз, когда она "
-             "возвращается: у «Pull Up» и «PULL UP» разные id, а зал славы "
-             "должен помнить оба.", ""]
-    for tid in ids:
-        lines.append(f"• {tid}" + (" — добавлен руками" if tid in extra else ""))
-    if not ids:
+    Раньше турнир заводился только строкой в листе «Конфиг», а лист боту
+    писать нельзя. Теперь команду можно добавить отсюда: бот сам найдёт, в
+    каких турнирах она играет, и дальше её увидят опросы, анонсы, результаты,
+    статистика и фэнтези — не только зал славы."""
+    import league_setup
+    from enhanced_duplicate_protection import duplicate_protection
+    try:
+        cfg = duplicate_protection.get_config_ids()
+    except Exception as exc:
+        log.warning(f"Конфигурация команд не прочиталась: {exc}")
+        cfg = {"teams": {}, "comp_ids": []}
+    mine = {str(r["team_id"]): r for r in league_setup.saved()}
+    lines = ["👥 Команды в лигах", "",
+             "За кем бот следит в Инфобаскете: ищет игры, ставит опросы, "
+             "считает статистику и фэнтези.", ""]
+    for tid, entry in sorted((cfg.get("teams") or {}).items()):
+        row = mine.get(str(tid))
+        name = (row or {}).get("name") or (entry or {}).get("alt_name") or f"Команда {tid}"
+        where = "из бота" if row else "из «Конфига»"
+        comps = ", ".join(str(c) for c in ((entry or {}).get("comp_ids") or [])[:4])
+        lines.append(f"• {name} · id {tid} · {where}"
+                     + (f"\n     турниры: {comps}" if comps else ""))
+    if not (cfg.get("teams") or {}):
         lines.append("Пока ни одной.")
-    if found:
-        lines += ["", found]
-    rows = [[InlineKeyboardButton("➕ Добавить id", callback_data="coach:hof:addteam")]]
-    for tid in sorted(extra):
-        rows.append([InlineKeyboardButton(f"🗑 Убрать {tid}",
-                                          callback_data=f"coach:hof:rmteam:{tid}")])
-    rows.append([InlineKeyboardButton("⬅️ К залу славы", callback_data="coach:hof")])
+    lines += ["", "<i>SLPRO заводится иначе — названием команды и кодом "
+                  "дивизиона в листе «Конфиг».</i>"]
+    if note:
+        lines += ["", note]
+    rows = [[InlineKeyboardButton("➕ Добавить команду", callback_data="coach:tm:add")]]
+    for tid, row in sorted(mine.items()):
+        rows.append([InlineKeyboardButton(
+            f"🗑 Убрать {row.get('name') or tid}"[:BTN_TEXT],
+            callback_data=f"coach:tm:rm:{tid}")])
+    rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _team_found_screen(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Что бот нашёл по id — до того, как начнёт следить.
+
+    Следить — значит ставить опросы и анонсы в общий чат. Такое не включают
+    молча: сперва показываем, что именно нашлось."""
+    draft = _team_draft.get(uid) or {}
+    comps = draft.get("comps") or []
+    lines = [f"👥 {draft.get('name') or 'Команда'} · id {draft.get('team_id')}", ""]
+    if comps:
+        lines.append("Играет в турнирах:")
+        for c in comps[:8]:
+            tail = f" · {c['games']} игр" if c.get("games") else ""
+            place = (f" · {c['place']} место из {c['teams']}"
+                     if c.get("place") and c.get("teams") else "")
+            lines.append(f"• {c['league']} — {c['comp']}{place}{tail}")
+        lines += ["", "Начну искать их игры, ставить опросы и анонсы, считать "
+                      "статистику и фэнтези. Зал славы тоже увидит эту команду."]
+    else:
+        lines += ["Турниров у неё лига не показывает — сыгранных игр в последнем "
+                  "сезоне нет.", "",
+                  "Добавить всё равно можно: для зала славы этого хватит."]
+    rows = [[InlineKeyboardButton("✅ Следить за командой",
+                                  callback_data="coach:tm:ok")],
+            [InlineKeyboardButton("⬅️ Отмена", callback_data="coach:tm:list")]]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _teams_admin(query, user, parts: List[str]) -> None:
+    """Кнопки раздела «Команды в лигах»."""
+    import league_setup
+    what = parts[2] if len(parts) > 2 else "list"
+    uid = user.id
+    if what == "add":
+        _clear_pending(uid)
+        _awaiting_team[uid] = True
+        text = ("👥 Пришли id команды в Инфобаскете — число из адреса её "
+                "страницы (teamId=36502).\n\nПередумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data="coach:tm:list")]])
+    elif what == "ok":
+        draft = _team_draft.pop(uid, None) or {}
+        if not draft.get("team_id"):
+            text, markup = await asyncio.to_thread(_teams_screen,
+                                                   "Команда потерялась — начни заново.")
+        else:
+            await asyncio.to_thread(
+                league_setup.add, draft["team_id"], draft.get("name", ""),
+                [c["track"] for c in draft.get("comps") or []], str(uid))
+            log.info(f"Команда в лиге добавлена: {draft['team_id']} "
+                     f"(турниров {len(draft.get('comps') or [])}, тренер {uid})")
+            text, markup = await asyncio.to_thread(
+                _teams_screen, f"✅ Слежу за командой {draft['team_id']}.")
+    elif what == "rm" and len(parts) > 3:
+        await asyncio.to_thread(league_setup.drop, parts[3])
+        log.info(f"Команда в лиге убрана: {parts[3]} (тренер {uid})")
+        text, markup = await asyncio.to_thread(_teams_screen, f"🗑 Убрал {parts[3]}.")
+    else:
+        _clear_pending(uid)
+        text, markup = await asyncio.to_thread(_teams_screen)
+    await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 def _hof_group(key: str) -> Tuple[str, InlineKeyboardMarkup]:
@@ -11332,19 +11413,6 @@ async def _hof_admin(query, context, user, parts: List[str]) -> None:
         text, markup = await asyncio.to_thread(_hof_screen)
         text = (f"Просмотрел турниров: {found}. Новых записей: {added}.\n\n"
                 + text)
-    elif what == "teams":
-        text, markup = await asyncio.to_thread(_hof_teams_screen)
-    elif what == "addteam":
-        _clear_pending(uid)
-        _awaiting_team[uid] = True
-        text = ("👥 Пришли id команды в Инфобаскете — число из адреса её "
-                "страницы (teamId=36502).\n\nПередумал — /start.")
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
-            "⬅️ Назад", callback_data="coach:hof:teams")]])
-    elif what == "rmteam" and len(parts) > 3:
-        await asyncio.to_thread(hof.drop_team_id, parts[3])
-        text, markup = await asyncio.to_thread(_hof_teams_screen,
-                                               f"🗑 Убрал {parts[3]}.")
     elif what == "grp" and len(parts) > 3:
         text, markup = await asyncio.to_thread(_hof_group, parts[3])
     elif what == "one" and key:
@@ -11421,8 +11489,8 @@ async def handle_hof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """id нашей команды в лиге, присланный тренером."""
-    import hall_of_fame as hof
+    """id команды, присланный тренером: спрашиваем лигу, что это за команда."""
+    import league_setup
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.id not in _awaiting_team:
         return
@@ -11435,16 +11503,22 @@ async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await msg.reply_text("Нужно число — id команды из адреса её страницы.")
         raise ApplicationHandlerStop
     _awaiting_team.pop(user.id, None)
-    name = await hof.team_name(digits)
-    added = await asyncio.to_thread(hof.add_team_id, digits)
-    if not name:
-        note = f"⚠️ Лига про команду {digits} ничего не знает — но id запомнил."
-    elif not hof.is_ours(name):
-        # Не запрещаем: в лиге команда могла называться иначе, чем помнит бот.
-        note = f"⚠️ В лиге это «{name}» — на нашу не похоже. Запомнил, проверь."
-    else:
-        note = f"✅ {digits} — это «{name}»." + ("" if added else " Уже был в списке.")
-    text, markup = await asyncio.to_thread(_hof_teams_screen, note)
+    wait = await msg.reply_text("🔎 Спрашиваю лигу, что это за команда…")
+    found = await league_setup.discover(digits)
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    if not found.get("name"):
+        await msg.reply_text(f"⚠️ Лига про команду {digits} ничего не знает. "
+                             "Проверь номер на её странице.")
+        raise ApplicationHandlerStop
+    _team_draft[user.id] = {"team_id": digits, **found}
+    text, markup = _team_found_screen(user.id)
+    import hall_of_fame as hof
+    if not hof.is_ours(found["name"]):
+        # Не запрещаем: в лигах нас записывали по-разному. Но сказать обязаны.
+        text = f"⚠️ В лиге это «{found['name']}» — на нашу не похоже.\n\n" + text
     await msg.reply_text(text, reply_markup=markup, parse_mode="HTML")
     raise ApplicationHandlerStop
 

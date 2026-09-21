@@ -401,6 +401,11 @@ def team_ids() -> List[str]:
     ids |= {t["team_id"] for t in tracked()
             if t["source"] == "infobasket" and str(t["team_id"] or "").isdigit()}
     ids |= set(extra_team_ids())
+    try:
+        import league_setup
+        ids |= set(league_setup.team_ids())
+    except Exception as exc:
+        logger.warning("Зал славы: команды из настроек не прочитались: %s", exc)
     return sorted(ids)
 
 
