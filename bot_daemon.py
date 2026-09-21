@@ -11119,52 +11119,101 @@ def _hof_parts(key: str) -> Tuple[str, str, str, str]:
 
 
 def _hof_screen() -> Tuple[str, InlineKeyboardMarkup]:
-    """Зал славы: все турниры наших команд, свежие сверху."""
+    """Зал славы: сезон за сезоном, по строке на лигу.
+
+    Раньше здесь лежали все стадии подряд — «Группа Б», «Квалификация»,
+    «Круговой турнир», два десятка строк, — и за ними не читалось главное: в
+    каком году где играли и чем кончилось. Стадии никуда не делись, они внутри
+    лиги."""
+    import coach_payments
     import hall_of_fame as hof
-    # Регистр в названиях лиг гуляет («Летняя лига» и «Летняя Лига»), а
-    # заголовок из-за этого раздваивался бы: сортируем и группируем без оглядки
-    # на регистр.
-    rows_data = sorted(hof.results(),
-                       key=lambda r: (hof.league_of(r).casefold(),
-                                      str(r["last_day"] or "")), reverse=True)
+    boxes = hof.groups()
     lines = ["🏆 Зал славы", ""]
-    if rows_data:
-        medals = [r for r in rows_data if int(r["place"] or 0) in (1, 2, 3)]
-        if medals:
-            lines.append("Медалей: " + " ".join(
-                hof.MEDALS[int(r["place"])] for r in medals))
-            lines.append("")
-        # Турниров у команды несколько в год, и лежат они в разных лигах —
-        # SLPRO, Летняя лига, ВСЕСМАРТ. Заголовок лиги отвечает на первый
-        # вопрос тренера: «это где?».
-        shown = ""
-        for r in rows_data:
-            where = hof.league_of(r)
-            if where.casefold() != shown.casefold():
-                lines += ([""] if shown else []) + [f"<b>{where}</b>"]
-                shown = where
-            line = "   " + hof.title(r)
-            if int(r["wins"] or 0) or int(r["losses"] or 0):
-                line += f" · {int(r['wins'])}-{int(r['losses'])}"
-            if str(r["photo_id"] or ""):
-                line += " 📷"
-            lines.append(line)
-    else:
+    if not boxes:
         lines.append("Пока пусто. Нажми «Найти турниры» — бот пройдёт по лигам, "
                      "где команда играла, и соберёт места из таблиц.")
-    lines += ["", "<i>Названия команды за годы менялись — ищем по корню «Pull Up». "
-                  "Где место бот посчитал сам, это помечено: подтверди его или "
-                  "поставь своё.</i>"]
-    buttons = [[InlineKeyboardButton("🔎 Найти турниры", callback_data="coach:hof:scan")]]
-    for r in rows_data[:14]:
+        return "\n".join(lines), InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔎 Найти турниры", callback_data="coach:hof:scan")],
+             [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:team")]])
+
+    medals: Dict[int, int] = {}
+    for box in boxes:
+        place = int((box["best"] or {}).get("place") or 0)
+        if place in (1, 2, 3):
+            medals[place] = medals.get(place, 0) + 1
+    if medals:
+        lines.append(" · ".join(f"{hof.MEDALS[p]} {medals[p]}"
+                                for p in sorted(medals)))
+    seasons = len({box["season"] for box in boxes})
+    tourneys = sum(len(box["rows"]) for box in boxes)
+    lines.append(
+        f"{coach_payments.plural(len({b['org'].casefold() for b in boxes}), 'лига', 'лиги', 'лиг')}"
+        f" · {coach_payments.plural(seasons, 'сезон', 'сезона', 'сезонов')}"
+        f" · {coach_payments.plural(tourneys, 'турнир', 'турнира', 'турниров')}")
+    lines.append("")
+
+    buttons = []
+    season = ""
+    for box in boxes:
+        if box["season"] != season:
+            lines += ([""] if season else []) + [f"<b>{box['season']}</b>"]
+            season = box["season"]
+        best = box["best"] or {}
+        place = int(best.get("place") or 0)
+        mark = hof.MEDALS.get(place, "🏀" if place else "▫️")
+        if place:
+            tail = f"{place} место"
+            if int(best.get("teams") or 0):
+                tail += f" из {int(best['teams'])}"
+            if int(best.get("guess") or 0):
+                tail += " (бот посчитал)"
+        else:
+            tail = "место не записано"
+        photo = " 📷" if any(str(r["photo_id"] or "") for r in box["rows"]) else ""
+        lines.append(f"   {mark} {box['org']} — {tail}{photo}")
+        buttons.append([InlineKeyboardButton(
+            f"{mark} {box['season']} · {box['org']}"[:BTN_TEXT],
+            callback_data=f"coach:hof:grp:{box['key']}")])
+
+    lines += ["", "<i>Нажми на лигу — там стадии, фото и место, которое можно "
+                  "поправить.</i>"]
+    buttons.append([InlineKeyboardButton("🔎 Найти турниры",
+                                         callback_data="coach:hof:scan")])
+    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:team")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _hof_group(key: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Одна лига в одном сезоне: все её стадии."""
+    import hall_of_fame as hof
+    box = next((b for b in hof.groups() if b["key"] == key), None)
+    if not box:
+        return _hof_screen()
+    lines = [f"🏆 {box['org']} · {box['season']}", ""]
+    buttons = []
+    for r in box["rows"]:
         place = int(r["place"] or 0)
         mark = hof.MEDALS.get(place, "🏀" if place else "▫️")
-        org = str(r["org"] or "").strip()
-        name = str(r["league"] or "турнир")
+        line = f"{mark} {r['league'] or 'турнир'}"
+        if place:
+            line += f" — {place} место"
+            if int(r["teams"] or 0):
+                line += f" из {int(r['teams'])}"
+            if int(r["guess"] or 0):
+                line += " (бот посчитал)"
+        else:
+            line += " — место не записано"
+        if int(r["wins"] or 0) or int(r["losses"] or 0):
+            line += f" · {int(r['wins'])}-{int(r['losses'])}"
+        if str(r["photo_id"] or ""):
+            line += " 📷"
+        lines.append(line)
         buttons.append([InlineKeyboardButton(
-            f"{mark} {org + ': ' if org else ''}{name}"[:BTN_TEXT],
+            f"{mark} {r['league'] or 'турнир'}"[:BTN_TEXT],
             callback_data=f"coach:hof:one:{_hof_key(r)}")])
-    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:team")])
+    lines += ["", "<i>Итог лиги — та стадия, которую ты подтвердишь: её место "
+                  "и встанет в список сезонов.</i>"]
+    buttons.append([InlineKeyboardButton("⬅️ К залу славы", callback_data="coach:hof")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
@@ -11207,7 +11256,9 @@ def _hof_card(key: str) -> Tuple[str, InlineKeyboardMarkup]:
     buttons.append(photo_row)
     buttons.append([InlineKeyboardButton("🗑 Убрать из зала славы",
                                          callback_data=f"coach:hof:del:{key}")])
-    buttons.append([InlineKeyboardButton("⬅️ К залу славы", callback_data="coach:hof")])
+    buttons.append([InlineKeyboardButton(
+        "⬅️ К лиге",
+        callback_data=f"coach:hof:grp:{hof.group_key(hof.org_of(row), hof.season_label(row))}")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
@@ -11249,6 +11300,8 @@ async def _hof_admin(query, context, user, parts: List[str]) -> None:
         text, markup = await asyncio.to_thread(_hof_screen)
         text = (f"Просмотрел турниров: {found}. Новых записей: {added}.\n\n"
                 + text)
+    elif what == "grp" and len(parts) > 3:
+        text, markup = await asyncio.to_thread(_hof_group, parts[3])
     elif what == "one" and key:
         text, markup = await asyncio.to_thread(_hof_card, key)
     elif what == "place" and key:

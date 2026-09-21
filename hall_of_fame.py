@@ -150,6 +150,86 @@ def results() -> List[Dict[str, Any]]:
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
+def season_key(row: Dict[str, Any]) -> Tuple[int, int]:
+    """Сезон числами, чтобы сортировать и сводить вместе.
+
+    У лиг он записан по-разному: «2025-2026» у SLPRO, «25/26» у Инфобаскета,
+    «Сезон 2023/2024» в справочниках. Для тренера это один и тот же сезон."""
+    digits = re.findall(r"\d{2,4}", str(row.get("season") or ""))
+    years = []
+    for d in digits[:2]:
+        year = int(d)
+        years.append(year if year > 100 else 2000 + year)
+    if not years:
+        day = str(row.get("last_day") or "")[:4]
+        return (int(day), int(day)) if day.isdigit() else (0, 0)
+    return (years[0], years[1] if len(years) > 1 else years[0])
+
+
+def season_label(row: Dict[str, Any]) -> str:
+    """«2025/26» — одинаково для всех лиг."""
+    first, second = season_key(row)
+    if not first:
+        return "без сезона"
+    return f"{first}/{str(second)[2:]}" if second != first else str(first)
+
+
+def org_of(row: Dict[str, Any]) -> str:
+    """Лига одним словом: SLPRO, ВСЕСМАРТ, Летняя лига."""
+    org = str(row.get("org") or "").strip()
+    if org:
+        return org
+    return "SLPRO" if row.get("source") == "slpro" else "Инфобаскет"
+
+
+def group_key(org: str, season: str) -> str:
+    """Короткий ключ лиги-сезона для кнопки: в callback 64 байта, а «ЛИГА
+    Квалификация Высшая/Первая Лига» туда не влезет."""
+    import hashlib
+    return hashlib.md5(f"{org.casefold()}|{season}".encode()).hexdigest()[:8]
+
+
+def best_of(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Какой результат показывать за лигу в сезоне.
+
+    Сперва то, что подтвердил тренер: он был на награждении и знает, что
+    третье место в лиге — это выигранный матч за третье место, а не строчка в
+    таблице группы. Если не подтверждал — берём лучшее место."""
+    live = [r for r in rows if int(r.get("place") or 0)]
+    if not live:
+        return None
+    confirmed = [r for r in live if not int(r.get("guess") or 0) and r.get("set_by")]
+    pool = confirmed or live
+    return min(pool, key=lambda r: int(r["place"]))
+
+
+def groups() -> List[Dict[str, Any]]:
+    """Зал славы по сезонам: [{season, org, rows, best}], свежие сперва."""
+    rows = results()
+    # Лига в разные годы записана по-разному («Летняя лига» и «Летняя Лига»).
+    # Берём то написание, что у самого свежего сезона: список не должен
+    # выглядеть как две разные лиги.
+    spelling: Dict[str, str] = {}
+    for row in sorted(rows, key=season_key):
+        spelling[org_of(row).casefold()] = org_of(row)
+    out: Dict[Tuple[Tuple[int, int], str], Dict[str, Any]] = {}
+    for row in rows:
+        low = org_of(row).casefold()
+        key = (season_key(row), low)
+        box = out.setdefault(key, {"season": season_label(row),
+                                   "org": spelling.get(low, org_of(row)),
+                                   "sort": season_key(row), "rows": []})
+        box["rows"].append(row)
+    ordered = sorted(out.values(), key=lambda b: (b["sort"], b["org"].casefold()),
+                     reverse=True)
+    for box in ordered:
+        box["rows"].sort(key=lambda r: (int(r["place"] or 0) or 99,
+                                        str(r["league"] or "")))
+        box["best"] = best_of(box["rows"])
+        box["key"] = group_key(box["org"], box["season"])
+    return ordered
+
+
 def league_of(row: Dict[str, Any]) -> str:
     """Лига и сезон одной строкой: «Летняя лига · 25/26», «SLPRO · 2025-2026».
 

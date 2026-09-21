@@ -224,15 +224,26 @@ async def test_screens(bd) -> None:
     text, markup, _ = await press(bd, "coach:team")
     check("coach:hof" in cbs(markup), "в разделе «Команда» есть «Зал славы»")
 
+    import hall_of_fame as hof
     text, markup, _ = await press(bd, "coach:hof")
-    check("Летний Кубок" in text and "🥇" in text, "турнир с медалью в списке")
-    check("<b>SLPRO" in text, "турниры разложены по лигам, лига — заголовком")
+    check("<b>2025/26</b>" in text, "сверху сезон")
+    check("🥇 SLPRO — 1 место из 12" in text,
+          "под ним строка на лигу с лучшим результатом")
+    check("Летний Кубок Дивизион C" not in text,
+          "стадии на первый экран не вываливаются")
+    grp = hof.group_key("SLPRO", "2025/26")
+    check(f"coach:hof:grp:{grp}" in cbs(markup), "лига открывается кнопкой")
+
     key = "slpro:17:160:707"
-    check(f"coach:hof:one:{key}" in cbs(markup), "в турнир можно зайти")
+    text, markup, _ = await press(bd, f"coach:hof:grp:{grp}")
+    check("Летний Кубок Дивизион C" in text, "внутри лиги — её стадии")
+    check(f"coach:hof:one:{key}" in cbs(markup), "и в стадию можно зайти")
 
     text, markup, _ = await press(bd, f"coach:hof:one:{key}")
     check("Место: 1" in text, "на карточке место")
     check("Лига: SLPRO" in text, "и в какой лиге это было")
+    check(any(c.startswith("coach:hof:grp:") for c in cbs(markup)),
+          "и возврат — в свою лигу")
     # Победы на карточке — те, что записаны у турнира: их кладёт поиск или
     # закрытие лиги (в этом тесте — поиск, 14-2).
     check("14 побед" in text and "2 поражен" in text, "и баланс побед")
