@@ -448,6 +448,16 @@ class SlproManager:
         # несколько — кубок и регулярка идут параллельно, и по каждому нужны
         # свои опросы/анонсы/результаты.
         contexts = await slpro_client.team_contexts(self.team_names)
+        # Закрытую лигу пропускаем: сезон доигран, опросы и анонсы по ней
+        # больше не нужны. Сверяемся и по сезону — если лига завела новый,
+        # старая пометка к нему не относится.
+        try:
+            import league_sync
+            contexts = [c for c in contexts if not league_sync.is_closed(
+                "slpro", c.get("team_id"), str(c.get("season_id") or ""),
+                str(c.get("stage_id") or ""))]
+        except Exception as e:
+            print(f"⚠️ SLPRO: проверка закрытых лиг не прошла: {e}")
         if not contexts:
             names = (self.team_names or slpro_client.config_team_names()
                      or slpro_client.env_team_names())

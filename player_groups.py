@@ -296,16 +296,25 @@ def delete(gid: int) -> None:
 # ─────────────────────────── лига ───────────────────────────
 
 
-def leagues() -> List[Dict[str, str]]:
-    """Лиги, в которых играют наши команды. Больше выбирать не из чего."""
+def leagues(include_closed: bool = False) -> List[Dict[str, str]]:
+    """Лиги, в которых играют наши команды. Больше выбирать не из чего.
+
+    Закрытую лигу (сезон доигран) не предлагаем — привязывать к ней группу
+    незачем. Но в подписи уже привязанной она обязана находиться, иначе
+    привязка выглядит потерянной: за этим include_closed."""
     init()
+    sql = ["SELECT source, team_id, name, league, closed_at FROM league_teams",
+           "WHERE ours = 1"]
+    if not include_closed:
+        sql.append("AND COALESCE(closed_at, '') = ''")
+    sql.append("ORDER BY league")
     with sheets_cache.get_connection() as conn:
-        rows = [dict(r) for r in conn.execute(
-            """SELECT source, team_id, name, league FROM league_teams
-                WHERE ours = 1 ORDER BY league""")]
+        rows = [dict(r) for r in conn.execute(" ".join(sql))]
     out = []
     for r in rows:
         label = (r.get("league") or "").strip() or (r.get("name") or "").strip()
+        if str(r.get("closed_at") or ""):
+            label += " · закрыта"
         out.append({"source": r["source"], "team_id": str(r["team_id"]),
                     "title": label, "team": (r.get("name") or "").strip()})
     return out
@@ -315,7 +324,7 @@ def league_title(source: str, team_id: str) -> str:
     """Подпись привязки. Пусто — группа ни к какой лиге не привязана."""
     if not source or not team_id:
         return ""
-    for item in leagues():
+    for item in leagues(include_closed=True):
         if item["source"] == source and item["team_id"] == str(team_id):
             return item["title"]
     # Лигу могли перезалить: показываем хоть что-то, а не пустоту.

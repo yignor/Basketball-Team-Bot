@@ -866,6 +866,9 @@ CREATE TABLE IF NOT EXISTS league_teams (
     season_id   TEXT NOT NULL DEFAULT '',
     stage_id    TEXT NOT NULL DEFAULT '',
     ours        INTEGER NOT NULL DEFAULT 0, -- наша команда (кандидат в пул)
+    -- Когда тренер закрыл эту лигу: сезон доигран, новых игр не будет.
+    -- История остаётся, но текущей лига считаться перестаёт.
+    closed_at   TEXT NOT NULL DEFAULT '',
     ctx_json    TEXT NOT NULL DEFAULT '',   -- полный контекст стадии (SLPRO)
     fetched_at  TEXT NOT NULL,
     PRIMARY KEY (source, team_id)
@@ -1005,6 +1008,7 @@ def init_db() -> None:
         _ensure_column(conn, "players", "role", "TEXT NOT NULL", "''")
         _ensure_column(conn, "players", "patronymic", "TEXT NOT NULL", "''")
         _ensure_column(conn, "feature_access", "until", "TEXT NOT NULL", "''")
+        _ensure_column(conn, "league_teams", "closed_at", "TEXT NOT NULL", "''")
         # Долг человеку, которого нет в листе «Игроки»: гость на одну игру,
         # соперник, кто угодно. Тогда player_row = 0, а имя лежит здесь.
         _ensure_column(conn, "extra_debts", "who", "TEXT NOT NULL", "''")

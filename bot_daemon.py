@@ -5034,6 +5034,7 @@ def _cfg_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
+        [InlineKeyboardButton("🏆 Лиги", callback_data="coach:lg:list")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -6525,6 +6526,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     if what == "vn":
         await _vn_admin(query, user, parts)
+        return
+    if what == "lg":
+        await _leagues_admin(query, user, parts)
         return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
@@ -11089,6 +11093,127 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     screen, markup = await asyncio.to_thread(_fee_card, int(arg))
     await msg.reply_text(screen, reply_markup=markup)
     raise ApplicationHandlerStop
+
+
+# ─────────────────── лиги: какие турниры команда играет сейчас ───────────────────
+
+
+def _league_last_game(source: str, team_id: str) -> str:
+    """Когда в этой лиге играли в последний раз. Пусто — если игр ещё не было."""
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT MAX(game_date) AS d FROM game_meta WHERE source = ? "
+            "AND (home_team_id = ? OR guest_team_id = ?) AND game_date != ''",
+            (str(source), str(team_id), str(team_id))).fetchone()
+    day = str((row or {"d": ""})["d"] or "")[:10]
+    return f"{day[8:10]}.{day[5:7]}.{day[:4]}" if len(day) == 10 else ""
+
+
+def _league_title(team: Dict[str, Any]) -> str:
+    return (str(team.get("league") or "").strip()
+            or str(team.get("name") or "").strip() or "Лига")
+
+
+def _leagues_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Список наших лиг: какие идут, какие закрыты."""
+    import league_sync
+    sheets_cache.init_db()
+    teams = league_sync.our_teams(include_closed=True)
+    lines = ["🏆 Лиги", "",
+             "Турниры, в которых бот считает команду играющей. Пока лига здесь "
+             "открыта, бот ищет её игры, ставит опросы и берёт её в пул фэнтези "
+             "и в цифры состава.", ""]
+    rows = []
+    for t in teams:
+        closed = bool(str(t.get("closed_at") or ""))
+        last = _league_last_game(t["source"], t["team_id"])
+        mark = "🏁" if closed else "▶️"
+        tail = f" · последняя игра {last}" if last else ""
+        lines.append(f"{mark} {_league_title(t)}"
+                     + (" — закрыта" if closed else "") + tail)
+        rows.append([InlineKeyboardButton(
+            f"{mark} {_league_title(t)}"[:BTN_TEXT],
+            callback_data=f"coach:lg:one:{t['source']}:{t['team_id']}")])
+    if not teams:
+        lines.append("Лиг пока нет — они появляются из листа «Конфиг».")
+    rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _league_card(source: str, team_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    import league_sync
+    team = next((t for t in league_sync.our_teams(include_closed=True)
+                 if t["source"] == source and str(t["team_id"]) == str(team_id)), None)
+    if not team:
+        return _leagues_screen()
+    closed = bool(str(team.get("closed_at") or ""))
+    last = _league_last_game(source, team_id)
+    lines = [f"🏆 {_league_title(team)}", "",
+             f"Команда: {team.get('name') or '—'}",
+             f"Последняя игра: {last or 'ещё не играли'}"]
+    if closed:
+        when = str(team.get("closed_at") or "")[:10]
+        lines += ["", f"🏁 Закрыта {when}. Бот не ищет здесь новых игр и не "
+                      "считает этот турнир текущим. Всё сыгранное на месте.",
+                  "", "Если лига вернётся с новым сезоном, бот откроет её сам."]
+        rows = [[InlineKeyboardButton(
+            "↩️ Вернуть в действующие",
+            callback_data=f"coach:lg:open:{source}:{team_id}")]]
+    else:
+        lines += ["", "Закрыть стоит, когда сезон доигран и игр в этой лиге "
+                      "больше не будет."]
+        rows = [[InlineKeyboardButton(
+            "🏁 Закрыть лигу", callback_data=f"coach:lg:close:{source}:{team_id}")]]
+    rows.append([InlineKeyboardButton("⬅️ К лигам", callback_data="coach:lg:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _league_close_ask(source: str, team_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Что именно изменится. Спрашиваем до, а не объясняем после."""
+    import league_sync
+    team = next((t for t in league_sync.our_teams(include_closed=True)
+                 if t["source"] == source and str(t["team_id"]) == str(team_id)), None)
+    if not team:
+        return _leagues_screen()
+    text = (f"🏁 Закрыть «{_league_title(team)}»?\n\n"
+            "Бот перестанет:\n"
+            "• искать здесь игры и ставить по ним опросы и анонсы;\n"
+            "• считать этот турнир текущим — в пуле фэнтези, в цифрах "
+            "стартового состава, в выборе лиги у групп и взносов.\n\n"
+            "Останется всё: результаты, статистика, записи игр с тайм-кодами, "
+            "оплаты и долги.\n\n"
+            "Если лига заведёт новый сезон, бот откроет её сам.")
+    rows = [[InlineKeyboardButton("🏁 Да, сезон доигран",
+                                  callback_data=f"coach:lg:close2:{source}:{team_id}")],
+            [InlineKeyboardButton("⬅️ Отмена",
+                                  callback_data=f"coach:lg:one:{source}:{team_id}")]]
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def _leagues_admin(query, user, parts: List[str]) -> None:
+    """Кнопки раздела «Лиги»."""
+    import league_sync
+    what = parts[2] if len(parts) > 2 else "list"
+    src = parts[3] if len(parts) > 3 else ""
+    team = parts[4] if len(parts) > 4 else ""
+
+    if what == "one" and team:
+        text, markup = await asyncio.to_thread(_league_card, src, team)
+    elif what == "close" and team:
+        text, markup = await asyncio.to_thread(_league_close_ask, src, team)
+    elif what == "close2" and team:
+        await asyncio.to_thread(league_sync.close, src, team, True)
+        log.info(f"Лига закрыта: {src}:{team} (тренер {user.id})")
+        text, markup = await asyncio.to_thread(_league_card, src, team)
+        text = "🏁 Закрыл.\n\n" + text
+    elif what == "open" and team:
+        await asyncio.to_thread(league_sync.close, src, team, False)
+        log.info(f"Лига открыта: {src}:{team} (тренер {user.id})")
+        text, markup = await asyncio.to_thread(_league_card, src, team)
+        text = "↩️ Вернул в действующие.\n\n" + text
+    else:
+        text, markup = await asyncio.to_thread(_leagues_screen)
+    await query.edit_message_text(text, reply_markup=markup)
 
 
 # ─────────────────── разбор записи: заметки тренера по тайм-кодам ───────────────────

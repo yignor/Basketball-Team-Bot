@@ -94,12 +94,29 @@ async def _infobasket_teams() -> List[Dict[str, Any]]:
 def _store_teams(teams: List[Dict[str, Any]]) -> int:
     """Пишем ТОЛЬКО то, что реально приехало: пустой ответ лиги не должен
     стирать вчерашний справочник — иначе один сбой сети оставляет бота без
-    команд, а игрока без пула."""
+    команд, а игрока без пула.
+
+    Закрытую лигу (см. close) не трогаем, пока она та же самая. Но если лига
+    прислала ДРУГОЙ сезон или стадию — это уже новый турнир, и пометка «сезон
+    доигран» к нему не относится: снимаем её сами. Иначе осенний старт прошёл
+    бы мимо бота молча, а тренер и не вспомнил бы, что весной что-то закрывал."""
     if not teams:
         return 0
     now = sheets_cache.now_iso()
     with sheets_cache.get_connection() as conn:
         for t in teams:
+            was = conn.execute(
+                "SELECT season_id, stage_id, closed_at FROM league_teams "
+                "WHERE source = ? AND team_id = ?",
+                (t["source"], t["team_id"])).fetchone()
+            if was and str(was["closed_at"] or "") and (
+                    str(was["season_id"] or "") != t["season_id"]
+                    or str(was["stage_id"] or "") != t["stage_id"]):
+                conn.execute(
+                    "UPDATE league_teams SET closed_at = '' WHERE source = ? "
+                    "AND team_id = ?", (t["source"], t["team_id"]))
+                log.info(f"качалка: у {t['source']}:{t['team_id']} новый сезон — "
+                         f"лига снова считается действующей")
             conn.execute(
                 """INSERT INTO league_teams
                    (source, team_id, name, league, comp_id, season_id, stage_id,
@@ -117,11 +134,18 @@ def _store_teams(teams: List[Dict[str, Any]]) -> int:
     return len(teams)
 
 
-def our_teams(source: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Наши команды из локального справочника. Без сети."""
+def our_teams(source: Optional[str] = None,
+              include_closed: bool = False) -> List[Dict[str, Any]]:
+    """Наши команды из локального справочника. Без сети.
+
+    Закрытые лиги по умолчанию не возвращаем: «наши команды» спрашивают там,
+    где речь о том, что происходит СЕЙЧАС, — пул фэнтези, турнир в составе,
+    выбор лиги. История ходит за ними с include_closed."""
     sheets_cache.init_db()
     sql = "SELECT * FROM league_teams WHERE ours = 1"
     args: List[Any] = []
+    if not include_closed:
+        sql += " AND COALESCE(closed_at, '') = ''"
     if source:
         sql += " AND source = ?"
         args.append(source)
@@ -130,6 +154,41 @@ def our_teams(source: Optional[str] = None) -> List[Dict[str, Any]]:
     for r in rows:
         r["ctx"] = json.loads(r["ctx_json"]) if r["ctx_json"] else None
     return rows
+
+
+def close(source: str, team_id: str, closed: bool = True) -> bool:
+    """Закрывает лигу или возвращает её. True — если что-то поменялось.
+
+    Закрытие — пометка, а не удаление: результаты, статистика, записи игр и
+    оплаты остаются на месте. Меняется только одно — бот перестаёт считать
+    эту лигу текущей."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        n = conn.execute(
+            "UPDATE league_teams SET closed_at = ? WHERE source = ? AND team_id = ?",
+            (sheets_cache.now_iso() if closed else "", str(source),
+             str(team_id))).rowcount
+        conn.commit()
+    return bool(n)
+
+
+def is_closed(source: str, team_id: Any, season_id: str = "",
+              stage_id: str = "") -> bool:
+    """Закрыта ли эта лига. Сезон и стадию спрашивают там, где они известны:
+    закрывали прошлый турнир, а не тот, что лига завела взамен."""
+    sheets_cache.init_db()
+    with sheets_cache.get_connection() as conn:
+        row = conn.execute(
+            "SELECT season_id, stage_id, closed_at FROM league_teams "
+            "WHERE source = ? AND team_id = ?",
+            (str(source), str(team_id))).fetchone()
+    if not row or not str(row["closed_at"] or ""):
+        return False
+    if season_id and str(row["season_id"] or "") != str(season_id):
+        return False
+    if stage_id and str(row["stage_id"] or "") != str(stage_id):
+        return False
+    return True
 
 
 # ── Заявки: id и номера на диск, ФИО в память ───────────────────────────────

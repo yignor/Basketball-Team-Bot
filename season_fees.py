@@ -127,15 +127,23 @@ def league_title(source: str, team_id: str) -> str:
     return str(row["league"] or row["name"] or "").strip()
 
 
-def leagues() -> List[Dict[str, str]]:
-    """Лиги наших команд — к ним можно привязать сбор."""
+def leagues(include_closed: bool = False) -> List[Dict[str, str]]:
+    """Лиги наших команд — к ним можно привязать сбор.
+
+    Закрытая лига в выборе не нужна: сбор заводят на турнир, который играют.
+    Старый сбор, привязанный к ней, остаётся — деньги за доигранный сезон
+    никуда не деваются."""
     init()
+    sql = ["SELECT source, team_id, name, league, closed_at FROM league_teams",
+           "WHERE ours = 1"]
+    if not include_closed:
+        sql.append("AND COALESCE(closed_at, '') = ''")
+    sql.append("ORDER BY league")
     with sheets_cache.get_connection() as conn:
-        rows = [dict(r) for r in conn.execute(
-            "SELECT source, team_id, name, league FROM league_teams "
-            "WHERE ours = 1 ORDER BY league")]
+        rows = [dict(r) for r in conn.execute(" ".join(sql))]
     return [{"source": r["source"], "team_id": str(r["team_id"]),
-             "title": (r.get("league") or r.get("name") or "").strip()}
+             "title": ((r.get("league") or r.get("name") or "").strip()
+                       + (" · закрыта" if str(r.get("closed_at") or "") else ""))}
             for r in rows]
 
 
