@@ -92,6 +92,19 @@ def setup() -> Any:
                 conn.execute(
                     "INSERT INTO game_rosters (source, game_id, player_row, "
                     "added_at) VALUES ('slpro', ?, ?, ?)", (gid, row, now))
+        # Будущая игра Инфобаскета: протокола ещё нет, в справочнике матчей
+        # пусто, но турнир записан в опросе — это тот случай, ради которого
+        # тренер и открывает экран.
+        conn.execute(
+            "INSERT INTO service_records (data_type, unique_key, logged_at, "
+            "game_id, game_date, comp_id, team_id, alt_name, created_at, "
+            "updated_at) VALUES ('ОПРОС_ИГРА', ?, ?, ?, ?, '140825', '36502', "
+            "'PULL UP', ?, ?)",
+            ("1094941", now, "1094941", DAY.isoformat(), now, now))
+        for row in (2, 3):
+            conn.execute(
+                "INSERT INTO game_rosters (source, game_id, player_row, "
+                "added_at) VALUES ('infobasket', '1094941', ?, ?)", (row, now))
         conn.commit()
     import coach_lineup
     return coach_lineup
@@ -104,6 +117,10 @@ def test_scope_of_game(cl) -> None:
           f"у игры из расписания — её сезон и стадия: {scopes}")
     check(cl.game_scope("slpro", "4600") == scopes,
           "id с приставкой «slpro-» и без неё — одна и та же игра")
+    soon = cl.game_scope("infobasket", "1094941")
+    check(soon == [{"source": "infobasket", "season_id": "140825", "stage_id": ""}],
+          f"будущая игра: турнир берётся из записи опроса: {soon}")
+
     hand = cl.game_scope("slpro", "slpro-m2609211200")
     check([s["source"] for s in hand] == ["slpro"],
           f"игра, заведённая руками: турниры только её лиги: {hand}")
@@ -127,6 +144,17 @@ def test_lineup_counts(cl) -> None:
     check("по текущим турнирам" not in card, "старой подписи «по текущим турнирам» нет")
 
 
+def test_future_game_counts(cl) -> None:
+    """Главный случай: состав на игру, которая ещё не сыграна."""
+    print("\n=== будущая игра ===")
+    data = cl.lineup("infobasket", "1094941", "name")
+    by_row = {r["row"]: r for r in data["rows"]}
+    got = ((by_row.get(2) or {}).get("avg") or {}).get("games")
+    check(got == 12, f"считаем только турнир этой игры, не обе лиги: {got}")
+    check("по турниру «Ночная лига»" in cl.text(data),
+          "подпись называет турнир будущей игры")
+
+
 def test_other_league_not_mixed(cl) -> None:
     print("\n=== вторая лига не подмешивается ===")
     ib = cl.averages([{"row": 2}], [{"source": "infobasket", "season_id": "140825",
@@ -143,6 +171,7 @@ def main() -> int:
     cl = setup()
     test_scope_of_game(cl)
     test_lineup_counts(cl)
+    test_future_game_counts(cl)
     test_other_league_not_mixed(cl)
     print("\n" + "=" * 60)
     if bad:

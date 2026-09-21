@@ -214,19 +214,36 @@ def game_scope(source: str, game_id: Any) -> List[Dict[str, str]]:
     сложенные вместе 12 игр в одной и 2 в другой давали «14 игр» — тренер
     читал это как опыт в турнире, куда прямо сейчас ставит состав.
 
-    Игры, заведённой руками, в справочнике ещё нет: она попадёт туда, когда
-    лига объявит расписание. До тех пор берём турниры её лиги из «Конфига» —
-    это всё равно уже, чем все лиги разом."""
+    Справочник матчей знает только СЫГРАННЫЕ игры: строка там появляется
+    вместе с протоколом. А пятёрку ставят до игры, поэтому сперва спрашиваем
+    запись опроса — её бот заводит из расписания лиги и турнир в ней уже
+    записан (у Инфобаскета это comp_id).
+
+    Не нашлось ни там, ни там — игра заведена руками. Тогда берём турниры её
+    лиги из «Конфига»: это всё равно уже, чем все лиги разом."""
+    import game_roster
     import vk_video
     sheets_cache.init_db()
     with sheets_cache.get_connection() as conn:
         row = conn.execute(
             "SELECT season_id, stage_id FROM game_meta WHERE source = ? "
             "AND game_id = ?", (str(source), vk_video.meta_id(game_id))).fetchone()
-    season = str(row["season_id"] or "") if row else ""
+        season = str(row["season_id"] or "") if row else ""
+        stage = str(row["stage_id"] or "") if row else ""
+        if not season:
+            marks = ",".join("?" * len(game_roster.POLL_TYPES))
+            poll = conn.execute(
+                f"SELECT comp_id FROM service_records WHERE game_id = ? "
+                f"AND data_type IN ({marks}) AND deleted = 0 "
+                "ORDER BY id DESC LIMIT 1",
+                (str(game_id), *game_roster.POLL_TYPES)).fetchone()
+            comp = str(poll["comp_id"] or "").strip() if poll else ""
+            # Стадии в опросе нет, и это верно: у Инфобаскета турнир и есть
+            # comp_id, а у SLPRO comp_id в опросе пуст — там сработает запасной
+            # путь ниже, и стадия придёт из «Конфига».
+            season, stage = (comp, "") if comp else ("", "")
     if season:
-        return [{"source": str(source), "season_id": season,
-                 "stage_id": str(row["stage_id"] or "")}]
+        return [{"source": str(source), "season_id": season, "stage_id": stage}]
     return [sc for sc in current_scopes() if sc["source"] == str(source)]
 
 
