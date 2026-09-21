@@ -164,12 +164,79 @@ async def test_screens(bd) -> None:
     check(all(r["team_id"] != "36502" for r in ls.saved()), "убирается кнопкой")
 
 
+async def test_slpro(bd) -> None:
+    print("\n=== SLPRO: дивизион и название ===")
+    import league_setup as ls
+    import slpro_client
+
+    text, markup, _ = await press(bd, "coach:tm:list")
+    check("coach:tm:slpro" in cbs(markup), "есть ввод для SLPRO")
+
+    real = ls.discover_slpro
+
+    async def fake(division, name):
+        if division == "SUMC" and name.replace(" ", "").lower() == "pullupfarm":
+            return {"found": True, "team_id": "707", "team_name": "PullUp Farm",
+                    "season": "2025-2026", "stage_id": "160",
+                    "division_name": "Летний Кубок Дивизион C", "near": []}
+        return {"found": False, "near": ["PullUp Farm", "Резалит"],
+                "division_name": "Летний Кубок Дивизион C"}
+
+    ls.discover_slpro = fake
+    try:
+        # Промах в названии: бот показывает, кто в дивизионе есть.
+        await press(bd, "coach:tm:slpro")
+        msg = FakeMessage(text="SUMC Пул Ап", bot=BOT, user=COACH)
+        try:
+            await bd.handle_hof_team(FakeUpdate(message=msg, user=COACH),
+                                     FakeContext(BOT))
+        except Exception as exc:
+            if type(exc).__name__ != "ApplicationHandlerStop":
+                raise
+        shown = msg.replies[-1]["text"]
+        check("PullUp Farm" in shown, "подсказали точное название из лиги")
+        check(not ls.saved("slpro"), "ничего не сохранили")
+
+        await press(bd, "coach:tm:slpro")
+        msg = FakeMessage(text="sumc PullUp Farm", bot=BOT, user=COACH)
+        try:
+            await bd.handle_hof_team(FakeUpdate(message=msg, user=COACH),
+                                     FakeContext(BOT))
+        except Exception as exc:
+            if type(exc).__name__ != "ApplicationHandlerStop":
+                raise
+        check("Летний Кубок Дивизион C" in msg.replies[-1]["text"],
+              "нашли команду и показали турнир")
+        check(not ls.saved("slpro"), "но до подтверждения не включили")
+
+        text, markup, _ = await press(bd, "coach:tm:oks")
+        rows = ls.saved("slpro")
+        check(len(rows) == 1 and rows[0]["team_id"] == "SUMC",
+              "после «Следить» команда сохранена по коду дивизиона")
+        check(rows[0]["name"] == "PullUp Farm",
+              "имя взяли то, что в лиге, а не набранное тренером")
+    finally:
+        ls.discover_slpro = real
+
+    # Главное: попадает в тот же список, из которого бот берёт турниры SLPRO.
+    rows = slpro_client.leagues_from_config()
+    check(any(r["division"] == "SUMC" and r["team_name"] == "PullUp Farm"
+              for r in rows),
+          "команда видна опросам, фэнтези и статистике SLPRO")
+
+    text, markup, _ = await press(bd, "coach:tm:list")
+    check("дивизион SUMC" in text, "и в списке команд она есть")
+    await press(bd, "coach:tm:rms:SUMC")
+    check(not ls.saved("slpro"), "убирается кнопкой")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
     test_storage()
     test_merge_into_config()
     asyncio.run(test_screens(bd))
+    asyncio.run(test_slpro(bd))
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

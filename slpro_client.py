@@ -281,10 +281,23 @@ def leagues_from_config() -> List[Dict[str, Any]]:
         import sheets_cache
         rows = config_sheet.split(sheets_cache.get_config_rows() or [])[config_sheet.GAME]
     except Exception:
-        return []
+        # Лист не прочитался — это не повод потерять и то, что завели из бота.
+        rows = []
 
     out: List[Dict[str, Any]] = []
     seen = set()
+    # Команды, заведённые тренером через бота, живут рядом с листом: в лист
+    # писать нельзя, а добавить турнир из бота должно быть можно.
+    try:
+        import league_setup
+        for row in league_setup.slpro_rows():
+            key = (row["division"].upper(), _normalize_name(row["team_name"]))
+            if row["team_name"] and key not in seen:
+                seen.add(key)
+                out.append({"source": "slpro", "division": row["division"].upper(),
+                            "team_name": row["team_name"], "name": row["name"]})
+    except Exception as exc:
+        print(f"⚠️ SLPRO: команды из бота не прочитались: {exc}")
     for row in rows:
         cells = [str(c or "").strip() for c in list(row) + [""] * 4]
         if cells[0].upper() not in _SLPRO_TYPES:

@@ -11221,17 +11221,65 @@ def _teams_screen(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
                      + (f"\n     турниры: {comps}" if comps else ""))
     if not (cfg.get("teams") or {}):
         lines.append("Пока ни одной.")
-    lines += ["", "<i>SLPRO заводится иначе — названием команды и кодом "
-                  "дивизиона в листе «Конфиг».</i>"]
+    try:
+        import slpro_client
+        slpro = slpro_client.leagues_from_config()
+    except Exception as exc:
+        log.warning(f"Команды SLPRO не прочитались: {exc}")
+        slpro = []
+    if slpro:
+        mine_slpro = {r["team_id"] for r in league_setup.saved("slpro")}
+        lines += ["", "SLPRO:"]
+        for row in slpro:
+            where = "из бота" if row["division"] in mine_slpro else "из «Конфига»"
+            lines.append(f"• {row['team_name']} · дивизион {row['division']} · {where}")
+    lines += ["", "<i>У SLPRO числового id нет — там команда задаётся кодом "
+                  "дивизиона из адреса турнира и названием, как на сайте.</i>"]
     if note:
         lines += ["", note]
-    rows = [[InlineKeyboardButton("➕ Добавить команду", callback_data="coach:tm:add")]]
+    rows = [[InlineKeyboardButton("➕ Инфобаскет: по id",
+                                  callback_data="coach:tm:add")],
+            [InlineKeyboardButton("➕ SLPRO: дивизион и название",
+                                  callback_data="coach:tm:slpro")]]
     for tid, row in sorted(mine.items()):
         rows.append([InlineKeyboardButton(
             f"🗑 Убрать {row.get('name') or tid}"[:BTN_TEXT],
             callback_data=f"coach:tm:rm:{tid}")])
+    for row in league_setup.saved("slpro"):
+        rows.append([InlineKeyboardButton(
+            f"🗑 Убрать {row['name']} ({row['team_id']})"[:BTN_TEXT],
+            callback_data=f"coach:tm:rms:{row['team_id']}")])
     rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _slpro_found_screen(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Что лига ответила про команду SLPRO."""
+    draft = _team_draft.get(uid) or {}
+    got = draft.get("found") or {}
+    if got.get("found"):
+        text = (f"👥 {got['team_name']} · {got['division_name']}\n"
+                f"Сезон: {got.get('season') or '—'}\n\n"
+                "Начну искать её игры, ставить опросы и анонсы, считать "
+                "статистику и фэнтези. Зал славы тоже увидит эту команду.")
+        rows = [[InlineKeyboardButton("✅ Следить за командой",
+                                      callback_data="coach:tm:oks")],
+                [InlineKeyboardButton("⬅️ Отмена", callback_data="coach:tm:list")]]
+        return text, InlineKeyboardMarkup(rows)
+    if got.get("error"):
+        text = f"⚠️ {got['error']}."
+    else:
+        text = (f"⚠️ В дивизионе {draft.get('division')} команды "
+                f"«{draft.get('team_name')}» нет.")
+        if got.get("near"):
+            # Название должно совпадать с сайтом лиги до буквы, поэтому
+            # показываем, кто там есть: скопировать проще, чем угадать.
+            text += (f"\n\nВ дивизионе {draft.get('division')} играют — "
+                     "перешли своё название точно так, как оно тут:\n"
+                     + "\n".join(f"• <code>{n}</code>" for n in got["near"]))
+    rows = [[InlineKeyboardButton("↩️ Ввести заново", callback_data="coach:tm:slpro")],
+            [InlineKeyboardButton("⬅️ К командам", callback_data="coach:tm:list")]]
+    return text, InlineKeyboardMarkup(rows)
 
 
 def _team_found_screen(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
@@ -11286,6 +11334,32 @@ async def _teams_admin(query, user, parts: List[str]) -> None:
                      f"(турниров {len(draft.get('comps') or [])}, тренер {uid})")
             text, markup = await asyncio.to_thread(
                 _teams_screen, f"✅ Слежу за командой {draft['team_id']}.")
+    elif what == "slpro":
+        _clear_pending(uid)
+        _awaiting_team[uid] = "slpro"
+        text = ("👥 Пришли код дивизиона и название команды одной строкой — "
+                "как на сайте лиги.\n\nНапример: <code>SUMC PullUp Farm</code>\n\n"
+                "Код дивизиона — из адреса страницы турнира.\n\n"
+                "Передумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data="coach:tm:list")]])
+    elif what == "oks":
+        draft = _team_draft.pop(uid, None) or {}
+        got = draft.get("found") or {}
+        if not got.get("found"):
+            text, markup = await asyncio.to_thread(_teams_screen,
+                                                   "Команда потерялась — начни заново.")
+        else:
+            await asyncio.to_thread(
+                league_setup.add_slpro, draft["division"], got["team_name"],
+                got.get("division_name", ""), str(uid))
+            log.info(f"Команда SLPRO добавлена: {draft['division']} (тренер {uid})")
+            text, markup = await asyncio.to_thread(
+                _teams_screen, f"✅ Слежу за командой в дивизионе {draft['division']}.")
+    elif what == "rms" and len(parts) > 3:
+        await asyncio.to_thread(league_setup.drop, parts[3], "slpro")
+        log.info(f"Команда SLPRO убрана: {parts[3]} (тренер {uid})")
+        text, markup = await asyncio.to_thread(_teams_screen, f"🗑 Убрал {parts[3]}.")
     elif what == "rm" and len(parts) > 3:
         await asyncio.to_thread(league_setup.drop, parts[3])
         log.info(f"Команда в лиге убрана: {parts[3]} (тренер {uid})")
@@ -11488,6 +11562,28 @@ async def handle_hof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     raise ApplicationHandlerStop
 
 
+async def _take_slpro_team(msg, user, raw: str) -> None:
+    """«SUMC PullUp Farm» → проверяем у лиги, что такая команда там есть."""
+    import league_setup
+    parts = raw.split(None, 1)
+    if len(parts) < 2:
+        await msg.reply_text("Нужны код дивизиона и название одной строкой: "
+                             "«SUMC PullUp Farm».")
+        return
+    _awaiting_team.pop(user.id, None)
+    division, team_name = parts[0].upper(), parts[1].strip()
+    wait = await msg.reply_text("🔎 Спрашиваю лигу…")
+    got = await league_setup.discover_slpro(division, team_name)
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    _team_draft[user.id] = {"division": division, "team_name": team_name,
+                            "found": got}
+    text, markup = _slpro_found_screen(user.id)
+    await msg.reply_text(text, reply_markup=markup, parse_mode="HTML")
+
+
 async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """id команды, присланный тренером: спрашиваем лигу, что это за команда."""
     import league_setup
@@ -11498,6 +11594,9 @@ async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         _awaiting_team.pop(user.id, None)
         return
     raw = (msg.text or "").strip()
+    if _awaiting_team.get(user.id) == "slpro":
+        await _take_slpro_team(msg, user, raw)
+        raise ApplicationHandlerStop
     digits = "".join(ch for ch in raw if ch.isdigit())
     if not digits:
         await msg.reply_text("Нужно число — id команды из адреса её страницы.")

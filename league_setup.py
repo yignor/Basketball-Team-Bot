@@ -146,6 +146,81 @@ def merge_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+# ─────────────────────────── SLPRO ───────────────────────────
+
+# У SLPRO числового id команды на сайте не видно, поэтому турнир задаётся
+# кодом дивизиона из адреса и названием команды — как в «Конфиге». Код
+# дивизиона кладём в team_id: пара «дивизион + название» и есть здесь ключ.
+
+
+def slpro_rows() -> List[Dict[str, str]]:
+    """Команды SLPRO, заведённые через бота, — в том же виде, что «Конфиг»."""
+    out = []
+    for row in saved("slpro"):
+        out.append({"source": "slpro", "division": str(row["team_id"]).upper(),
+                    "team_name": row["name"],
+                    "name": row["note"] or f"SLPRO {str(row['team_id']).upper()}"})
+    return out
+
+
+def add_slpro(division: str, team_name: str, title: str = "",
+              added_by: Any = "") -> None:
+    init()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO extra_league_teams (source, team_id, name, comps_json,
+                                               note, added_by, added_at)
+               VALUES ('slpro', ?, ?, '[]', ?, ?, ?)
+               ON CONFLICT(source, team_id) DO UPDATE SET
+                   name = excluded.name, note = excluded.note""",
+            (str(division).upper().strip(), str(team_name).strip(),
+             str(title or "").strip(), str(added_by), sheets_cache.now_iso()))
+        conn.commit()
+
+
+async def discover_slpro(division: str, team_name: str) -> Dict[str, Any]:
+    """Есть ли такая команда в таком дивизионе.
+
+    {found: bool, division_name, season, stage_id, team_id, team_name,
+     near: [похожие названия]}. Название должно совпадать с тем, что на сайте
+     лиги, — поэтому при промахе показываем, кто там вообще есть: вписать
+     «PullUp Farm» вместо «Pull Up Farm» проще, чем гадать."""
+    import slpro_client
+    code = str(division).upper().strip()
+    want = slpro_client._normalize_name(team_name)
+    out: Dict[str, Any] = {"found": False, "near": [], "division_name": "",
+                           "season": "", "team_id": "", "team_name": ""}
+    client = slpro_client.SlproClient()
+    stages = await client.iter_stages()
+    if not stages:
+        out["error"] = "лига не ответила — попробуй позже"
+        return out
+    cands = [st for st in stages if str(st.get("division", "")).upper() == code]
+    if not cands:
+        out["error"] = (f"дивизиона {code} у лиги нет — код берётся из адреса "
+                        "страницы турнира")
+        return out
+    near: List[str] = []
+    for stage in cands:
+        for team in await client.get_standings(stage):
+            name = str(team.get("name") or "")
+            if slpro_client._normalize_name(name) == want:
+                out.update(found=True, team_id=str(team.get("team_id") or ""),
+                           team_name=name, season=str(stage.get("season") or ""),
+                           stage_id=str(stage.get("stage_id") or ""),
+                           division_name=str(stage.get("division_name")
+                                             or stage.get("division") or ""))
+                return out
+            if name not in near:
+                near.append(name)
+    # Отдаём весь дивизион, а не «похожие»: команд там дюжина, своё название
+    # тренер узнает глазами. Похожесть тут не работает — «Пул Ап» и «PullUp
+    # Farm» для сравнения строк далеки друг от друга, это разные алфавиты.
+    out["near"] = sorted(near)[:16]
+    out["division_name"] = str(cands[0].get("division_name") or code)
+    return out
+
+
 # ─────────────────────────── что знает лига ───────────────────────────
 
 
