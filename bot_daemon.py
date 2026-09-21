@@ -2422,6 +2422,8 @@ def _clear_pending(uid: int) -> None:
     _awaiting_fee.pop(uid, None)
     _awaiting_note.pop(uid, None)
     _note_draft.pop(uid, None)
+    _awaiting_hof.pop(uid, None)
+    _awaiting_place.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -5023,6 +5025,7 @@ def _team_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Игроки", callback_data="coach:field:list:0")],
         [InlineKeyboardButton("👪 Группы и рассылки", callback_data="pg:main")],
         [InlineKeyboardButton("🔕 Кто вне бота", callback_data="coach:offline")],
+        [InlineKeyboardButton("🏆 Зал славы", callback_data="coach:hof")],
         [InlineKeyboardButton("📄 Выгрузить для заявки", callback_data="coach:csv")],
         [InlineKeyboardButton("📇 Отчества из Инфобаскета", callback_data="coach:patro")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
@@ -6529,6 +6532,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     if what == "lg":
         await _leagues_admin(query, user, parts)
+        return
+    if what == "hof":
+        await _hof_admin(query, context, user, parts)
         return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
@@ -11095,6 +11101,236 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     raise ApplicationHandlerStop
 
 
+# ─────────────────── зал славы: где играли и какие места занимали ───────────────────
+
+# Кто сейчас присылает фото с награждения: uid -> ключ турнира.
+_awaiting_hof: Dict[int, str] = {}
+# Кто вводит место числом: uid -> ключ турнира.
+_awaiting_place: Dict[int, str] = {}
+
+
+def _hof_key(row: Dict[str, Any]) -> str:
+    return f"{row['source']}:{row['season_id']}:{row['stage_id']}:{row['team_id']}"
+
+
+def _hof_parts(key: str) -> Tuple[str, str, str, str]:
+    bits = (key.split(":") + ["", "", "", ""])[:4]
+    return bits[0], bits[1], bits[2], bits[3]
+
+
+def _hof_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Зал славы: все турниры наших команд, свежие сверху."""
+    import hall_of_fame as hof
+    rows_data = hof.results()
+    lines = ["🏆 Зал славы", ""]
+    if rows_data:
+        medals = [r for r in rows_data if int(r["place"] or 0) in (1, 2, 3)]
+        if medals:
+            lines.append("Медалей: " + " ".join(
+                hof.MEDALS[int(r["place"])] for r in medals))
+            lines.append("")
+        for r in rows_data:
+            line = hof.title(r)
+            if int(r["wins"] or 0) or int(r["losses"] or 0):
+                line += f" · {int(r['wins'])}-{int(r['losses'])}"
+            if str(r["photo_id"] or ""):
+                line += " 📷"
+            lines.append(line)
+    else:
+        lines.append("Пока пусто. Нажми «Найти турниры» — бот пройдёт по лигам, "
+                     "где команда играла, и соберёт места из таблиц.")
+    lines += ["", "<i>Названия команды за годы менялись — ищем по корню «Pull Up». "
+                  "Где место бот посчитал сам, это помечено: подтверди его или "
+                  "поставь своё.</i>"]
+    buttons = [[InlineKeyboardButton("🔎 Найти турниры", callback_data="coach:hof:scan")]]
+    for r in rows_data[:14]:
+        place = int(r["place"] or 0)
+        mark = hof.MEDALS.get(place, "🏀" if place else "▫️")
+        name = str(r["league"] or "турнир")
+        buttons.append([InlineKeyboardButton(
+            f"{mark} {name}"[:BTN_TEXT],
+            callback_data=f"coach:hof:one:{_hof_key(r)}")])
+    buttons.append([InlineKeyboardButton("⬅️ В раздел", callback_data="coach:team")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _hof_card(key: str) -> Tuple[str, InlineKeyboardMarkup]:
+    import hall_of_fame as hof
+    row = hof.get(*_hof_parts(key))
+    if not row:
+        return _hof_screen()
+    place = int(row["place"] or 0)
+    lines = [f"🏆 {row['league'] or 'Турнир'}", ""]
+    if str(row["season"] or ""):
+        lines.append(f"Сезон: {row['season']}")
+    lines.append(f"Команда: {row['team_name'] or '—'}")
+    if place:
+        out = f"Место: {place}"
+        if int(row["teams"] or 0):
+            out += f" из {int(row['teams'])}"
+        if int(row["guess"] or 0):
+            out += " — бот посчитал по очкам, подтверди"
+        lines.append(out)
+    else:
+        lines.append("Место: не записано")
+    if int(row["wins"] or 0) or int(row["losses"] or 0):
+        lines.append(f"Игры: {int(row['wins'])} побед, {int(row['losses'])} поражений")
+    if str(row["last_day"] or ""):
+        day = str(row["last_day"])[:10]
+        lines.append(f"Последняя игра: {day[8:10]}.{day[5:7]}.{day[:4]}")
+    if str(row["photo_id"] or ""):
+        lines.append("📷 Фото с награждения есть")
+
+    buttons = [[InlineKeyboardButton("🏅 Поставить место",
+                                     callback_data=f"coach:hof:place:{key}")]]
+    if place and int(row["guess"] or 0):
+        buttons.insert(0, [InlineKeyboardButton(
+            f"✅ Да, {place} место", callback_data=f"coach:hof:ok:{key}")])
+    photo_title = "📷 Заменить фото" if str(row["photo_id"] or "") else "📷 Добавить фото"
+    photo_row = [InlineKeyboardButton(photo_title, callback_data=f"coach:hof:pic:{key}")]
+    if str(row["photo_id"] or ""):
+        photo_row.append(InlineKeyboardButton(
+            "👁 Показать", callback_data=f"coach:hof:show:{key}"))
+    buttons.append(photo_row)
+    buttons.append([InlineKeyboardButton("🗑 Убрать из зала славы",
+                                         callback_data=f"coach:hof:del:{key}")])
+    buttons.append([InlineKeyboardButton("⬅️ К залу славы", callback_data="coach:hof")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _hof_places(key: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Выбор места кнопками. Дальше десятого — числом: столько турниров с
+    сорока командами не бывает, а ряды кнопок на телефоне кончаются."""
+    import hall_of_fame as hof
+    row = hof.get(*_hof_parts(key)) or {}
+    teams = int(row.get("teams") or 0)
+    top = min(teams, 10) if teams else 10
+    buttons, line = [], []
+    for place in range(1, top + 1):
+        line.append(InlineKeyboardButton(
+            f"{hof.MEDALS.get(place, '')}{place}",
+            callback_data=f"coach:hof:set:{key}:{place}"))
+        if len(line) == 5:
+            buttons.append(line)
+            line = []
+    if line:
+        buttons.append(line)
+    buttons.append([InlineKeyboardButton("✏️ Другое место",
+                                         callback_data=f"coach:hof:other:{key}")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"coach:hof:one:{key}")])
+    tail = f" (всего команд: {teams})" if teams else ""
+    return f"🏅 Какое место заняли?{tail}", InlineKeyboardMarkup(buttons)
+
+
+async def _hof_admin(query, context, user, parts: List[str]) -> None:
+    """Кнопки зала славы."""
+    import hall_of_fame as hof
+    what = parts[2] if len(parts) > 2 else ""
+    key = ":".join(parts[3:7]) if len(parts) > 6 else ""
+    uid = user.id
+
+    if what == "scan":
+        await query.edit_message_text(
+            "🔎 Иду по лигам за таблицами — это занимает с полминуты…")
+        found, added = await hof.scan()
+        text, markup = await asyncio.to_thread(_hof_screen)
+        text = (f"Просмотрел турниров: {found}. Новых записей: {added}.\n\n"
+                + text)
+    elif what == "one" and key:
+        text, markup = await asyncio.to_thread(_hof_card, key)
+    elif what == "place" and key:
+        text, markup = await asyncio.to_thread(_hof_places, key)
+    elif what == "set" and key and len(parts) > 7:
+        await asyncio.to_thread(hof.save, *_hof_parts(key), place=int(parts[7]),
+                                guess=0, set_by=str(uid))
+        text, markup = await asyncio.to_thread(_hof_card, key)
+        text = "🏅 Записал.\n\n" + text
+    elif what == "ok" and key:
+        row = await asyncio.to_thread(hof.get, *_hof_parts(key)) or {}
+        await asyncio.to_thread(hof.save, *_hof_parts(key),
+                                place=int(row.get("place") or 0), guess=0,
+                                set_by=str(uid))
+        text, markup = await asyncio.to_thread(_hof_card, key)
+        text = "✅ Подтвердил.\n\n" + text
+    elif what == "other" and key:
+        _clear_pending(uid)
+        _awaiting_place[uid] = key
+        text = "✏️ Пришли место числом.\n\nПередумал — /start."
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"coach:hof:one:{key}")]])
+    elif what == "pic" and key:
+        _clear_pending(uid)
+        _awaiting_hof[uid] = key
+        text = ("📷 Пришли фото с награждения — оно останется в зале славы "
+                "рядом с этим турниром.\n\nПередумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"coach:hof:one:{key}")]])
+    elif what == "show" and key:
+        row = await asyncio.to_thread(hof.get, *_hof_parts(key)) or {}
+        if str(row.get("photo_id") or ""):
+            await query.message.reply_photo(
+                row["photo_id"],
+                caption=f"🏆 {row.get('league') or 'Турнир'}"
+                        + (f" · {row['season']}" if row.get("season") else ""))
+        text, markup = await asyncio.to_thread(_hof_card, key)
+    elif what == "del" and key:
+        await asyncio.to_thread(hof.forget, *_hof_parts(key))
+        text, markup = await asyncio.to_thread(_hof_screen)
+        text = "🗑 Убрал.\n\n" + text
+    else:
+        text, markup = await asyncio.to_thread(_hof_screen)
+    await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def handle_hof_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фото с награждения. Храним file_id: картинка уже лежит у Телеграма."""
+    import hall_of_fame as hof
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_hof:
+        return
+    if not _can_see_reports(user):
+        _awaiting_hof.pop(user.id, None)
+        return
+    key = _awaiting_hof.pop(user.id)
+    file_id = ""
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+    elif msg.document and str(msg.document.mime_type or "").startswith("image/"):
+        file_id = msg.document.file_id
+    if not file_id:
+        _awaiting_hof[user.id] = key
+        await msg.reply_text("Это не фото. Пришли картинку.")
+        raise ApplicationHandlerStop
+    await asyncio.to_thread(hof.save, *_hof_parts(key), photo_id=file_id,
+                            set_by=str(user.id))
+    text, markup = await asyncio.to_thread(_hof_card, key)
+    await msg.reply_text("📷 Сохранил.\n\n" + text, reply_markup=markup,
+                         parse_mode="HTML")
+    raise ApplicationHandlerStop
+
+
+async def handle_hof_place(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Место, введённое числом."""
+    import hall_of_fame as hof
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_place:
+        return
+    if not _can_see_reports(user):
+        _awaiting_place.pop(user.id, None)
+        return
+    raw = (msg.text or "").strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= 99:
+        await msg.reply_text("Пришли место числом: 1, 2, 3…")
+        raise ApplicationHandlerStop
+    key = _awaiting_place.pop(user.id)
+    await asyncio.to_thread(hof.save, *_hof_parts(key), place=int(raw), guess=0,
+                            set_by=str(user.id))
+    text, markup = await asyncio.to_thread(_hof_card, key)
+    await msg.reply_text("🏅 Записал.\n\n" + text, reply_markup=markup,
+                         parse_mode="HTML")
+    raise ApplicationHandlerStop
+
+
 # ─────────────────── лиги: какие турниры команда играет сейчас ───────────────────
 
 
@@ -11190,6 +11426,52 @@ def _league_close_ask(source: str, team_id: str) -> Tuple[str, InlineKeyboardMar
     return text, InlineKeyboardMarkup(rows)
 
 
+async def _league_result(source: str, team_id: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Итог закрытой лиги: спрашиваем место сразу, пока сезон свежий.
+
+    Лига, которую закрыли и забыли, через год превращается в «а какое мы там
+    заняли?». Поэтому место спрашиваем в ту же минуту и подсказываем то, что
+    нашли в таблице."""
+    import hall_of_fame as hof
+    import json
+    import league_sync
+    team = next((t for t in league_sync.our_teams(include_closed=True)
+                 if t["source"] == source and str(t["team_id"]) == str(team_id)), None)
+    if not team:
+        return await asyncio.to_thread(_leagues_screen)
+    season, stage = str(team.get("season_id") or ""), str(team.get("stage_id") or "")
+    ctx = {}
+    if team.get("ctx_json"):
+        try:
+            ctx = json.loads(team["ctx_json"])
+        except (ValueError, TypeError):
+            ctx = {}
+    key = f"{source}:{season}:{stage}:{team_id}"
+    got = await hof.look_up(source, season, stage, team_id, ctx)
+    wins, losses, last = await asyncio.to_thread(
+        hof._our_record, source, season, stage, team_id)
+    await asyncio.to_thread(
+        hof.save, source, season, stage, team_id,
+        league=_league_title(team), season=str(ctx.get("season") or ""),
+        team_name=str(got.get("name") or team.get("name") or ""),
+        place=int(got.get("place") or 0), teams=int(got.get("teams") or 0),
+        wins=wins, losses=losses, last_day=last,
+        guess=0 if got.get("sure") else 1)
+    text, markup = await asyncio.to_thread(_hof_card, key)
+    head = "🏁 Лига закрыта.\n\n"
+    if not got:
+        head += "Итоговую таблицу лига не отдала — поставь место сам.\n\n"
+    elif got.get("sure"):
+        head += "Лига говорит, что заняли это место. Так?\n\n"
+    elif got.get("shared"):
+        head += ("По очкам выходит это место, но его делят две команды — "
+                 "решала личная встреча. Поставь, как было.\n\n")
+    else:
+        head += ("Посчитал по очкам — у SLPRO готового места в таблице нет. "
+                 "Подтверди или поставь своё.\n\n")
+    return head + text, markup
+
+
 async def _leagues_admin(query, user, parts: List[str]) -> None:
     """Кнопки раздела «Лиги»."""
     import league_sync
@@ -11204,8 +11486,8 @@ async def _leagues_admin(query, user, parts: List[str]) -> None:
     elif what == "close2" and team:
         await asyncio.to_thread(league_sync.close, src, team, True)
         log.info(f"Лига закрыта: {src}:{team} (тренер {user.id})")
-        text, markup = await asyncio.to_thread(_league_card, src, team)
-        text = "🏁 Закрыл.\n\n" + text
+        await query.edit_message_text("🏁 Закрыл. Смотрю итоговую таблицу…")
+        text, markup = await _league_result(src, team)
     elif what == "open" and team:
         await asyncio.to_thread(league_sync.close, src, team, False)
         log.info(f"Лига открыта: {src}:{team} (тренер {user.id})")
@@ -12271,6 +12553,14 @@ def main() -> None:
     app.add_handler(MessageHandler(
         (filters.VOICE | filters.AUDIO) & filters.ChatType.PRIVATE,
         handle_note_voice), group=19)
+    # Зал славы: фото с награждения и место числом — своими группами, как всё
+    # остальное, что ждёт ответа от одного человека.
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.IMAGE) & filters.ChatType.PRIVATE,
+        handle_hof_photo), group=20)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_hof_place), group=21)
     # Картинка значка приходит фотографией или файлом — своя группа, с
     # текстовыми диалогами не пересекается.
     app.add_handler(MessageHandler(

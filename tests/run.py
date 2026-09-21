@@ -27,7 +27,7 @@ SUITES = ["test_buttons.py", "test_flows.py", "test_private.py",
           "test_season_fees.py", "test_privacy_forget.py",
           "test_group_league_pay.py", "test_gone_patronymic.py",
           "test_video_notes.py", "test_lineup_scope.py",
-          "test_leagues_closed.py"]
+          "test_leagues_closed.py", "test_hall_of_fame.py"]
 
 
 def main() -> int:

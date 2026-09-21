@@ -78,6 +78,11 @@ class FakeMessage:
         # Отправленные файлы держим целиком: выгрузку состава проверяют по
         # содержимому, а не по факту «что-то ушло».
         self.documents: List[Dict[str, Any]] = []
+        # Присланные из экрана фотографии: зал славы показывает фото
+        # награждения, и проверять надо, что ушло именно оно.
+        self.photos: List[Dict[str, Any]] = []
+        self.photo: List[Any] = []
+        self.document = None
 
     def get_bot(self):
         return self._bot
@@ -85,6 +90,11 @@ class FakeMessage:
     async def reply_text(self, text="", reply_markup=None, **kw):
         self.replies.append({"text": text, "markup": reply_markup})
         return FakeMessage(text=text, bot=self._bot)
+
+    async def reply_photo(self, photo=None, **kw):
+        self.replies.append({"text": kw.get("caption", "<фото>"), "markup": None})
+        self.photos.append({"photo": photo, **kw})
+        return FakeMessage(bot=self._bot)
 
     async def reply_document(self, document=None, **kw):
         self.replies.append({"text": "<файл>", "markup": None})
