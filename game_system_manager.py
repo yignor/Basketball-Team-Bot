@@ -250,6 +250,20 @@ class GameSystemManager:
         except (TypeError, ValueError):
             return None
 
+    def _topic_for(self, kind: str, default: Optional[int],
+                   game_info: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Топик для сообщения с учётом лиги этой игры.
+
+        Правил нет — возвращаем то, что стояло в «Конфиге»: настройка, которой
+        не касались, не должна ничего менять."""
+        try:
+            import topic_routes
+            scope = topic_routes.scope_of("infobasket", (game_info or {}).get("comp_id"))
+            return topic_routes.topic_for(kind, scope, default)
+        except Exception as e:
+            print(f"⚠️ Маршрут топика не прочитался ({kind}): {e}")
+            return default
+
     def _get_automation_entry(self, key: str) -> Dict[str, Any]:
         if not key:
             return {}
@@ -917,7 +931,9 @@ class GameSystemManager:
             document = stream
 
         try:
-            message_thread_id: Optional[int] = self.calendar_events_topic_id
+            message_thread_id: Optional[int] = self._topic_for(
+                AUTOMATION_KEY_CALENDAR_EVENTS, self.calendar_events_topic_id,
+                game_info)
             
             # Отправляем календарь во все настроенные чаты
             for chat_id in chat_ids:
@@ -1000,7 +1016,8 @@ class GameSystemManager:
 
         message = "\n".join(lines)
 
-        message_thread_id: Optional[int] = self.game_updates_topic_id
+        message_thread_id: Optional[int] = self._topic_for(
+            AUTOMATION_KEY_GAME_UPDATES, self.game_updates_topic_id, game_info)
 
         # Отправляем уведомление во все настроенные чаты
         try:
@@ -1882,7 +1899,8 @@ class GameSystemManager:
             ]
             
             # Отправляем опрос во все настроенные чаты (с проверкой топика)
-            message_thread_id = self.game_poll_topic_id
+            message_thread_id = self._topic_for(
+                AUTOMATION_KEY_GAME_POLLS, self.game_poll_topic_id, game_info)
             poll_messages = []
             
             for chat_id in chat_ids:
@@ -2540,14 +2558,31 @@ class GameSystemManager:
             if game_link:
                 print("🎮 Мониторинг результатов будет запущен автоматически за 5 минут до игры")
 
-            # Отправляем сообщение во все настроенные чаты
+            # Отправляем сообщение во все настроенные чаты.
+            # Топик у анонсов раньше не учитывался вовсе: в «Конфиге» он был
+            # пуст, и сообщение всегда падало в общий чат. Теперь он работает
+            # так же, как у остальных сообщений, — и его можно развести по лигам.
             messages = []
+            thread_id = self._topic_for(
+                AUTOMATION_KEY_GAME_ANNOUNCEMENTS, self.game_announcement_topic_id,
+                game_info)
             for chat_id in chat_ids:
-                message = await bot.send_message(
-                    chat_id=int(chat_id) if chat_id.isdigit() or (chat_id.startswith('-') and chat_id[1:].isdigit()) else chat_id,
-                    text=announcement_text,
-                    parse_mode='HTML'
-                )
+                send_kwargs: Dict[str, Any] = {
+                    "chat_id": int(chat_id) if chat_id.isdigit() or (chat_id.startswith('-') and chat_id[1:].isdigit()) else chat_id,
+                    "text": announcement_text,
+                    "parse_mode": 'HTML',
+                }
+                if thread_id is not None:
+                    send_kwargs["message_thread_id"] = thread_id
+                try:
+                    message = await bot.send_message(**send_kwargs)
+                except Exception as primary_error:
+                    if thread_id is None or "Message thread not found" not in str(primary_error):
+                        raise
+                    print(f"⚠️ Топик {thread_id} не найден в чате {chat_id}, "
+                          "отправляю анонс в основной чат")
+                    send_kwargs.pop("message_thread_id", None)
+                    message = await bot.send_message(**send_kwargs)
                 messages.append(message)
                 print(f"✅ Анонс отправлен в чат {chat_id}")
             

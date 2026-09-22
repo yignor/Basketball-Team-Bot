@@ -128,6 +128,17 @@ class SlproManager:
         except Exception as e:
             print(f"⚠️ SLPRO: календарное событие не отправлено: {e}")
 
+    def _topic_for(self, kind: str, default: Optional[int],
+                   ctx: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Топик с учётом дивизиона SLPRO — у каждого турнира может быть свой."""
+        try:
+            import topic_routes
+            scope = topic_routes.scope_of("slpro", (ctx or {}).get("division"))
+            return topic_routes.topic_for(kind, scope, default)
+        except Exception as e:
+            print(f"⚠️ SLPRO: маршрут топика не прочитался ({kind}): {e}")
+            return default
+
     async def _send_to_chats(self, chat_ids: List[str], text: str,
                              topic_id: Optional[int]) -> List[Any]:
         """Отправка текста в несколько чатов с деградацией топика (как в
@@ -212,13 +223,14 @@ class SlproManager:
         )
 
         bot = self.bot
-        topic_id = self.gsm.game_poll_topic_id
+        topic_id = self._topic_for("GAME_POLLS", self.gsm.game_poll_topic_id, ctx)
         # Игра менялась — предупреждаем в топике «Изменения» (там же, где о
         # переносах пишет основная команда), а не в топике опросов: там уже
         # висит устаревший опрос, и новое сообщение рядом с ним теряется.
         if change_note:
-            await self._send_to_chats(self._updates_chat_ids() or chat_ids,
-                                      change_note, self.gsm.game_updates_topic_id)
+            await self._send_to_chats(
+                self._updates_chat_ids() or chat_ids, change_note,
+                self._topic_for("GAME_UPDATES", self.gsm.game_updates_topic_id, ctx))
         poll_messages = []
         for chat_id in chat_ids:
             kwargs: Dict[str, Any] = {
@@ -308,7 +320,10 @@ class SlproManager:
             f"📍 {game.get('game_address', '')}"
         )
 
-        messages = await self._send_to_chats(chat_ids, text, self.gsm.game_announcement_topic_id)
+        messages = await self._send_to_chats(
+            chat_ids, text,
+            self._topic_for("GAME_ANNOUNCEMENTS",
+                            self.gsm.game_announcement_topic_id, ctx))
         if not messages:
             return False
 
@@ -416,7 +431,12 @@ class SlproManager:
         text = "\n".join(lines)
         # Результат публикуем в чат анонсов (или опросов — тот же общий чат).
         chat_ids = self._announce_chat_ids() or self._poll_chat_ids()
-        messages = await self._send_to_chats(chat_ids, text, self.gsm.game_announcement_topic_id)
+        messages = await self._send_to_chats(
+            chat_ids, text,
+            self._topic_for("GAME_RESULTS",
+                            self._topic_for("GAME_ANNOUNCEMENTS",
+                                            self.gsm.game_announcement_topic_id, ctx),
+                            ctx))
         if not messages:
             return False
 

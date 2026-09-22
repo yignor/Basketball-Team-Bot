@@ -599,6 +599,17 @@ class GameResultsMonitorFinal:
                     game_results_topic_id = int(topic_candidate) if topic_candidate is not None else None
                 except (TypeError, ValueError):
                     game_results_topic_id = None
+            # Результаты можно развести по лигам: НБЛ — в свой топик, летняя —
+            # в свой. Ничего не настроено — остаётся топик из «Конфига».
+            try:
+                import topic_routes
+                game_results_topic_id = topic_routes.topic_for(
+                    "GAME_RESULTS",
+                    topic_routes.scope_of("infobasket", game_info.get("comp_id")
+                                          or game_info.get("competition_id")),
+                    game_results_topic_id)
+            except Exception as route_error:
+                print(f"⚠️ Маршрут топика результатов не прочитался: {route_error}")
             
             # Отправляем сообщение во все настроенные чаты
             try:

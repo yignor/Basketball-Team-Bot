@@ -2426,6 +2426,7 @@ def _clear_pending(uid: int) -> None:
     _awaiting_place.pop(uid, None)
     _awaiting_team.pop(uid, None)
     _team_draft.pop(uid, None)
+    _awaiting_topic.pop(uid, None)
 
 
 def _start_games_screen() -> Tuple[str, InlineKeyboardMarkup]:
@@ -5041,6 +5042,7 @@ def _cfg_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
         [InlineKeyboardButton("🏆 Лиги", callback_data="coach:lg:list")],
         [InlineKeyboardButton("👥 Команды в лигах", callback_data="coach:tm:list")],
+        [InlineKeyboardButton("📍 Куда что писать", callback_data="coach:rt:list")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -6541,6 +6543,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     if what == "tm":
         await _teams_admin(query, user, parts)
+        return
+    if what == "rt":
+        await _rt_admin(query, user, parts)
         return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
@@ -11107,6 +11112,219 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     raise ApplicationHandlerStop
 
 
+# ─────────────────── куда что писать: топики по лигам ───────────────────
+
+# Кто сейчас вводит номер топика: uid -> (вид сообщения, лига).
+_awaiting_topic: Dict[int, Tuple[str, str]] = {}
+
+
+def _rt_leagues() -> List[Dict[str, str]]:
+    """Лиги, между которыми есть смысл разводить сообщения.
+
+    Берём то, за чем бот следит: турниры Инфобаскета из конфигурации и
+    дивизионы SLPRO. Название ищем в зале славы — там оно уже разобрано по
+    турнирам («Летняя лига», «Невская Баскетбольная Лига»)."""
+    import hall_of_fame as hof
+    import topic_routes
+    from enhanced_duplicate_protection import duplicate_protection
+    names: Dict[str, str] = {}
+    try:
+        for row in hof.results():
+            if row["source"] == "infobasket" and row.get("org"):
+                names.setdefault(str(row["season_id"]), str(row["org"]))
+    except Exception as e:
+        log.warning(f"Названия турниров не прочитались: {e}")
+    out: List[Dict[str, str]] = []
+    try:
+        comps = duplicate_protection.get_config_ids().get("comp_ids") or []
+    except Exception as e:
+        log.warning(f"Турниры для маршрутов не прочитались: {e}")
+        comps = []
+    for comp in comps:
+        out.append({"scope": topic_routes.scope_of("infobasket", comp),
+                    "title": names.get(str(comp), f"Турнир {comp}"),
+                    "note": f"Инфобаскет · {comp}"})
+    try:
+        import slpro_client
+        for row in slpro_client.leagues_from_config():
+            out.append({"scope": topic_routes.scope_of("slpro", row["division"]),
+                        "title": row.get("name") or f"SLPRO {row['division']}",
+                        "note": f"SLPRO · {row['division']}"})
+    except Exception as e:
+        log.warning(f"Дивизионы SLPRO для маршрутов не прочитались: {e}")
+    return out
+
+
+def _rt_default_topic(kind: str) -> Optional[int]:
+    """Что стоит в «Конфиге» для этого вида сообщений."""
+    from enhanced_duplicate_protection import duplicate_protection
+    try:
+        entry = (duplicate_protection.get_config_ids().get("automation_topics")
+                 or {}).get(kind) or {}
+    except Exception as e:
+        log.warning(f"Топик из «Конфига» не прочитался ({kind}): {e}")
+        return None
+    raw = entry.get("topic_id", entry.get("topic_raw"))
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _rt_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    import topic_routes
+    leagues = _rt_leagues()
+    live = {r["scope"] for r in topic_routes.routes() if r["scope"]}
+    lines = ["📍 Куда что писать", "",
+             "Топик для каждого вида сообщений. Сперва — общее правило, а "
+             "дальше можно развести по лигам: НБЛ в свой топик, летняя в свой.",
+             ""]
+    lines.append("Общее правило — для всех лиг сразу.")
+    rows = [[InlineKeyboardButton("⚙️ Общее правило", callback_data="coach:rt:s::")]]
+    for lg in leagues:
+        mark = "📍 " if lg["scope"] in live else ""
+        lines.append(f"• {lg['title']} ({lg['note']})"
+                     + (" — свои правила" if lg["scope"] in live else ""))
+        rows.append([InlineKeyboardButton(f"{mark}{lg['title']}"[:BTN_TEXT],
+                                          callback_data=f"coach:rt:s:{lg['scope']}")])
+    if not leagues:
+        lines.append("Лиг пока нет — они появляются из «Конфига» и из «Команд в лигах».")
+    lines += ["", "<i>Где нет своего правила, работает общее; где нет и его — "
+                  "то, что стоит в «Конфиге».</i>"]
+    rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _rt_scope_title(scope: str) -> str:
+    if not scope:
+        return "Общее правило"
+    for lg in _rt_leagues():
+        if lg["scope"] == scope:
+            return f"{lg['title']} ({lg['note']})"
+    return scope
+
+
+def _rt_scope_screen(scope: str) -> Tuple[str, InlineKeyboardMarkup]:
+    """Правила одной лиги (или общие): по строке на вид сообщения."""
+    import topic_routes
+    lines = [f"📍 {_rt_scope_title(scope)}", ""]
+    rows = []
+    for i, (kind, title) in enumerate(topic_routes.KINDS):
+        default = _rt_default_topic(kind)
+        now = topic_routes.topic_for(kind, scope, default)
+        where = topic_routes.source_of(kind, scope)
+        lines.append(f"• {title}: {topic_routes.describe(now)} ({where})")
+        rows.append([InlineKeyboardButton(
+            f"{title}: {topic_routes.describe(now)}"[:BTN_TEXT],
+            callback_data=f"coach:rt:k:{scope}:{i}")])
+    if scope:
+        lines += ["", "<i>Что здесь не задано — берётся из общего правила.</i>"]
+    rows.append([InlineKeyboardButton("⬅️ К лигам", callback_data="coach:rt:list")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _rt_kind_screen(scope: str, index: int) -> Tuple[str, InlineKeyboardMarkup]:
+    import topic_routes
+    if not 0 <= index < len(topic_routes.KINDS):
+        return _rt_screen()
+    kind, title = topic_routes.KINDS[index]
+    default = _rt_default_topic(kind)
+    own = topic_routes.route(kind, scope)
+    now = topic_routes.topic_for(kind, scope, default)
+    lines = [f"📍 {title}", f"{_rt_scope_title(scope)}", "",
+             f"Сейчас: {topic_routes.describe(now)} "
+             f"({topic_routes.source_of(kind, scope)}).", "",
+             "Номер топика виден в ссылке на сообщение из него: "
+             "t.me/c/…/<b>1282</b>/456 — среднее число."]
+    rows = [[InlineKeyboardButton("✏️ Указать топик",
+                                  callback_data=f"coach:rt:set:{scope}:{index}")],
+            [InlineKeyboardButton("💬 В общий чат",
+                                  callback_data=f"coach:rt:chat:{scope}:{index}")]]
+    if own is not None:
+        back = "как в общем правиле" if scope else "как в «Конфиге»"
+        rows.append([InlineKeyboardButton(f"↩️ Убрать правило ({back})",
+                                          callback_data=f"coach:rt:off:{scope}:{index}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"coach:rt:s:{scope}")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _rt_admin(query, user, parts: List[str]) -> None:
+    """Кнопки раздела «Куда что писать». Ключ лиги занимает два места в
+    callback («infobasket:142849»), поэтому разбираем руками."""
+    import topic_routes
+    what = parts[2] if len(parts) > 2 else "list"
+    uid = user.id
+    scope, index = "", -1
+    if what in ("s", "k", "set", "chat", "off"):
+        source = parts[3] if len(parts) > 3 else ""
+        code = parts[4] if len(parts) > 4 else ""
+        scope = f"{source}:{code}" if source else ""
+        if what != "s":
+            try:
+                index = int(parts[5]) if len(parts) > 5 else -1
+            except ValueError:
+                index = -1
+
+    if what == "s":
+        text, markup = await asyncio.to_thread(_rt_scope_screen, scope)
+    elif what == "k":
+        text, markup = await asyncio.to_thread(_rt_kind_screen, scope, index)
+    elif what == "set" and index >= 0:
+        _clear_pending(uid)
+        _awaiting_topic[uid] = (topic_routes.KINDS[index][0], scope)
+        text = ("✏️ Пришли номер топика числом.\n\nОн виден в ссылке на "
+                "сообщение из этого топика: t.me/c/…/<b>1282</b>/456 — среднее "
+                "число.\n\nПередумал — /start.")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Назад", callback_data=f"coach:rt:k:{scope}:{index}")]])
+    elif what == "chat" and index >= 0:
+        await asyncio.to_thread(topic_routes.set_route,
+                                topic_routes.KINDS[index][0], scope,
+                                topic_routes.TO_CHAT, str(uid))
+        text, markup = await asyncio.to_thread(_rt_scope_screen, scope)
+        text = "💬 Буду писать в общий чат.\n\n" + text
+    elif what == "off" and index >= 0:
+        await asyncio.to_thread(topic_routes.set_route,
+                                topic_routes.KINDS[index][0], scope, None, str(uid))
+        text, markup = await asyncio.to_thread(_rt_scope_screen, scope)
+        text = "↩️ Убрал правило.\n\n" + text
+    else:
+        text, markup = await asyncio.to_thread(_rt_screen)
+    await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def handle_topic_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Номер топика, присланный тренером."""
+    import topic_routes
+    msg, user = update.effective_message, update.effective_user
+    if not msg or not user or user.id not in _awaiting_topic:
+        return
+    if not _can_see_reports(user):
+        _awaiting_topic.pop(user.id, None)
+        return
+    raw = (msg.text or "").strip()
+    # Из ссылки на сообщение тоже берём: так проще, чем объяснять, какое из
+    # чисел в ней топик.
+    digits = [p for p in raw.replace("/", " ").split() if p.isdigit()]
+    if "t.me" in raw and len(digits) >= 2:
+        number = digits[-2]
+    elif len(digits) == 1:
+        number = digits[0]
+    else:
+        await msg.reply_text("Нужен номер топика числом — или пришли ссылку на "
+                             "сообщение из него.")
+        raise ApplicationHandlerStop
+    kind, scope = _awaiting_topic.pop(user.id)
+    await asyncio.to_thread(topic_routes.set_route, kind, scope, int(number),
+                            str(user.id))
+    log.info(f"Маршрут топика: {kind} · {scope or 'общий'} → {number} "
+             f"(тренер {user.id})")
+    text, markup = await asyncio.to_thread(_rt_scope_screen, scope)
+    await msg.reply_text(f"📍 Записал: топик {number}.\n\n" + text,
+                         reply_markup=markup, parse_mode="HTML")
+    raise ApplicationHandlerStop
+
+
 # ─────────────────── зал славы: где играли и какие места занимали ───────────────────
 
 # Кто сейчас присылает фото с награждения: uid -> ключ турнира.
@@ -12880,6 +13098,9 @@ def main() -> None:
     app.add_handler(MessageHandler(
         filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
         handle_hof_team), group=22)
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        handle_topic_id), group=23)
     # Картинка значка приходит фотографией или файлом — своя группа, с
     # текстовыми диалогами не пересекается.
     app.add_handler(MessageHandler(
