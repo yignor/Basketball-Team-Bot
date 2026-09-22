@@ -129,6 +129,13 @@ async def check_birthdays():
                     birthday_topic_id = int(topic_candidate) if topic_candidate is not None else None
                 except (TypeError, ValueError):
                     birthday_topic_id = None
+            try:
+                import topic_routes
+                birthday_topic_id = topic_routes.topic_for(
+                    "BIRTHDAY_NOTIFICATIONS", topic_routes.GENERAL,
+                    birthday_topic_id)
+            except Exception as route_error:
+                print(f"⚠️ Маршрут топика дней рождения не прочитался: {route_error}")
 
             # Отправляем каждое сообщение во все настроенные чаты
             for i, message in enumerate(birthday_messages, 1):

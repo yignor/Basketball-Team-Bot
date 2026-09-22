@@ -216,6 +216,15 @@ class VotingPollsManager:
             topic_id = params_topic_id
         elif automation_topic_id is not None:
             topic_id = automation_topic_id
+        # Правило из бота сильнее «Конфига», но слабее топика, заданного у
+        # самого опроса: там тренер указал место осознанно и для этой строки.
+        if config.topic_id is None and params_topic_id is None:
+            try:
+                import topic_routes
+                topic_id = topic_routes.topic_for("VOTING_POLLS",
+                                                  topic_routes.GENERAL, topic_id)
+            except Exception as route_error:
+                print(f"⚠️ Маршрут топика тренировок не прочитался: {route_error}")
 
         additional_info = f"{question} | " + " · ".join(options)
         record = duplicate_protection.add_record(

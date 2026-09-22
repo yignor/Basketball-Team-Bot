@@ -54,6 +54,16 @@ def _fantasy_reply_markup(base_url: str, payload: str) -> ReplyKeyboardMarkup:
         resize_keyboard=True, is_persistent=True)
 
 
+def _fantasy_topic(default):
+    """Топик фэнтези. По умолчанию — туда же, куда анонсы, как было раньше."""
+    try:
+        import topic_routes
+        return topic_routes.topic_for("FANTASY", topic_routes.GENERAL, default)
+    except Exception as exc:
+        print(f"⚠️ Маршрут топика фэнтези не прочитался: {exc}")
+        return default
+
+
 class FantasyRunner:
     def __init__(self):
         # GameSystemManager — источник разрешённого конфига (бот, чат, топик),
@@ -111,7 +121,7 @@ class FantasyRunner:
 
         single = len(seasons) == 1
         chat_ids = self._get_chat_ids(self._ann_key, self.gsm._get_automation_entry(self._ann_key))
-        topic = self.gsm.game_announcement_topic_id
+        topic = _fantasy_topic(self.gsm.game_announcement_topic_id)
         for season in seasons:
             print(f"🏆 Фэнтези weekly: «{season['name']}», неделя {report_week}")
             fantasy.lock_week(season["id"], report_week)

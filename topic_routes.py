@@ -41,9 +41,26 @@ KINDS: List[Tuple[str, str]] = [
     ("GAME_ANNOUNCEMENTS", "Анонсы игр"),
     ("GAME_UPDATES", "Изменения в расписании"),
     ("GAME_RESULTS", "Результаты игр"),
+    ("GAME_VIDEO", "Трансляции и записи"),
+    ("ROSTER", "Состав на игру"),
     ("CALENDAR_EVENTS", "Календарь игры (.ics)"),
+    ("FANTASY", "Фэнтези"),
+    ("VOTING_POLLS", "Опросы тренировок"),
+    ("BIRTHDAY_NOTIFICATIONS", "Дни рождения"),
 ]
 KIND_NAMES = dict(KINDS)
+
+# Что имеет смысл разводить по лигам, а что нет: тренировки и дни рождения к
+# турниру отношения не имеют, у них только общее правило.
+LEAGUE_KINDS = ("GAME_POLLS", "GAME_ANNOUNCEMENTS", "GAME_UPDATES",
+                "GAME_RESULTS", "GAME_VIDEO", "ROSTER", "CALENDAR_EVENTS")
+
+
+def kinds_for(scope: str) -> List[Tuple[str, str]]:
+    """Виды сообщений, которые можно настроить в этой области."""
+    if not scope:
+        return list(KINDS)
+    return [(k, n) for k, n in KINDS if k in LEAGUE_KINDS]
 
 GENERAL = ""          # правило без лиги — «для всех»
 TO_CHAT = 0           # «в общий чат, без топика»
@@ -69,6 +86,37 @@ def scope_of(source: str, comp: Any) -> str:
     номер турнира у самой игры, у SLPRO — код дивизиона."""
     code = str(comp or "").strip().upper()
     return f"{str(source).strip().lower()}:{code}" if code and source else ""
+
+
+def scope_of_game(source: str, game_id: Any) -> str:
+    """Лига конкретной игры — по справочнику матчей.
+
+    У Инфобаскета турнир записан у самой игры, у SLPRO турнир задаётся
+    дивизионом, и он лежит в контексте нашей команды."""
+    import sheets_cache as sc
+    src = str(source or "").lower()
+    try:
+        sc.init_db()
+        if src == "slpro":
+            import json
+            with sc.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT ctx_json FROM league_teams WHERE source = 'slpro' "
+                    "AND ours = 1 AND ctx_json != '' LIMIT 1").fetchone()
+            if row:
+                ctx = json.loads(row["ctx_json"])
+                return scope_of("slpro", ctx.get("division"))
+            return ""
+        gid = str(game_id)
+        gid = gid.split("-", 1)[1] if gid.startswith("slpro-") else gid
+        with sc.get_connection() as conn:
+            row = conn.execute(
+                "SELECT season_id FROM game_meta WHERE source = ? AND game_id = ?",
+                (src, gid)).fetchone()
+        return scope_of(src, (row or {"season_id": ""})["season_id"]) if row else ""
+    except Exception as exc:
+        logger.warning("Лига игры %s:%s не определилась: %s", source, game_id, exc)
+        return ""
 
 
 # ─────────────────────────── правила ───────────────────────────

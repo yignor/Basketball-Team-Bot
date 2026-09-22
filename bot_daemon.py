@@ -2616,7 +2616,9 @@ async def _ng_send(query, user) -> None:
         return
     gsm = _game_manager()
     chat_ids = _result_chat_ids(gsm)
-    topic = getattr(gsm, "game_poll_topic_id", None)
+    topic = _topic_for_game("GAME_POLLS", draft.get("source", ""),
+                            draft.get("game_id", ""),
+                            getattr(gsm, "game_poll_topic_id", None))
     question = coach_newgame.poll_text(draft)
     sent: List[Dict[str, Any]] = []
     for chat_id in chat_ids:
@@ -6238,7 +6240,8 @@ async def _post_roster(query, source: str, game_id: str, user) -> None:
         return
     text = game_roster.post_text(game, people)
     gsm = await asyncio.to_thread(_game_manager)
-    topic = getattr(gsm, "game_poll_topic_id", None)
+    topic = await asyncio.to_thread(_topic_for_game, "ROSTER", source, game_id,
+                                    getattr(gsm, "game_poll_topic_id", None))
     posts = []
     for chat_id in _result_chat_ids(gsm):
         kwargs = {"chat_id": chat_id, "text": text}
@@ -9197,7 +9200,11 @@ async def handle_protocol_callback(update: Update, context: ContextTypes.DEFAULT
     text = _protocol_post_text(got)
     gsm = await asyncio.to_thread(_game_manager)
     chat_ids = _result_chat_ids(gsm)
-    topic = getattr(gsm, "game_updates_topic_id", None)
+    # Разбор протокола публикуется в тот же топик, что и изменения, — но и его
+    # можно развести по лигам, если игра опознана.
+    topic = _topic_for_game("GAME_UPDATES", got.get("source", ""),
+                            got.get("game_id", ""),
+                            getattr(gsm, "game_updates_topic_id", None))
     sent = 0
     for chat_id in chat_ids:
         kwargs: Dict[str, Any] = {"chat_id": int(chat_id), "text": text}
@@ -11175,6 +11182,18 @@ def _rt_leagues(closed: bool = False) -> List[Dict[str, str]]:
     return out
 
 
+def _topic_for_game(kind: str, source: str, game_id: Any,
+                    default: Optional[int]) -> Optional[int]:
+    """Топик для сообщения об этой игре — с учётом её лиги."""
+    try:
+        import topic_routes
+        return topic_routes.topic_for(
+            kind, topic_routes.scope_of_game(source, game_id), default)
+    except Exception as e:
+        log.warning(f"Маршрут топика не прочитался ({kind}): {e}")
+        return default
+
+
 def _rt_default_topic(kind: str) -> Optional[int]:
     """Что стоит в «Конфиге» для этого вида сообщений."""
     from enhanced_duplicate_protection import duplicate_protection
@@ -11261,7 +11280,11 @@ def _rt_scope_screen(scope: str) -> Tuple[str, InlineKeyboardMarkup]:
     import topic_routes
     lines = [f"📍 {_rt_scope_title(scope)}", ""]
     rows = []
-    for i, (kind, title) in enumerate(topic_routes.KINDS):
+    # Номер в кнопке — позиция в общем списке видов, а не в отфильтрованном:
+    # иначе у лиги и у общих правил один и тот же номер значил бы разное.
+    order = [k for k, _ in topic_routes.KINDS]
+    for kind, title in topic_routes.kinds_for(scope):
+        i = order.index(kind)
         default = _rt_default_topic(kind)
         now = topic_routes.topic_for(kind, scope, default)
         where = topic_routes.source_of(kind, scope)
@@ -11281,7 +11304,7 @@ def _rt_kind_screen(scope: str, index: int) -> Tuple[str, InlineKeyboardMarkup]:
     import topic_routes
     if not 0 <= index < len(topic_routes.KINDS):
         return _rt_screen()
-    kind, title = topic_routes.KINDS[index]
+    kind, title = topic_routes.KINDS[index]  # индекс общий для всех областей
     default = _rt_default_topic(kind)
     own = topic_routes.route(kind, scope)
     now = topic_routes.topic_for(kind, scope, default)

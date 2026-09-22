@@ -405,6 +405,15 @@ async def announce(bot: Any, game: Dict[str, Any], link: str,
     Кто попал сразу в две личные рассылки, получит одно сообщение."""
     import subscriptions
     text = _announce_text(game, link, live)
+    # Трансляции и записи можно отправить в свой топик — у каждой лиги свой.
+    try:
+        import topic_routes
+        topic_id = topic_routes.topic_for(
+            "GAME_VIDEO",
+            topic_routes.scope_of_game(game.get("source"), game.get("game_id")),
+            topic_id)
+    except Exception as exc:
+        print(f"⚠️ Маршрут топика трансляций не прочитался: {exc}")
     out = {"chat": 0, "team": 0, "players": 0}
     for cid in (chat_ids or []):
         try:

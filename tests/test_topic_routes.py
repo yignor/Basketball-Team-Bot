@@ -161,7 +161,13 @@ async def test_screens(bd) -> None:
     check("Опросы на игру" in text and "Результаты игр" in text,
           "внутри — виды сообщений")
     kinds = [c for c in cbs(markup) if c.startswith("coach:rt:k:")]
-    check(len(kinds) == len(tr.KINDS), "по кнопке на каждый вид")
+    check(len(kinds) == len(tr.kinds_for("infobasket:91090")),
+          "по кнопке на каждый вид, который разводится по лигам")
+    text, markup, _ = await press(bd, "coach:rt:s::")
+    common = [c for c in cbs(markup) if c.startswith("coach:rt:k:")]
+    check(len(common) == len(tr.KINDS),
+          "а в общих правилах — на все, включая тренировки и дни рождения")
+    check("Опросы тренировок" in text, "тренировки настраиваются только общим правилом")
 
     text, markup, _ = await press(bd, "coach:rt:k:infobasket:91090:0")
     check("Указать топик" in "".join(b.text for b in buttons_of(markup)),
@@ -188,6 +194,35 @@ async def test_screens(bd) -> None:
 
     text, markup, _ = await press(bd, "coach:rt:list")
     check("свои правила" not in text, "и лига больше не помечена")
+
+
+def test_all_kinds_covered() -> None:
+    """Каждый вид сообщений, который бот шлёт в чат, должен настраиваться."""
+    print("\n=== ничего не забыли ===")
+    import topic_routes as tr
+    kinds = dict(tr.KINDS)
+    for key in ("GAME_POLLS", "GAME_ANNOUNCEMENTS", "GAME_UPDATES", "GAME_RESULTS",
+                "GAME_VIDEO", "ROSTER", "CALENDAR_EVENTS", "FANTASY",
+                "VOTING_POLLS", "BIRTHDAY_NOTIFICATIONS"):
+        check(key in kinds, f"есть настройка: {kinds.get(key, key)}")
+    league = [k for k, _ in tr.kinds_for("infobasket:1")]
+    check("VOTING_POLLS" not in league and "BIRTHDAY_NOTIFICATIONS" not in league,
+          "тренировки и дни рождения по лигам не разводим")
+    check("GAME_VIDEO" in league and "ROSTER" in league,
+          "а трансляции и состав — разводим")
+
+    # Отправители действительно спрашивают маршрут: проверяем по коду, чтобы
+    # новый отправитель не появился мимо настройки.
+    import pathlib as pl
+    root = pl.Path(__file__).resolve().parent.parent
+    for name, kind in (("vk_video.py", "GAME_VIDEO"),
+                       ("run_fantasy.py", "FANTASY"),
+                       ("birthday_notifications.py", "BIRTHDAY_NOTIFICATIONS"),
+                       ("training_polls_enhanced.py", "VOTING_POLLS"),
+                       ("game_results_monitor_final.py", "GAME_RESULTS")):
+        body = (root / name).read_text()
+        check("topic_routes" in body and kind in body,
+              f"{name} спрашивает маршрут {kind}")
 
 
 async def test_close_comp(bd) -> None:
@@ -255,6 +290,7 @@ def main() -> int:
     bd = setup()
     test_resolution()
     test_senders_ask_routes()
+    test_all_kinds_covered()
     asyncio.run(test_screens(bd))
     asyncio.run(test_close_comp(bd))
     asyncio.run(test_close_slpro(bd))
