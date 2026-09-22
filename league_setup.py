@@ -119,10 +119,11 @@ def merge_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     про команду, а половина нет."""
     try:
         extra = saved()
+        closed = {code for (src, code) in closed_comps("infobasket")}
     except Exception as exc:
         logger.warning("Команды из бота не прочитались: %s", exc)
         return payload
-    if not extra:
+    if not extra and not closed:
         return payload
     comps = set(int(c) for c in (payload.get("comp_ids") or []))
     teams_ids = set(int(t) for t in (payload.get("team_ids") or []))
@@ -139,11 +140,77 @@ def merge_config(payload: Dict[str, Any]) -> Dict[str, Any]:
         if row["name"] and not entry.get("alt_name"):
             entry["alt_name"] = row["name"]
         teams[tid] = entry
+    # Закрытые соревнования выкидываем последними: бот перестаёт искать в них
+    # игры, ставить опросы и считать статистику. Лист «Конфиг» при этом цел —
+    # вернуть турнир можно той же кнопкой.
+    comps = {c for c in comps if str(c).upper() not in closed}
+    for tid, entry in teams.items():
+        entry["comp_ids"] = [c for c in (entry.get("comp_ids") or [])
+                             if str(c).upper() not in closed]
     payload = dict(payload)
     payload["comp_ids"] = sorted(comps)
     payload["team_ids"] = sorted(teams_ids)
     payload["teams"] = teams
     return payload
+
+
+# ─────────────────────────── закрытые соревнования ───────────────────────────
+
+# Турниры кончаются, а строки в «Конфиге» остаются: тренер не полезет править
+# лист ради прошлогодней квалификации. Закрытое соревнование бот перестаёт
+# считать своим — и в списках оно больше не мозолит глаза.
+
+COMPS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS closed_comps (
+    source    TEXT NOT NULL,
+    code      TEXT NOT NULL,          -- comp_id у Инфобаскета, дивизион у SLPRO
+    closed_at TEXT NOT NULL,
+    set_by    TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (source, code)
+);
+"""
+
+
+def _init_comps() -> None:
+    init()
+    with sheets_cache.get_connection() as conn:
+        conn.executescript(COMPS_SCHEMA)
+        conn.commit()
+
+
+def close_comp(source: str, code: Any, closed: bool = True,
+               set_by: Any = "") -> None:
+    """Закрывает соревнование или возвращает его. Данные остаются на месте."""
+    _init_comps()
+    key = (str(source).lower(), str(code).upper())
+    with sheets_cache.get_connection() as conn:
+        if closed:
+            conn.execute(
+                """INSERT INTO closed_comps (source, code, closed_at, set_by)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(source, code) DO UPDATE SET
+                       closed_at = excluded.closed_at, set_by = excluded.set_by""",
+                (*key, sheets_cache.now_iso(), str(set_by)))
+        else:
+            conn.execute("DELETE FROM closed_comps WHERE source = ? AND code = ?", key)
+        conn.commit()
+
+
+def closed_comps(source: Optional[str] = None) -> Dict[Tuple[str, str], str]:
+    """{(источник, код): когда закрыли}."""
+    _init_comps()
+    sql = "SELECT * FROM closed_comps"
+    args: List[Any] = []
+    if source:
+        sql += " WHERE source = ?"
+        args.append(str(source).lower())
+    with sheets_cache.get_connection() as conn:
+        return {(r["source"], r["code"]): r["closed_at"]
+                for r in conn.execute(sql, args)}
+
+
+def is_comp_closed(source: str, code: Any) -> bool:
+    return (str(source).lower(), str(code).upper()) in closed_comps()
 
 
 # ─────────────────────────── SLPRO ───────────────────────────

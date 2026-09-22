@@ -87,7 +87,9 @@ def cbs(markup) -> List[str]:
 async def test_screen(bd) -> None:
     print("\n=== экран лиг ===")
     text, markup, _ = await press(bd, "coach:cfg")
-    check("coach:lg:list" in cbs(markup), "в настройках есть вход в «Лиги»")
+    check("coach:rt:list" in cbs(markup), "в настройках есть «Соревнования»")
+    text, markup, _ = await press(bd, "coach:rt:list")
+    check("coach:lg:list" in cbs(markup), "а оттуда — сезоны команд")
 
     text, markup, _ = await press(bd, "coach:lg:list")
     check("Летний Кубок" in text and "Ночная лига" in text, "обе лиги в списке")

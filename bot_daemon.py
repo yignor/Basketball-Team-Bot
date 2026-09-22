@@ -5040,9 +5040,7 @@ def _cfg_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
-        [InlineKeyboardButton("🏆 Лиги", callback_data="coach:lg:list")],
-        [InlineKeyboardButton("👥 Команды в лигах", callback_data="coach:tm:list")],
-        [InlineKeyboardButton("📍 Куда что писать", callback_data="coach:rt:list")],
+        [InlineKeyboardButton("🏆 Соревнования", callback_data="coach:rt:list")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -11118,7 +11116,7 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 _awaiting_topic: Dict[int, Tuple[str, str]] = {}
 
 
-def _rt_leagues() -> List[Dict[str, str]]:
+def _rt_leagues(closed: bool = False) -> List[Dict[str, str]]:
     """Лиги, между которыми есть смысл разводить сообщения.
 
     Берём то, за чем бот следит: турниры Инфобаскета из конфигурации и
@@ -11140,6 +11138,17 @@ def _rt_leagues() -> List[Dict[str, str]]:
     except Exception as e:
         log.warning(f"Турниры для маршрутов не прочитались: {e}")
         comps = []
+    import league_setup
+    shut = league_setup.closed_comps()
+    if closed:
+        # Закрытых в конфигурации уже нет — собираем их из самой пометки.
+        for (source, code), when in sorted(shut.items()):
+            out.append({"scope": topic_routes.scope_of(source, code),
+                        "title": names.get(str(code), f"Турнир {code}")
+                        if source == "infobasket" else f"SLPRO {code}",
+                        "note": ("Инфобаскет" if source == "infobasket" else "SLPRO")
+                                + f" · {code} · закрыт {str(when)[:10]}"})
+        return out
     for comp in comps:
         out.append({"scope": topic_routes.scope_of("infobasket", comp),
                     "title": names.get(str(comp), f"Турнир {comp}"),
@@ -11171,27 +11180,59 @@ def _rt_default_topic(kind: str) -> Optional[int]:
         return None
 
 
-def _rt_screen() -> Tuple[str, InlineKeyboardMarkup]:
+def _rt_screen(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    """Соревнования: за чем следим, куда что пишем, что закрыли.
+
+    Один экран вместо трёх: тренер думает «турнирами», а не «маршрутами
+    сообщений» и «командами в лигах» по отдельности. Заводит турнир, ставит
+    ему топики, а когда сезон доигран — закрывает, и турнир перестаёт
+    мозолить глаза."""
+    import league_setup
     import topic_routes
     leagues = _rt_leagues()
     live = {r["scope"] for r in topic_routes.routes() if r["scope"]}
-    lines = ["📍 Куда что писать", "",
-             "Топик для каждого вида сообщений. Сперва — общее правило, а "
-             "дальше можно развести по лигам: НБЛ в свой топик, летняя в свой.",
-             ""]
-    lines.append("Общее правило — для всех лиг сразу.")
-    rows = [[InlineKeyboardButton("⚙️ Общее правило", callback_data="coach:rt:s::")]]
+    shut = len(league_setup.closed_comps())
+    lines = ["🏆 Соревнования", "",
+             "За чем бот следит: ищет игры, ставит опросы и анонсы, считает "
+             "статистику и фэнтези. У каждого турнира свои топики.", ""]
+    rows = []
     for lg in leagues:
         mark = "📍 " if lg["scope"] in live else ""
         lines.append(f"• {lg['title']} ({lg['note']})"
-                     + (" — свои правила" if lg["scope"] in live else ""))
+                     + (" — свои топики" if lg["scope"] in live else ""))
         rows.append([InlineKeyboardButton(f"{mark}{lg['title']}"[:BTN_TEXT],
                                           callback_data=f"coach:rt:s:{lg['scope']}")])
     if not leagues:
-        lines.append("Лиг пока нет — они появляются из «Конфига» и из «Команд в лигах».")
-    lines += ["", "<i>Где нет своего правила, работает общее; где нет и его — "
-                  "то, что стоит в «Конфиге».</i>"]
+        lines.append("Пока ни одного — заведи кнопкой ниже.")
+    lines += ["", "<i>Топики: сперва правило турнира, потом общее, потом то, "
+                  "что стоит в «Конфиге».</i>"]
+    if note:
+        lines += ["", note]
+    rows.append([InlineKeyboardButton("⚙️ Общие топики", callback_data="coach:rt:s::")])
+    rows.append([InlineKeyboardButton("➕ Добавить соревнование",
+                                      callback_data="coach:tm:list")])
+    if shut:
+        rows.append([InlineKeyboardButton(f"🗂 Закрытые ({shut})",
+                                          callback_data="coach:rt:shut")])
+    rows.append([InlineKeyboardButton("🗓 Сезоны команд", callback_data="coach:lg:list")])
     rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _rt_closed_screen() -> Tuple[str, InlineKeyboardMarkup]:
+    """Закрытые соревнования — чтобы вернуть, если лига возобновится."""
+    leagues = _rt_leagues(closed=True)
+    lines = ["🗂 Закрытые соревнования", "",
+             "Бот их не ищет и не считает. История цела: результаты, "
+             "статистика и зал славы на месте.", ""]
+    rows = []
+    for lg in leagues:
+        lines.append(f"• {lg['title']} ({lg['note']})")
+        rows.append([InlineKeyboardButton(f"↩️ {lg['title']}"[:BTN_TEXT],
+                                          callback_data=f"coach:rt:open:{lg['scope']}")])
+    if not leagues:
+        lines.append("Пусто.")
+    rows.append([InlineKeyboardButton("⬅️ К соревнованиям", callback_data="coach:rt:list")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -11219,7 +11260,9 @@ def _rt_scope_screen(scope: str) -> Tuple[str, InlineKeyboardMarkup]:
             callback_data=f"coach:rt:k:{scope}:{i}")])
     if scope:
         lines += ["", "<i>Что здесь не задано — берётся из общего правила.</i>"]
-    rows.append([InlineKeyboardButton("⬅️ К лигам", callback_data="coach:rt:list")])
+        rows.append([InlineKeyboardButton("🏁 Закрыть соревнование",
+                                          callback_data=f"coach:rt:close:{scope}")])
+    rows.append([InlineKeyboardButton("⬅️ К соревнованиям", callback_data="coach:rt:list")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -11255,7 +11298,7 @@ async def _rt_admin(query, user, parts: List[str]) -> None:
     what = parts[2] if len(parts) > 2 else "list"
     uid = user.id
     scope, index = "", -1
-    if what in ("s", "k", "set", "chat", "off"):
+    if what in ("s", "k", "set", "chat", "off", "close", "close2", "open"):
         source = parts[3] if len(parts) > 3 else ""
         code = parts[4] if len(parts) > 4 else ""
         scope = f"{source}:{code}" if source else ""
@@ -11267,6 +11310,33 @@ async def _rt_admin(query, user, parts: List[str]) -> None:
 
     if what == "s":
         text, markup = await asyncio.to_thread(_rt_scope_screen, scope)
+    elif what == "shut":
+        text, markup = await asyncio.to_thread(_rt_closed_screen)
+    elif what == "close" and scope:
+        text = (f"🏁 Закрыть «{_rt_scope_title(scope)}»?\n\n"
+                "Бот перестанет искать здесь игры, ставить опросы и анонсы, "
+                "считать статистику и фэнтези, а из списков турнир пропадёт.\n\n"
+                "Всё сыгранное останется: результаты, статистика, записи игр, "
+                "зал славы и оплаты.\n\n"
+                "Вернуть можно в «Закрытых».")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏁 Да, сезон доигран",
+                                  callback_data=f"coach:rt:close2:{scope}")],
+            [InlineKeyboardButton("⬅️ Отмена", callback_data=f"coach:rt:s:{scope}")]])
+    elif what in ("close2", "open") and scope:
+        import league_setup
+        source, _, code = scope.partition(":")
+        closing = what == "close2"
+        await asyncio.to_thread(league_setup.close_comp, source, code, closing,
+                                str(uid))
+        # Если это текущий сезон нашей команды, закрываем и его: иначе турнир
+        # пропал бы из опросов, но остался в фэнтези и в составе.
+        await asyncio.to_thread(_close_team_season, source, code, closing, uid)
+        log.info(f"Соревнование {'закрыто' if closing else 'возвращено'}: "
+                 f"{scope} (тренер {uid})")
+        text, markup = await asyncio.to_thread(
+            _rt_screen, ("🏁 Закрыл." if closing else "↩️ Вернул.")
+            + f" {_rt_scope_title(scope)}")
     elif what == "k":
         text, markup = await asyncio.to_thread(_rt_kind_screen, scope, index)
     elif what == "set" and index >= 0:
@@ -11291,6 +11361,28 @@ async def _rt_admin(query, user, parts: List[str]) -> None:
     else:
         text, markup = await asyncio.to_thread(_rt_screen)
     await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+def _close_team_season(source: str, code: str, closing: bool, uid: Any) -> None:
+    """Закрывает вместе с турниром и сезон нашей команды, если это он.
+
+    У Инфобаскета сезон команды — это тот же comp_id, у SLPRO — дивизион из
+    контекста. Совпало — закрываем и его, чтобы фэнтези и стартовый состав не
+    считали доигранный турнир текущим ([[league_sync.close]])."""
+    import json
+    import league_sync
+    for team in league_sync.our_teams(include_closed=True):
+        if team["source"] != source:
+            continue
+        mine = str(team.get("season_id") or "").upper() == str(code).upper()
+        if not mine and team.get("ctx_json"):
+            try:
+                ctx = json.loads(team["ctx_json"])
+                mine = str(ctx.get("division") or "").upper() == str(code).upper()
+            except (ValueError, TypeError):
+                mine = False
+        if mine:
+            league_sync.close(team["source"], team["team_id"], closing)
 
 
 async def handle_topic_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -11467,7 +11559,8 @@ def _teams_screen(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
         rows.append([InlineKeyboardButton(
             f"🗑 Убрать {row['name']} ({row['team_id']})"[:BTN_TEXT],
             callback_data=f"coach:tm:rms:{row['team_id']}")])
-    rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
+    rows.append([InlineKeyboardButton("⬅️ К соревнованиям",
+                                      callback_data="coach:rt:list")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -11906,7 +11999,8 @@ def _leagues_screen() -> Tuple[str, InlineKeyboardMarkup]:
             callback_data=f"coach:lg:one:{t['source']}:{t['team_id']}")])
     if not teams:
         lines.append("Лиг пока нет — они появляются из листа «Конфиг».")
-    rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
+    rows.append([InlineKeyboardButton("⬅️ К соревнованиям",
+                                      callback_data="coach:rt:list")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 

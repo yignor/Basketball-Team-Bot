@@ -286,13 +286,21 @@ def leagues_from_config() -> List[Dict[str, Any]]:
 
     out: List[Dict[str, Any]] = []
     seen = set()
+    # Закрытые тренером дивизионы не отдаём вовсе: сезон доигран, опросы и
+    # анонсы по нему не нужны.
+    closed = set()
+    try:
+        import league_setup
+        closed = {code for (src, code) in league_setup.closed_comps("slpro")}
+    except Exception as exc:
+        print(f"⚠️ SLPRO: закрытые дивизионы не прочитались: {exc}")
     # Команды, заведённые тренером через бота, живут рядом с листом: в лист
     # писать нельзя, а добавить турнир из бота должно быть можно.
     try:
         import league_setup
         for row in league_setup.slpro_rows():
             key = (row["division"].upper(), _normalize_name(row["team_name"]))
-            if row["team_name"] and key not in seen:
+            if row["team_name"] and key not in seen and key[0] not in closed:
                 seen.add(key)
                 out.append({"source": "slpro", "division": row["division"].upper(),
                             "team_name": row["team_name"], "name": row["name"]})
@@ -304,6 +312,8 @@ def leagues_from_config() -> List[Dict[str, Any]]:
             continue
         division, team_name, alt = cells[1].strip(), cells[2].strip(), cells[3].strip()
         if not team_name or team_name.upper() in _HEADER_CELLS:
+            continue
+        if division.upper() in closed:
             continue
         key = (division.upper(), _normalize_name(team_name))
         if key in seen:

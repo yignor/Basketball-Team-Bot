@@ -183,12 +183,74 @@ async def test_screens(bd) -> None:
     check("свои правила" not in text, "и лига больше не помечена")
 
 
+async def test_close_comp(bd) -> None:
+    print("\n=== закрыть соревнование ===")
+    import league_setup as ls
+    import league_sync
+    import sheets_cache
+    from enhanced_duplicate_protection import duplicate_protection
+
+    now = sheets_cache.now_iso()
+    with sheets_cache.get_connection() as conn:
+        conn.execute("DELETE FROM league_teams")
+        conn.execute(
+            "INSERT INTO league_teams (source, team_id, name, league, comp_id, "
+            "season_id, stage_id, ours, fetched_at) VALUES ('infobasket', '36502', "
+            "'PULL UP', 'Ночная лига', '91090', '91090', '', 1, ?)", (now,))
+        conn.commit()
+
+    before = duplicate_protection.get_config_ids().get("comp_ids") or []
+    check(91090 in before, f"турнир пока в конфигурации: {before}")
+
+    text, markup, _ = await press(bd, "coach:rt:close:infobasket:91090")
+    check("Закрыть" in text and "останется" in text,
+          "перед закрытием сказано, что изменится")
+    check(91090 in (duplicate_protection.get_config_ids().get("comp_ids") or []),
+          "сам вопрос ничего не закрыл")
+
+    text, markup, _ = await press(bd, "coach:rt:close2:infobasket:91090")
+    after = duplicate_protection.get_config_ids().get("comp_ids") or []
+    check(91090 not in after, f"бот больше не следит за турниром: {after}")
+    check(league_sync.is_closed("infobasket", "36502"),
+          "и сезон команды закрыт — фэнтези с составом его не считают")
+    check("Невская" not in text.split("Закрытые")[0],
+          "из списка соревнований он пропал")
+
+    text, markup, _ = await press(bd, "coach:rt:shut")
+    check("Невская Баскетбольная Лига" in text, "он в «Закрытых»")
+    check("coach:rt:open:infobasket:91090" in cbs(markup), "и его можно вернуть")
+
+    text, markup, _ = await press(bd, "coach:rt:open:infobasket:91090")
+    check(91090 in (duplicate_protection.get_config_ids().get("comp_ids") or []),
+          "вернули — снова следим")
+    check(not league_sync.is_closed("infobasket", "36502"),
+          "и сезон команды снова действующий")
+
+
+async def test_close_slpro(bd) -> None:
+    print("\n=== закрыть дивизион SLPRO ===")
+    import league_setup as ls
+    import slpro_client
+    ls.add_slpro("SUMC", "PullUp Farm", "Летний Кубок Дивизион C", added_by="test")
+    check(any(r["division"] == "SUMC" for r in slpro_client.leagues_from_config()),
+          "дивизион в списке турниров SLPRO")
+    await press(bd, "coach:rt:close2:slpro:SUMC")
+    check(not any(r["division"] == "SUMC" for r in slpro_client.leagues_from_config()),
+          "закрыли — опросы и анонсы по нему больше не идут")
+    await press(bd, "coach:rt:open:slpro:SUMC")
+    check(any(r["division"] == "SUMC" for r in slpro_client.leagues_from_config()),
+          "вернули — снова в строю")
+    ls.drop("SUMC", "slpro")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
     test_resolution()
     test_senders_ask_routes()
     asyncio.run(test_screens(bd))
+    asyncio.run(test_close_comp(bd))
+    asyncio.run(test_close_slpro(bd))
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

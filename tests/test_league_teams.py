@@ -110,7 +110,9 @@ async def test_screens(bd) -> None:
     print("\n=== экраны ===")
     import league_setup as ls
     text, markup, _ = await press(bd, "coach:cfg")
-    check("coach:tm:list" in cbs(markup), "в настройках есть «Команды в лигах»")
+    check("coach:rt:list" in cbs(markup), "в настройках есть «Соревнования»")
+    text, markup, _ = await press(bd, "coach:rt:list")
+    check("coach:tm:list" in cbs(markup), "а в них — добавление соревнования")
 
     text, markup, _ = await press(bd, "coach:tm:list")
     check("32086" in text, "добавленная команда в списке")

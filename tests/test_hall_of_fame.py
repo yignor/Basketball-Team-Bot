@@ -268,8 +268,9 @@ async def test_team_ids_moved(bd) -> None:
     print("\n=== команды в лигах — в настройках ===")
     text, markup, _ = await press(bd, "coach:hof")
     check("coach:tm:list" in cbs(markup), "из зала славы ведём в общий экран команд")
-    text, markup, _ = await press(bd, "coach:cfg")
-    check("coach:tm:list" in cbs(markup), "и в настройках он тоже есть")
+    text, markup, _ = await press(bd, "coach:rt:list")
+    check("coach:tm:list" in cbs(markup),
+          "и из «Соревнований» — добавление команды")
 
 
 async def test_photo(bd) -> None:
