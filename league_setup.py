@@ -213,6 +213,72 @@ def is_comp_closed(source: str, code: Any) -> bool:
     return (str(source).lower(), str(code).upper()) in closed_comps()
 
 
+# ─────────────────────────── имена турниров ───────────────────────────
+
+# Номер турнира человеку ничего не говорит: «Инфобаскет · 91090» — это
+# «НБЛ. Третий Дивизион». Имя спрашиваем у лиги один раз и запоминаем.
+
+NAMES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS comp_names (
+    source     TEXT NOT NULL,
+    code       TEXT NOT NULL,
+    title      TEXT NOT NULL DEFAULT '',
+    season     TEXT NOT NULL DEFAULT '',
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (source, code)
+);
+"""
+
+
+def _init_names() -> None:
+    init()
+    with sheets_cache.get_connection() as conn:
+        conn.executescript(NAMES_SCHEMA)
+        conn.commit()
+
+
+def set_comp_name(source: str, code: Any, title: str, season: str = "") -> None:
+    if not str(title or "").strip():
+        return
+    _init_names()
+    with sheets_cache.get_connection() as conn:
+        conn.execute(
+            """INSERT INTO comp_names (source, code, title, season, fetched_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(source, code) DO UPDATE SET
+                   title = excluded.title, season = excluded.season,
+                   fetched_at = excluded.fetched_at""",
+            (str(source).lower(), str(code).upper(), str(title).strip(),
+             str(season or "").strip(), sheets_cache.now_iso()))
+        conn.commit()
+
+
+def comp_names() -> Dict[Tuple[str, str], Dict[str, str]]:
+    _init_names()
+    with sheets_cache.get_connection() as conn:
+        return {(r["source"], r["code"]): {"title": r["title"], "season": r["season"]}
+                for r in conn.execute("SELECT * FROM comp_names")}
+
+
+async def learn_comp_names(comps: List[Any], source: str = "infobasket") -> int:
+    """Дочитывает имена турниров, которых ещё не знаем. Возвращает, сколько узнал.
+
+    Спрашиваем только неизвестные: у лиги имя разложено по уровням, и на один
+    турнир уходит до шести запросов."""
+    import hall_of_fame as hof
+    have = comp_names()
+    learned = 0
+    for comp in comps:
+        key = (str(source).lower(), str(comp).upper())
+        if key in have or not str(comp).isdigit():
+            continue
+        title, season = await hof._infobasket_title(comp)
+        if title:
+            set_comp_name(source, comp, title, season)
+            learned += 1
+    return learned
+
+
 # ─────────────────────────── SLPRO ───────────────────────────
 
 # У SLPRO числового id команды на сайте не видно, поэтому турнир задаётся

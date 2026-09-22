@@ -11140,18 +11140,29 @@ def _rt_leagues(closed: bool = False) -> List[Dict[str, str]]:
         comps = []
     import league_setup
     shut = league_setup.closed_comps()
+    known = league_setup.comp_names()
+
+    def _title(source: str, code: Any) -> str:
+        entry = known.get((str(source).lower(), str(code).upper())) or {}
+        title = str(entry.get("title") or "")
+        season = str(entry.get("season") or "")
+        if title:
+            return f"{title} · {season}" if season else title
+        if source == "infobasket":
+            return names.get(str(code), f"Турнир {code}")
+        return f"SLPRO {code}"
+
     if closed:
         # Закрытых в конфигурации уже нет — собираем их из самой пометки.
         for (source, code), when in sorted(shut.items()):
             out.append({"scope": topic_routes.scope_of(source, code),
-                        "title": names.get(str(code), f"Турнир {code}")
-                        if source == "infobasket" else f"SLPRO {code}",
+                        "title": _title(source, code),
                         "note": ("Инфобаскет" if source == "infobasket" else "SLPRO")
                                 + f" · {code} · закрыт {str(when)[:10]}"})
         return out
     for comp in comps:
         out.append({"scope": topic_routes.scope_of("infobasket", comp),
-                    "title": names.get(str(comp), f"Турнир {comp}"),
+                    "title": _title("infobasket", comp),
                     "note": f"Инфобаскет · {comp}"})
     try:
         import slpro_client
@@ -11359,8 +11370,26 @@ async def _rt_admin(query, user, parts: List[str]) -> None:
         text, markup = await asyncio.to_thread(_rt_scope_screen, scope)
         text = "↩️ Убрал правило.\n\n" + text
     else:
+        await _rt_learn_names()
         text, markup = await asyncio.to_thread(_rt_screen)
     await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+async def _rt_learn_names() -> None:
+    """Спрашиваем у лиги названия турниров, которых ещё не знаем.
+
+    Делаем это при открытии списка: имён обычно не хватает ровно один раз,
+    сразу после того, как турнир завели."""
+    import league_setup
+    from enhanced_duplicate_protection import duplicate_protection
+    try:
+        comps = list(duplicate_protection.get_config_ids().get("comp_ids") or [])
+        comps += [code for (src, code) in league_setup.closed_comps("infobasket")]
+        learned = await league_setup.learn_comp_names(comps)
+        if learned:
+            log.info(f"Названия турниров дочитаны: {learned}")
+    except Exception as e:
+        log.warning(f"Названия турниров не дочитались: {e}")
 
 
 def _close_team_season(source: str, code: str, closing: bool, uid: Any) -> None:
@@ -11641,6 +11670,11 @@ async def _teams_admin(query, user, parts: List[str]) -> None:
             # Разные стадии одного турнира ведут на один и тот же этап —
             # в журнале считаем то, за чем реально следим.
             track = sorted({c["track"] for c in draft.get("comps") or []})
+            # Лига уже сказала, как называется турнир, — запоминаем сразу,
+            # чтобы в списке не светился голый номер.
+            for c in draft.get("comps") or []:
+                await asyncio.to_thread(league_setup.set_comp_name, "infobasket",
+                                        c["track"], c.get("league", ""))
             await asyncio.to_thread(
                 league_setup.add, draft["team_id"], draft.get("name", ""),
                 track, str(uid))

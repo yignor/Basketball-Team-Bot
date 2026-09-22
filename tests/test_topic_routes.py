@@ -144,8 +144,15 @@ async def test_screens(bd) -> None:
     text, markup, _ = await press(bd, "coach:cfg")
     check("coach:rt:list" in cbs(markup), "в настройках тренера есть «Куда что писать»")
 
+    import league_setup
+    # Имя турнира бот узнаёт у лиги и запоминает — в списке должно стоять оно,
+    # а не «Турнир 91090».
+    league_setup.set_comp_name("infobasket", 91090, "Невская Баскетбольная Лига · "
+                               "НБЛ. Третий Дивизион", "24/25")
     text, markup, _ = await press(bd, "coach:rt:list")
-    check("Невская Баскетбольная Лига" in text, "лиги названы по-человечески")
+    check("НБЛ. Третий Дивизион · 24/25" in text,
+          "турнир назван так, как его знает лига")
+    check("Турнир 91090" not in text, "голого номера в списке нет")
     check("coach:rt:s::" in cbs(markup), "есть общее правило")
     check("coach:rt:s:infobasket:91090" in cbs(markup), "и вход в лигу")
     check(all(len(c.encode()) <= 64 for c in cbs(markup)), "кнопки в пределах 64 байт")
