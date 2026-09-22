@@ -254,8 +254,6 @@ def title(row: Dict[str, Any]) -> str:
     out = f"{mark} {where}{tail} — {place} место"
     if int(row.get("teams") or 0):
         out += f" из {int(row['teams'])}"
-    if int(row.get("guess") or 0):
-        out += " (бот посчитал, не подтверждено)"
     return out
 
 

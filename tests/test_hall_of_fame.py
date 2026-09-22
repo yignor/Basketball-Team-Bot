@@ -254,14 +254,12 @@ async def test_screens(bd) -> None:
     text, markup, _ = await press(bd, f"coach:hof:set:{key}:3")
     check(int(hof.get("slpro", "17", "160", "707")["place"]) == 3, "место поменялось")
 
-    # Подтверждение посчитанного ботом.
-    hof.save("slpro", "17", "160", "707", place=2, guess=1)
+    # Подтверждать место не надо: что лига написала, то и стоит, а не сходится
+    # — тренер ставит своё. Лишний шаг убрали.
     text, markup, _ = await press(bd, f"coach:hof:one:{key}")
-    check("подтверди" in text, "видно, что место посчитал бот")
-    check(f"coach:hof:ok:{key}" in cbs(markup), "есть кнопка «да, так и было»")
-    await press(bd, f"coach:hof:ok:{key}")
-    check(int(hof.get("slpro", "17", "160", "707")["guess"]) == 0,
-          "подтвердили — пометки «бот посчитал» больше нет")
+    check("подтверди" not in text, "лишнего «подтверди» на карточке нет")
+    check(not any(c.startswith("coach:hof:ok") for c in cbs(markup)),
+          "и кнопки подтверждения тоже")
 
 
 async def test_team_ids_moved(bd) -> None:
@@ -299,29 +297,6 @@ async def test_photo(bd) -> None:
     check("📷" in text, "на карточке помечено, что фото есть")
 
 
-async def test_close_asks_place(bd) -> None:
-    print("\n=== закрыли лигу — спросили место ===")
-    import hall_of_fame as hof
-    hof.forget("slpro", "17", "160", "707")
-
-    async def fake_look_up(source, season_id, stage_id, team_id, ctx=None):
-        return {"place": 1, "teams": 12, "wins": 14, "losses": 2,
-                "name": "PullUp Farm", "sure": False, "shared": False}
-
-    real = hof.look_up
-    hof.look_up = fake_look_up
-    try:
-        text, markup, _ = await press(bd, "coach:lg:close2:slpro:707")
-    finally:
-        hof.look_up = real
-    check("Посчитал по очкам" in text, "сказано, откуда место")
-    check("Место: 1" in text, "и какое оно")
-    check("coach:hof:ok:slpro:17:160:707" in cbs(markup), "можно подтвердить")
-    row = hof.get("slpro", "17", "160", "707")
-    check(row is not None and int(row["guess"]) == 1,
-          "записано как предположение, пока тренер не подтвердил")
-
-
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
@@ -334,7 +309,6 @@ def main() -> int:
     asyncio.run(test_screens(bd))
     asyncio.run(test_team_ids_moved(bd))
     asyncio.run(test_photo(bd))
-    asyncio.run(test_close_asks_place(bd))
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

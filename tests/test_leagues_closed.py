@@ -113,25 +113,11 @@ async def test_close_and_effects(bd) -> None:
     before = {s["source"] for s in coach_lineup.current_scopes()}
     check(before == {"slpro", "infobasket"}, f"пока обе открыты — оба турнира: {before}")
 
-    # Закрытие ведёт в зал славы — спросить про место. В сеть за таблицей
-    # отсюда не ходим.
-    import hall_of_fame as hof
-
-    async def no_table(source, season_id, stage_id, team_id, ctx=None):
-        return {}
-
-    real, hof.look_up = hof.look_up, no_table
-    try:
-        text, markup, _ = await press(bd, "coach:lg:close2:slpro:707")
-    finally:
-        hof.look_up = real
+    # Закрытие только закрывает: в зал славы за местом больше не ходим —
+    # это дублировало его собственный поиск, а кнопка успевала протухнуть.
+    text, markup, _ = await press(bd, "coach:lg:close2:slpro:707")
     check(league_sync.is_closed("slpro", "707"), "лига закрыта")
-    check("Лига закрыта" in text and "место" in text,
-          "сразу спросили про итоговое место")
-    check(any(c.startswith("coach:hof:place:") for c in cbs(markup)),
-          "и дали его поставить")
-
-    text, markup, _ = await press(bd, "coach:lg:one:slpro:707")
+    check("Закрыл" in text, "и сказано об этом")
     check("Вернуть" in "".join(b.text for b in buttons_of(markup)),
           "на карточке лиги предложено вернуть")
 

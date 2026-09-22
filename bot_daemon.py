@@ -11513,8 +11513,6 @@ def _hof_screen() -> Tuple[str, InlineKeyboardMarkup]:
             tail = f"{place} место"
             if int(best.get("teams") or 0):
                 tail += f" из {int(best['teams'])}"
-            if int(best.get("guess") or 0):
-                tail += " (бот посчитал)"
         else:
             tail = "место не записано"
         photo = " 📷" if any(str(r["photo_id"] or "") for r in box["rows"]) else ""
@@ -11734,8 +11732,6 @@ def _hof_group(key: str) -> Tuple[str, InlineKeyboardMarkup]:
             line += f" — {place} место"
             if int(r["teams"] or 0):
                 line += f" из {int(r['teams'])}"
-            if int(r["guess"] or 0):
-                line += " (бот посчитал)"
         else:
             line += " — место не записано"
         if int(r["wins"] or 0) or int(r["losses"] or 0):
@@ -11746,8 +11742,8 @@ def _hof_group(key: str) -> Tuple[str, InlineKeyboardMarkup]:
         buttons.append([InlineKeyboardButton(
             f"{mark} {r['league'] or 'турнир'}"[:BTN_TEXT],
             callback_data=f"coach:hof:one:{_hof_key(r)}")])
-    lines += ["", "<i>Итог лиги — та стадия, которую ты подтвердишь: её место "
-                  "и встанет в список сезонов.</i>"]
+    lines += ["", "<i>В списке сезонов стоит лучшее место лиги. Поставишь своё "
+                  "у стадии — встанет оно.</i>"]
     buttons.append([InlineKeyboardButton("⬅️ К залу славы", callback_data="coach:hof")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
@@ -11765,8 +11761,6 @@ def _hof_card(key: str) -> Tuple[str, InlineKeyboardMarkup]:
         out = f"Место: {place}"
         if int(row["teams"] or 0):
             out += f" из {int(row['teams'])}"
-        if int(row["guess"] or 0):
-            out += " — бот посчитал по очкам, подтверди"
         lines.append(out)
     else:
         lines.append("Место: не записано")
@@ -11780,9 +11774,6 @@ def _hof_card(key: str) -> Tuple[str, InlineKeyboardMarkup]:
 
     buttons = [[InlineKeyboardButton("🏅 Поставить место",
                                      callback_data=f"coach:hof:place:{key}")]]
-    if place and int(row["guess"] or 0):
-        buttons.insert(0, [InlineKeyboardButton(
-            f"✅ Да, {place} место", callback_data=f"coach:hof:ok:{key}")])
     photo_title = "📷 Заменить фото" if str(row["photo_id"] or "") else "📷 Добавить фото"
     photo_row = [InlineKeyboardButton(photo_title, callback_data=f"coach:hof:pic:{key}")]
     if str(row["photo_id"] or ""):
@@ -11846,13 +11837,6 @@ async def _hof_admin(query, context, user, parts: List[str]) -> None:
                                 guess=0, set_by=str(uid))
         text, markup = await asyncio.to_thread(_hof_card, key)
         text = "🏅 Записал.\n\n" + text
-    elif what == "ok" and key:
-        row = await asyncio.to_thread(hof.get, *_hof_parts(key)) or {}
-        await asyncio.to_thread(hof.save, *_hof_parts(key),
-                                place=int(row.get("place") or 0), guess=0,
-                                set_by=str(uid))
-        text, markup = await asyncio.to_thread(_hof_card, key)
-        text = "✅ Подтвердил.\n\n" + text
     elif what == "other" and key:
         _clear_pending(uid)
         _awaiting_place[uid] = key
@@ -12088,52 +12072,6 @@ def _league_close_ask(source: str, team_id: str) -> Tuple[str, InlineKeyboardMar
     return text, InlineKeyboardMarkup(rows)
 
 
-async def _league_result(source: str, team_id: str) -> Tuple[str, InlineKeyboardMarkup]:
-    """Итог закрытой лиги: спрашиваем место сразу, пока сезон свежий.
-
-    Лига, которую закрыли и забыли, через год превращается в «а какое мы там
-    заняли?». Поэтому место спрашиваем в ту же минуту и подсказываем то, что
-    нашли в таблице."""
-    import hall_of_fame as hof
-    import json
-    import league_sync
-    team = next((t for t in league_sync.our_teams(include_closed=True)
-                 if t["source"] == source and str(t["team_id"]) == str(team_id)), None)
-    if not team:
-        return await asyncio.to_thread(_leagues_screen)
-    season, stage = str(team.get("season_id") or ""), str(team.get("stage_id") or "")
-    ctx = {}
-    if team.get("ctx_json"):
-        try:
-            ctx = json.loads(team["ctx_json"])
-        except (ValueError, TypeError):
-            ctx = {}
-    key = f"{source}:{season}:{stage}:{team_id}"
-    got = await hof.look_up(source, season, stage, team_id, ctx)
-    wins, losses, last = await asyncio.to_thread(
-        hof._our_record, source, season, stage, team_id)
-    await asyncio.to_thread(
-        hof.save, source, season, stage, team_id,
-        league=_league_title(team), season=str(ctx.get("season") or ""),
-        team_name=str(got.get("name") or team.get("name") or ""),
-        place=int(got.get("place") or 0), teams=int(got.get("teams") or 0),
-        wins=wins, losses=losses, last_day=last,
-        guess=0 if got.get("sure") else 1)
-    text, markup = await asyncio.to_thread(_hof_card, key)
-    head = "🏁 Лига закрыта.\n\n"
-    if not got:
-        head += "Итоговую таблицу лига не отдала — поставь место сам.\n\n"
-    elif got.get("sure"):
-        head += "Лига говорит, что заняли это место. Так?\n\n"
-    elif got.get("shared"):
-        head += ("По очкам выходит это место, но его делят две команды — "
-                 "решала личная встреча. Поставь, как было.\n\n")
-    else:
-        head += ("Посчитал по очкам — у SLPRO готового места в таблице нет. "
-                 "Подтверди или поставь своё.\n\n")
-    return head + text, markup
-
-
 async def _leagues_admin(query, user, parts: List[str]) -> None:
     """Кнопки раздела «Лиги»."""
     import league_sync
@@ -12148,8 +12086,8 @@ async def _leagues_admin(query, user, parts: List[str]) -> None:
     elif what == "close2" and team:
         await asyncio.to_thread(league_sync.close, src, team, True)
         log.info(f"Лига закрыта: {src}:{team} (тренер {user.id})")
-        await query.edit_message_text("🏁 Закрыл. Смотрю итоговую таблицу…")
-        text, markup = await _league_result(src, team)
+        text, markup = await asyncio.to_thread(_league_card, src, team)
+        text = "🏁 Закрыл.\n\n" + text
     elif what == "open" and team:
         await asyncio.to_thread(league_sync.close, src, team, False)
         log.info(f"Лига открыта: {src}:{team} (тренер {user.id})")
