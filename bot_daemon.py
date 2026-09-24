@@ -5043,6 +5043,7 @@ def _cfg_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👁 Предпросмотр писем", callback_data="coach:prev")],
         [InlineKeyboardButton("🗓 Даты оповещений", callback_data="coach:sched")],
         [InlineKeyboardButton("🏆 Соревнования", callback_data="coach:rt:list")],
+        [InlineKeyboardButton("🔌 Что делает бот", callback_data="coach:ft:list")],
         [InlineKeyboardButton("⬅️ В раздел", callback_data="coach:main")],
     ])
 
@@ -6547,6 +6548,9 @@ async def handle_coach_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     if what == "rt":
         await _rt_admin(query, user, parts)
+        return
+    if what == "ft":
+        await _features_admin(query, user, parts)
         return
     if what == "field":
         await _players_editor(query, user, parts, "coach:field")
@@ -8750,6 +8754,8 @@ async def _game_schedule(app: Application) -> None:
         source, gid = game["source"], game["game_id"]
         try:
             if kind == "collect":
+                if not _feature_on("roster_collect"):
+                    continue
                 await asyncio.to_thread(game_roster.ensure_state, game)
                 text, markup = await asyncio.to_thread(_roster_screen, source, gid)
                 sent = await _tell_coaches(
@@ -8759,6 +8765,8 @@ async def _game_schedule(app: Application) -> None:
                 log.info(f"Состав на {source}:{gid} запрошен у тренеров ({sent})")
 
             elif kind == "coach_pay":
+                if not _feature_on("game_pay"):
+                    continue
                 # Тренеру — ДО того, как бот напишет людям: он должен успеть
                 # поправить состав и суммы. За два дня это ещё предупреждение
                 # («вот кому уйдёт»), после игры — уже список должников.
@@ -8780,6 +8788,8 @@ async def _game_schedule(app: Application) -> None:
                          f"{len(rows)}, тренерам {sent}")
 
             elif kind in ("player_before", "player_pay"):
+                if not _feature_on("game_pay"):
+                    continue
                 ahead = kind == "player_before"
                 stat = await _remind_game_debtors(app, game, ahead=ahead)
                 if _reminder_worth_telling(stat):
@@ -11117,6 +11127,52 @@ async def handle_fee_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     raise ApplicationHandlerStop
 
 
+# ─────────────────── что бот делает, а что нет ───────────────────
+
+
+def _features_screen(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    """Выключатели: тренер сам решает, чем бот занимается.
+
+    Не удаление, а тишина: данные, экраны и кнопки на месте, бот просто
+    перестаёт писать сам. Включил обратно — поехало дальше."""
+    import features
+    lines = ["🔌 Что делает бот", "",
+             "Выключенное бот просто перестаёт делать сам. Ничего не пропадает: "
+             "кнопки и данные на месте, включить можно в любой момент.", ""]
+    rows = []
+    for key, title, what, _default in features.FEATURES:
+        on = features.enabled(key)
+        lines.append(f"{'✅' if on else '⭕️'} {title} — {what}")
+        rows.append([InlineKeyboardButton(
+            f"{'✅' if on else '⭕️'} {title}"[:BTN_TEXT],
+            callback_data=f"coach:ft:{key}")])
+    off = features.off_list()
+    lines += ["", ("<i>Выключено: " + ", ".join(off) + ".</i>") if off
+              else "<i>Сейчас работает всё.</i>"]
+    if note:
+        lines += ["", note]
+    rows.append([InlineKeyboardButton("⬅️ К настройкам", callback_data="coach:cfg")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _features_admin(query, user, parts: List[str]) -> None:
+    """Нажатие на выключатель: сразу переключаем, без лишнего вопроса.
+
+    Подтверждение тут не нужно — действие мгновенно обратимо тем же нажатием,
+    и ничего не удаляет."""
+    import features
+    key = parts[2] if len(parts) > 2 else ""
+    note = ""
+    if key in features.TITLES:
+        now = not features.enabled(key)
+        await asyncio.to_thread(features.set_enabled, key, now)
+        log.info(f"Выключатель {key} → {'вкл' if now else 'выкл'} (тренер {user.id})")
+        note = (f"{'✅ Включил' if now else '⭕️ Выключил'}: "
+                f"{features.TITLES[key]}.")
+    text, markup = await asyncio.to_thread(_features_screen, note)
+    await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+
+
 # ─────────────────── куда что писать: топики по лигам ───────────────────
 
 # Кто сейчас вводит номер топика: uid -> (вид сообщения, лига).
@@ -11180,6 +11236,16 @@ def _rt_leagues(closed: bool = False) -> List[Dict[str, str]]:
     except Exception as e:
         log.warning(f"Дивизионы SLPRO для маршрутов не прочитались: {e}")
     return out
+
+
+def _feature_on(name: str) -> bool:
+    """Не выключил ли тренер эту часть бота (см. features)."""
+    try:
+        import features
+        return features.enabled(name)
+    except Exception as e:
+        log.warning(f"Выключатели не прочитались ({name}): {e}")
+        return True
 
 
 def _topic_for_game(kind: str, source: str, game_id: Any,
@@ -12840,10 +12906,13 @@ async def _background_loop(app: Application) -> None:
             await asyncio.to_thread(_refresh_db_cache)
             await asyncio.to_thread(_periodic_push_local_changes)
             await _sync_leagues()
-            await _coach_reports(app)
-            await _pay_schedule(app)
+            if _feature_on("coach_reports"):
+                await _coach_reports(app)
+            if _feature_on("dues_month"):
+                await _pay_schedule(app)
             await _game_schedule(app)
-            await _personal_digests(app)
+            if _feature_on("personal_digests"):
+                await _personal_digests(app)
             try:
                 dropped = await asyncio.to_thread(sheets_cache.purge_expired_access)
                 if dropped:
@@ -12857,8 +12926,9 @@ async def _background_loop(app: Application) -> None:
                 await asyncio.to_thread(speech.unload_if_idle)
             except Exception as e:
                 log.warning(f"Распознавание: выгрузка модели не прошла: {e}")
-            await _recount_achievements()
-            await _tell_about_badges(app)
+            if _feature_on("badges"):
+                await _recount_achievements()
+                await _tell_about_badges(app)
             await _catch_up_prices()
             # Новые голосующие появляются каждую неделю, а ники меняются ещё
             # чаще: опознаём по ходу, а не только при перезапуске демона.
@@ -12870,9 +12940,11 @@ async def _background_loop(app: Application) -> None:
                                          for f in found))
             except Exception as e:
                 log.warning(f"Опознание по голосам: {e}")
-            await _send_starting_lineups(app)
+            if _feature_on("starting_lineups"):
+                await _send_starting_lineups(app)
             await _nightly_backup(app)
-            await _watch_broadcasts(app)
+            if _feature_on("game_video"):
+                await _watch_broadcasts(app)
             await _refresh_pay_summary()
             await _warm_fantasy_pool()
             await _keep_funnel_warm()

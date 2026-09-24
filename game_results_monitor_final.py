@@ -589,6 +589,13 @@ class GameResultsMonitorFinal:
                 print(f"❌ Ошибка добавления записи в Google Sheets: {protection_result.get('error')}")
                 # Продолжаем отправку, но логируем ошибку
             
+            try:
+                import features
+                if not features.enabled("game_results"):
+                    print("⏭️ Результаты игр выключены тренером")
+                    return False
+            except Exception as feature_error:
+                print(f"⚠️ Выключатели не прочитались: {feature_error}")
             # Получаем topic_id для результатов игр
             game_results_topic_id = None
             if isinstance(game_results_entry, dict):

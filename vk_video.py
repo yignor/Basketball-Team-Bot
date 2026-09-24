@@ -404,6 +404,12 @@ async def announce(bot: Any, game: Dict[str, Any], link: str,
         только если он в ЭТОЙ игре выходил на площадку.
     Кто попал сразу в две личные рассылки, получит одно сообщение."""
     import subscriptions
+    try:
+        import features
+        if not features.enabled("game_video"):
+            return {"chat": 0, "team": 0, "players": 0}
+    except Exception as exc:
+        print(f"⚠️ Выключатели не прочитались: {exc}")
     text = _announce_text(game, link, live)
     # Трансляции и записи можно отправить в свой топик — у каждой лиги свой.
     try:

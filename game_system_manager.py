@@ -899,6 +899,8 @@ class GameSystemManager:
         opponent: str,
         form_color: str,
     ) -> None:
+        if not self._feature_on("calendar_events"):
+            return
         # Получаем список чатов для отправки календарей
         calendar_events_entry = self._get_automation_entry(AUTOMATION_KEY_CALENDAR_EVENTS)
         chat_ids = get_chat_ids_for_automation(AUTOMATION_KEY_CALENDAR_EVENTS, calendar_events_entry)
@@ -1788,6 +1790,16 @@ class GameSystemManager:
     
 
     
+    @staticmethod
+    def _feature_on(name: str) -> bool:
+        """Не выключил ли тренер эту часть бота."""
+        try:
+            import features
+            return features.enabled(name)
+        except Exception as e:
+            print(f"⚠️ Выключатели не прочитались ({name}): {e}")
+            return True
+
     async def create_game_poll(self, game_info: Dict) -> Optional[str]:
         """Создает опрос для игры и возвращает текст вопроса"""
         if not self.bot:
@@ -1899,6 +1911,9 @@ class GameSystemManager:
             ]
             
             # Отправляем опрос во все настроенные чаты (с проверкой топика)
+            if not self._feature_on("game_polls"):
+                print("⏭️ Опросы на игру выключены тренером")
+                return None
             message_thread_id = self._topic_for(
                 AUTOMATION_KEY_GAME_POLLS, self.game_poll_topic_id, game_info)
             poll_messages = []
@@ -2562,6 +2577,9 @@ class GameSystemManager:
             # Топик у анонсов раньше не учитывался вовсе: в «Конфиге» он был
             # пуст, и сообщение всегда падало в общий чат. Теперь он работает
             # так же, как у остальных сообщений, — и его можно развести по лигам.
+            if not self._feature_on("game_announcements"):
+                print("⏭️ Анонсы игр выключены тренером")
+                return False
             messages = []
             thread_id = self._topic_for(
                 AUTOMATION_KEY_GAME_ANNOUNCEMENTS, self.game_announcement_topic_id,

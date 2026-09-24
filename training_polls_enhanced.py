@@ -207,6 +207,14 @@ class VotingPollsManager:
         close_date_source = params.get("close_date") or automation_settings.get("close_date")
         close_date = self._parse_close_date(close_date_source, today)
 
+        try:
+            import features
+            if not features.enabled("training_polls"):
+                print("⏭️ Опросы тренировок выключены тренером")
+                return False
+        except Exception as feature_error:
+            print(f"⚠️ Выключатели не прочитались: {feature_error}")
+
         params_topic_id = self._parse_int(params.get("topic_id"))
         automation_topic_id = self._get_automation_topic(AUTOMATION_VOTING_KEY)
         topic_id = None

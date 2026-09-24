@@ -267,6 +267,13 @@ class FantasyRunner:
         return sent
 
     async def run(self, only: Optional[str] = None) -> None:
+        try:
+            import features
+            if not features.enabled("fantasy"):
+                print("⏭️ Фэнтези выключено тренером")
+                return
+        except Exception as feature_error:
+            print(f"⚠️ Выключатели не прочитались: {feature_error}")
         if only in (None, "ingest"):
             await self.ingest()
         if only == "schedule":

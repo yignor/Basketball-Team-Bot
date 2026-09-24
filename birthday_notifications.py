@@ -120,6 +120,14 @@ async def check_birthdays():
                 print("❌ Не настроены ID чатов для уведомлений о днях рождения (ни в таблице, ни в Secrets)")
                 return
             
+            try:
+                import features
+                if not features.enabled("birthdays"):
+                    print("⏭️ Поздравления выключены тренером")
+                    return
+            except Exception as feature_error:
+                print(f"⚠️ Выключатели не прочитались: {feature_error}")
+
             birthday_topic_id = None
             if isinstance(birthday_settings, dict):
                 topic_candidate = birthday_settings.get("topic_id")
