@@ -294,6 +294,45 @@ async def test_new_season_by_link(bd) -> None:
     ls.drop("32086")
 
 
+async def test_league_down(bd) -> None:
+    """Лига лежит — говорим об этом, а не «такой команды нет»."""
+    print("\n=== лига не отвечает ===")
+    import league_setup as ls
+
+    real_up = ls._league_up
+
+    async def dead(session):
+        return False
+
+    ls._league_up = dead
+    try:
+        got = await ls.discover_comp("32086", "150296")
+        check(got.get("offline") and "не отвечает" in got.get("error", ""),
+              "поиск турнира честно говорит, что лига молчит")
+        got = await ls.discover("32086")
+        check(got.get("offline"), "и поиск по id команды тоже")
+
+        await press(bd, "coach:tm:add")
+        msg = FakeMessage(text="https://www.fbp.ru/team.html?teamId=32086&"
+                               "compId=150296", bot=BOT, user=COACH)
+        try:
+            await bd.handle_hof_team(FakeUpdate(message=msg, user=COACH),
+                                     FakeContext(BOT))
+        except Exception as exc:
+            if type(exc).__name__ != "ApplicationHandlerStop":
+                raise
+        shown = msg.replies[-1]["text"]
+        check("не отвечает" in shown, f"тренеру сказано про лигу: {shown[:60]}")
+        check("такой команды нет" not in shown,
+              "и не сказано, что команды нет, — это была бы неправда")
+        check(bd._awaiting_team.get(COACH.id),
+              "ссылку можно прислать ещё раз, не проходя меню заново")
+        check(not ls.saved(), "ничего не сохранено")
+    finally:
+        ls._league_up = real_up
+        bd._awaiting_team.pop(COACH.id, None)
+
+
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
@@ -302,6 +341,7 @@ def main() -> int:
     asyncio.run(test_screens(bd))
     asyncio.run(test_slpro(bd))
     asyncio.run(test_new_season_by_link(bd))
+    asyncio.run(test_league_down(bd))
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

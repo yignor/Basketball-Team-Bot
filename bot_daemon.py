@@ -12072,7 +12072,12 @@ async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         pass
     if found.get("error"):
-        await msg.reply_text(f"⚠️ {found['error'].capitalize()}.")
+        text = found["error"]
+        if found.get("offline"):
+            # Лига лежит — оставляем ожидание ссылки: когда она поднимется,
+            # тренеру достаточно прислать то же самое ещё раз, не проходя меню.
+            _awaiting_team[user.id] = True
+        await msg.reply_text(f"⚠️ {text[:1].upper() + text[1:]}.")
         raise ApplicationHandlerStop
     if not found.get("name"):
         await msg.reply_text(f"⚠️ Лига про команду {digits} ничего не знает. "

@@ -367,6 +367,27 @@ async def _jget(session, url: str) -> Any:
         return None
 
 
+OFFLINE = ("лига сейчас не отвечает — это у них, а не в ссылке. Пришли её "
+           "ещё раз через несколько минут")
+
+
+async def _league_up(session) -> bool:
+    """Отвечает ли лига вообще.
+
+    Любой HTTP-ответ, даже 404, — «да»: важно отличить «сервер лежит» от
+    «такой команды нет». Без этой проверки молчащая лига выглядела как
+    неправильная ссылка: тренер минуту ждал трёх таймаутов подряд и получал
+    «в этом турнире такой команды нет» — про команду, которая там есть."""
+    import aiohttp
+    try:
+        async with session.get(f"{API}/Widget/GetTeamSeasons/1?format=json",
+                               timeout=aiohttp.ClientTimeout(total=12)):
+            return True
+    except Exception as exc:
+        logger.warning("Лига не отвечает: %s", type(exc).__name__)
+        return False
+
+
 async def _standings_level(session, comp_id: Any, team_id: str) -> Optional[Dict[str, Any]]:
     """От турнира игры поднимаемся до уровня, где есть таблица.
 
@@ -433,6 +454,9 @@ async def discover_comp(team_id: Any, comp_id: Any) -> Dict[str, Any]:
     import hall_of_fame as hof
     out: Dict[str, Any] = {"name": "", "comps": [], "games": 0}
     async with aiohttp.ClientSession() as session:
+        if not await _league_up(session):
+            out.update(error=OFFLINE, offline=True)
+            return out
         page = await _jget(session, f"{API}/Widget/TeamPage/{team_id}?format=json&lang=ru")
         out["name"] = str((page or {}).get("TeamNameRu") or "")
         level = await _standings_level(session, comp_id, str(team_id))
@@ -466,6 +490,9 @@ async def discover(team_id: Any) -> Dict[str, Any]:
     import aiohttp
     out: Dict[str, Any] = {"name": "", "comps": []}
     async with aiohttp.ClientSession() as session:
+        if not await _league_up(session):
+            out.update(error=OFFLINE, offline=True)
+            return out
         page = await _jget(session, f"{API}/Widget/TeamPage/{team_id}?format=json&lang=ru")
         out["name"] = str((page or {}).get("TeamNameRu") or "")
         seasons = await _jget(session, f"{API}/Widget/GetTeamSeasons/{team_id}?format=json&lang=ru")
