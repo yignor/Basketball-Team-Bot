@@ -71,9 +71,15 @@ async def _infobasket_teams() -> List[Dict[str, Any]]:
         import stats_backfill
         cfg = duplicate_protection.get_config_ids()
         comps = cfg.get("comp_ids") or []
-        comp = str(comps[0]) if comps else ""
+        first = str(comps[0]) if comps else ""
         for tid in (cfg.get("team_ids") or []):
             entry = (cfg.get("teams") or {}).get(tid) or {}
+            # Турнир у каждой команды свой: у одной летняя лига, у другой НБЛ.
+            # Раньше всем подставлялся первый турнир из конфигурации, и сезон
+            # второй команды оказывался чужим — а по нему считаются и цифры
+            # состава, и закрытие лиги.
+            own = [str(c) for c in (entry.get("comp_ids") or [])]
+            comp = own[-1] if own else first
             name = ""
             try:
                 info = await stats_backfill.fetch_infobasket_team(tid, comp)

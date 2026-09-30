@@ -11663,7 +11663,7 @@ def _teams_screen(note: str = "") -> Tuple[str, InlineKeyboardMarkup]:
                   "дивизиона из адреса турнира и названием, как на сайте.</i>"]
     if note:
         lines += ["", note]
-    rows = [[InlineKeyboardButton("➕ Инфобаскет: по id",
+    rows = [[InlineKeyboardButton("➕ Инфобаскет: по ссылке",
                                   callback_data="coach:tm:add")],
             [InlineKeyboardButton("➕ SLPRO: дивизион и название",
                                   callback_data="coach:tm:slpro")]]
@@ -11723,9 +11723,14 @@ def _team_found_screen(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
             tail = f" · {c['games']} игр" if c.get("games") else ""
             place = (f" · {c['place']} место из {c['teams']}"
                      if c.get("place") and c.get("teams") else "")
-            lines.append(f"• {c['league']} — {c['comp']}{place}{tail}")
+            season = f" · {c['season']}" if c.get("season") else ""
+            lines.append(f"• {c['league']}{season}{place}{tail}")
         lines += ["", "Начну искать их игры, ставить опросы и анонсы, считать "
                       "статистику и фэнтези. Зал славы тоже увидит эту команду."]
+        if not any(int(c.get("games") or 0) for c in comps):
+            lines += ["", "Расписание лига пока не выложила — это нормально в "
+                          "начале сезона. Бот проверяет его сам и заведёт "
+                          "опросы, как только игры появятся."]
     else:
         lines += ["Турниров у неё лига не показывает — сыгранных игр в последнем "
                   "сезоне нет.", "",
@@ -11744,8 +11749,11 @@ async def _teams_admin(query, user, parts: List[str]) -> None:
     if what == "add":
         _clear_pending(uid)
         _awaiting_team[uid] = True
-        text = ("👥 Пришли id команды в Инфобаскете — число из адреса её "
-                "страницы (teamId=36502).\n\nПередумал — /start.")
+        text = ("👥 Пришли ссылку на страницу команды в лиге — целиком, как "
+                "скопировалась.\n\nВ ней есть и команда, и турнир, и нового "
+                "сезона это тоже касается: расписания ещё нет, а завести уже "
+                "можно.\n\nМожно и просто id команды числом.\n\n"
+                "Передумал — /start.")
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(
             "⬅️ Назад", callback_data="coach:tm:list")]])
     elif what == "ok":
@@ -11761,7 +11769,8 @@ async def _teams_admin(query, user, parts: List[str]) -> None:
             # чтобы в списке не светился голый номер.
             for c in draft.get("comps") or []:
                 await asyncio.to_thread(league_setup.set_comp_name, "infobasket",
-                                        c["track"], c.get("league", ""))
+                                        c["track"], c.get("league", ""),
+                                        c.get("season", ""))
             await asyncio.to_thread(
                 league_setup.add, draft["team_id"], draft.get("name", ""),
                 track, str(uid))
@@ -12018,17 +12027,24 @@ async def handle_hof_team(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if _awaiting_team.get(user.id) == "slpro":
         await _take_slpro_team(msg, user, raw)
         raise ApplicationHandlerStop
-    digits = "".join(ch for ch in raw if ch.isdigit())
+    got = league_setup.parse_link(raw)
+    digits, comp = got["team_id"], got["comp_id"]
     if not digits:
-        await msg.reply_text("Нужно число — id команды из адреса её страницы.")
+        await msg.reply_text("Пришли ссылку на страницу команды или её id числом.")
         raise ApplicationHandlerStop
     _awaiting_team.pop(user.id, None)
     wait = await msg.reply_text("🔎 Спрашиваю лигу, что это за команда…")
-    found = await league_setup.discover(digits)
+    # Ссылка с турниром — единственный способ завести новый сезон: игр ещё
+    # нет, и по играм турнир не найти.
+    found = (await league_setup.discover_comp(digits, comp) if comp
+             else await league_setup.discover(digits))
     try:
         await wait.delete()
     except Exception:
         pass
+    if found.get("error"):
+        await msg.reply_text(f"⚠️ {found['error'].capitalize()}.")
+        raise ApplicationHandlerStop
     if not found.get("name"):
         await msg.reply_text(f"⚠️ Лига про команду {digits} ничего не знает. "
                              "Проверь номер на её странице.")

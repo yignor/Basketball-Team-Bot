@@ -123,11 +123,22 @@ async def test_screens(bd) -> None:
     # Добавление: бот спрашивает лигу и ждёт подтверждения.
     await press(bd, "coach:tm:add")
     real = ls.discover
+    real_comp = ls.discover_comp
 
     async def fake_discover(team_id):
         return FOUND if str(team_id) == "36502" else {"name": "", "comps": []}
 
-    ls.discover = fake_discover
+    async def fake_comp(team_id, comp_id):
+        if str(team_id) == "32086" and str(comp_id) == "150296":
+            return {"name": "Pull Up", "games": 0, "comps": [
+                {"comp_id": 150296, "track": 150295, "season": "26/27",
+                 "league": "Невская баскетбольна лига · НБЛ. Третий дивизион",
+                 "comp": "Группа А", "teams": 12, "place": 6, "games": 0,
+                 "last_day": ""}]}
+        return {"name": "Pull Up", "comps": [],
+                "error": "в этом турнире такой команды нет"}
+
+    ls.discover, ls.discover_comp = fake_discover, fake_comp
     try:
         msg = FakeMessage(text="36502", bot=BOT, user=COACH)
         try:
@@ -160,7 +171,7 @@ async def test_screens(bd) -> None:
         check(any("ничего не знает" in r["text"] for r in msg.replies),
               "про неизвестный номер сказали прямо")
     finally:
-        ls.discover = real
+        ls.discover, ls.discover_comp = real, real_comp
 
     text, markup, _ = await press(bd, "coach:tm:rm:36502")
     check(all(r["team_id"] != "36502" for r in ls.saved()), "убирается кнопкой")
@@ -232,6 +243,57 @@ async def test_slpro(bd) -> None:
     check(not ls.saved("slpro"), "убирается кнопкой")
 
 
+async def test_new_season_by_link(bd) -> None:
+    """Новый сезон: игр ещё нет, турнир заводится ссылкой на команду."""
+    print("\n=== новый сезон по ссылке ===")
+    import league_setup as ls
+    check(ls.parse_link("https://www.fbp.ru/team.html?teamId=32086&apiUrl="
+                        "https://reg.infobasket.su&compId=150296&lang=ru")
+          == {"team_id": "32086", "comp_id": "150296"}, "ссылка разобрана")
+    check(ls.parse_link("32086 150296")["comp_id"] == "150296",
+          "два числа — тоже команда и турнир")
+    check(ls.parse_link("32086")["comp_id"] == "", "одно число — только команда")
+    check(ls.parse_link("привет")["team_id"] == "", "мусор не выдаём за id")
+
+    real = ls.discover_comp
+
+    async def fake_comp(team_id, comp_id):
+        return {"name": "Pull Up", "games": 0, "comps": [
+            {"comp_id": 150296, "track": 150295, "season": "26/27",
+             "league": "Невская баскетбольна лига · НБЛ. Третий дивизион",
+             "comp": "Группа А", "teams": 12, "place": 6, "games": 0,
+             "last_day": ""}]}
+
+    ls.discover_comp = fake_comp
+    try:
+        await press(bd, "coach:tm:add")
+        msg = FakeMessage(text="https://www.fbp.ru/team.html?teamId=32086&"
+                               "apiUrl=https://reg.infobasket.su&compId=150296&lang=ru",
+                          bot=BOT, user=COACH)
+        try:
+            await bd.handle_hof_team(FakeUpdate(message=msg, user=COACH),
+                                     FakeContext(BOT))
+        except Exception as exc:
+            if type(exc).__name__ != "ApplicationHandlerStop":
+                raise
+        shown = msg.replies[-1]["text"]
+        check("НБЛ. Третий дивизион" in shown and "26/27" in shown,
+              "показали турнир нового сезона")
+        check("Расписание лига пока не выложила" in shown,
+              "и предупредили, что расписания ещё нет")
+
+        await press(bd, "coach:tm:ok")
+        saved = {r["team_id"]: r for r in ls.saved()}
+        check(saved.get("32086", {}).get("comps") == [150295],
+              f"следим за этапом нового сезона: {saved.get('32086', {}).get('comps')}")
+        names = ls.comp_names()
+        check("НБЛ" in (names.get(("infobasket", "150295")) or {}).get("title", ""),
+              "и имя турнира запомнили сразу")
+    finally:
+        ls.discover_comp = real
+    ls.drop("32086")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
@@ -239,6 +301,7 @@ def main() -> int:
     test_merge_into_config()
     asyncio.run(test_screens(bd))
     asyncio.run(test_slpro(bd))
+    asyncio.run(test_new_season_by_link(bd))
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

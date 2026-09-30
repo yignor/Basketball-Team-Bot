@@ -399,6 +399,64 @@ async def _standings_level(session, comp_id: Any, team_id: str) -> Optional[Dict
     return None
 
 
+def parse_link(raw: str) -> Dict[str, str]:
+    """Достаёт teamId и compId из ссылки лиги или из пары чисел.
+
+    Тренер копирует адрес страницы команды целиком — там уже есть и команда, и
+    турнир: «fbp.ru/team.html?teamId=32086&…&compId=150296». Просить его
+    выковыривать числа из адреса значит делать работу, которую бот делает
+    лучше."""
+    import re
+    text = str(raw or "")
+    team = re.search(r"teamId=(\d+)", text, re.I)
+    comp = re.search(r"compId=(\d+)", text, re.I)
+    out = {"team_id": team.group(1) if team else "",
+           "comp_id": comp.group(1) if comp else ""}
+    if not out["team_id"] and not out["comp_id"]:
+        # Без ссылки: «32086 150296» или просто «32086».
+        nums = [n for n in re.findall(r"\d{3,}", text)]
+        if nums:
+            out["team_id"] = nums[0]
+            if len(nums) > 1:
+                out["comp_id"] = nums[1]
+    return out
+
+
+async def discover_comp(team_id: Any, comp_id: Any) -> Dict[str, Any]:
+    """Что за турнир по его номеру и играет ли там наша команда.
+
+    Нужно для нового сезона: игр ещё нет, и по играм турнир не найти — а
+    ссылка на команду у тренера уже есть. Возвращает то же, что discover,
+    плюс сколько игр в расписании: их может не быть вовсе, и это нормально —
+    лига выкладывает календарь не сразу."""
+    import aiohttp
+    import hall_of_fame as hof
+    out: Dict[str, Any] = {"name": "", "comps": [], "games": 0}
+    async with aiohttp.ClientSession() as session:
+        page = await _jget(session, f"{API}/Widget/TeamPage/{team_id}?format=json&lang=ru")
+        out["name"] = str((page or {}).get("TeamNameRu") or "")
+        level = await _standings_level(session, comp_id, str(team_id))
+        if not level:
+            out["error"] = ("в этом турнире такой команды нет — проверь ссылку "
+                            "(нужен адрес страницы команды в нужном сезоне)")
+            return out
+        title, season = await hof._infobasket_title(comp_id)
+        cal = await _jget(session,
+                          f"{API}/Comp/GetCalendar/?comps={level['track']}&format=json")
+        games = cal if isinstance(cal, list) else (cal or {}).get("Games") or []
+        mine = [g for g in games
+                if str(g.get("TeamAid")) == str(team_id)
+                or str(g.get("TeamBid")) == str(team_id)]
+        out["games"] = len(mine)
+        out["comps"] = [{
+            "comp_id": level["comp_id"], "track": level.get("track") or level["comp_id"],
+            "league": title or f"Турнир {comp_id}", "comp": level.get("comp", ""),
+            "teams": level["teams"], "place": level["place"], "games": len(mine),
+            "last_day": "", "season": season,
+        }]
+    return out
+
+
 async def discover(team_id: Any) -> Dict[str, Any]:
     """Что лига знает про команду: имя и турниры, в которых она сейчас играет.
 
