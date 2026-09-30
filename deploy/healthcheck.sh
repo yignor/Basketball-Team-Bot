@@ -53,14 +53,25 @@ fi
 echo "▶️  Маршрутизация"
 # 38 — basketstat напрямую (лига режет иностранные IP), 39 — Cloudflare через
 # VPN (иначе туннель рвётся), 40-42 — Telegram у botuser через VPN.
+# 36–37 — Tailscale раньше полного туннеля AmneziaWG (иначе ssh по Tailscale
+# молчит при живом sshd).
 missing=""
-for prio in 38 39 40 41 42; do
+for prio in 36 37 38 39 40 41 42; do
   ip rule show | grep -qE "^${prio}:" || missing="$missing $prio"
 done
 if [ -z "$missing" ]; then
-  ok "правила 38–42 на месте"
+  ok "правила 36–42 на месте"
 else
   bad "нет правил:$missing → sudo /usr/local/sbin/basketball-bot-telegram-route.sh"
+fi
+# Правила могут стоять, а ответы всё равно уходить в VPN — проверяем сам путь.
+peer="$(ip route show table 52 2>/dev/null | awk '/^100\./ && $1 != "100.100.100.100" {print $1; exit}')"
+if [ -n "$peer" ]; then
+  if ip route get "$peer" 2>/dev/null | grep -q "dev tailscale0"; then
+    ok "ответы соседям по Tailscale идут через tailscale0"
+  else
+    bad "ответы соседям по Tailscale уходят в $(ip route get "$peer" 2>/dev/null | grep -o 'dev [a-z0-9]*' | head -1) — ssh по Tailscale не работает → sudo /usr/local/sbin/basketball-bot-telegram-route.sh"
+  fi
 fi
 
 echo "▶️  Расписание"
