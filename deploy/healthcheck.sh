@@ -53,14 +53,18 @@ fi
 echo "▶️  Маршрутизация"
 # 38 — basketstat напрямую (лига режет иностранные IP), 39 — Cloudflare через
 # VPN (иначе туннель рвётся), 40-42 — Telegram у botuser через VPN.
-# 36–37 — Tailscale раньше полного туннеля AmneziaWG (иначе ssh по Tailscale
-# молчит при живом sshd).
+# 36 — ответы соседям по Tailscale раньше полного туннеля AmneziaWG (иначе ssh
+# по Tailscale молчит при живом sshd). Правила 37 быть НЕ должно: оно пускает
+# сам Tailscale мимо VPN, и на прямом канале у него отваливается Funnel.
 missing=""
-for prio in 36 37 38 39 40 41 42; do
+for prio in 36 38 39 40 41 42; do
   ip rule show | grep -qE "^${prio}:" || missing="$missing $prio"
 done
+if ip rule show | grep -qE "^37:.*fwmark 0x80000"; then
+  bad "правило 37 пускает Tailscale мимо VPN — Funnel будет моргать → sudo ip rule del priority 37"
+fi
 if [ -z "$missing" ]; then
-  ok "правила 36–42 на месте"
+  ok "правила 36, 38–42 на месте"
 else
   bad "нет правил:$missing → sudo /usr/local/sbin/basketball-bot-telegram-route.sh"
 fi
