@@ -11238,6 +11238,35 @@ def _rt_leagues(closed: bool = False) -> List[Dict[str, str]]:
     return out
 
 
+# Сколько минут простоя считаем «долгим»: деплой укладывается в секунды, а
+# всё, что дольше, — это уже сеть, свет или перезагрузка.
+STALE_QUEUE_MINUTES = 10
+HEARTBEAT_KEY = "daemon_heartbeat"
+
+
+def _beat() -> None:
+    """Отметка «демон жив» — по ней на старте видно, сколько он не работал."""
+    try:
+        sheets_cache.set_setting(HEARTBEAT_KEY, sheets_cache.now_iso())
+    except Exception as e:
+        log.warning(f"Сердцебиение не записалось: {e}")
+
+
+def _offline_for() -> float:
+    """Сколько секунд бот не работал. 0 — если это первый запуск."""
+    from datetime import datetime
+    try:
+        raw = sheets_cache.get_setting(HEARTBEAT_KEY, "")
+        if not raw:
+            return 0.0
+        was = datetime.fromisoformat(str(raw))
+        now = datetime.fromisoformat(sheets_cache.now_iso())
+        return max(0.0, (now - was).total_seconds())
+    except Exception as e:
+        log.warning(f"Сердцебиение не прочиталось: {e}")
+        return 0.0
+
+
 def _feature_on(name: str) -> bool:
     """Не выключил ли тренер эту часть бота (см. features)."""
     try:
@@ -12918,6 +12947,7 @@ async def _background_loop(app: Application) -> None:
             # прямо в цикле событий они замораживают ВЕСЬ демон — и приём
             # сообщений, и фэнтези-API. Раз в пять минут по несколько секунд
             # — ровно те паузы, которые человек в чате принимает за «бот завис».
+            await asyncio.to_thread(_beat)
             await asyncio.to_thread(_refresh_poll_cache)
             await asyncio.to_thread(_refresh_db_cache)
             await asyncio.to_thread(_periodic_push_local_changes)
@@ -13301,10 +13331,21 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_group_callback, pattern=r"^pg:"))
     app.add_error_handler(_on_error)
 
+    # Очередь обновлений: при коротком перезапуске (деплой — секунды) её надо
+    # сохранить, иначе теряются голоса в опросах, отданные в этот момент. А
+    # после долгого простоя — выбросить: Телеграм хранит очередь сутки, и на
+    # возврате бот отвечает на каждое нажатие, сделанное за это время. Тренер
+    # получает десяток экранов подряд, а половина ответов ещё и протухшая
+    # («Query is too old»). Порог берём по своему же сердцебиению.
+    stale = _offline_for()
+    drop = stale > STALE_QUEUE_MINUTES * 60
+    if drop:
+        log.info(f"Бот не работал {stale / 60:.0f} мин — накопленные нажатия "
+                 "выбрасываю, чтобы не отвечать на них задним числом")
     log.info("Запуск polling...")
     app.run_polling(
         allowed_updates=["poll_answer", "message", "callback_query"],
-        drop_pending_updates=False,
+        drop_pending_updates=drop,
     )
 
 

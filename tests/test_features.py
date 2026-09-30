@@ -127,6 +127,36 @@ async def test_screen(bd) -> None:
     check("работает всё" in text, "и список выключенного пуст")
 
 
+def test_stale_queue() -> None:
+    """После долгого простоя накопленные нажатия не отыгрываются задним числом."""
+    print("\n=== очередь после простоя ===")
+    import bot_daemon as bd
+    import sheets_cache
+    from datetime import datetime, timedelta
+
+    check(bd._offline_for() == 0, "первый запуск — простоя нет")
+
+    bd._beat()
+    check(bd._offline_for() < 60, "только что билось — простой почти нулевой")
+
+    long_ago = (datetime.fromisoformat(sheets_cache.now_iso())
+                - timedelta(minutes=90)).isoformat()
+    sheets_cache.set_setting(bd.HEARTBEAT_KEY, long_ago)
+    gap = bd._offline_for()
+    check(5300 < gap < 5500, f"простой посчитан: {gap / 60:.0f} мин")
+    check(gap > bd.STALE_QUEUE_MINUTES * 60,
+          "полтора часа — очередь выбрасываем")
+
+    short = (datetime.fromisoformat(sheets_cache.now_iso())
+             - timedelta(seconds=20)).isoformat()
+    sheets_cache.set_setting(bd.HEARTBEAT_KEY, short)
+    check(bd._offline_for() < bd.STALE_QUEUE_MINUTES * 60,
+          "деплой в двадцать секунд — очередь бережём, голоса не теряются")
+
+    sheets_cache.set_setting(bd.HEARTBEAT_KEY, "ерунда")
+    check(bd._offline_for() == 0, "испорченная отметка не роняет запуск")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
@@ -134,6 +164,7 @@ def main() -> int:
     test_switch()
     test_senders_respect_switch()
     asyncio.run(test_screen(bd))
+    test_stale_queue()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")
