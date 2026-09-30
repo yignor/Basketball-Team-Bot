@@ -79,7 +79,12 @@ async def _infobasket_teams() -> List[Dict[str, Any]]:
             # второй команды оказывался чужим — а по нему считаются и цифры
             # состава, и закрытие лиги.
             own = [str(c) for c in (entry.get("comp_ids") or [])]
-            comp = own[-1] if own else first
+            every = [str(c) for c in (entry.get("all_comp_ids") or own)]
+            # Все турниры команды закрыты — она сейчас не играет. Чужой турнир
+            # ей подставлять нельзя: 30.09.2026 летней команде так достался
+            # сезон НБЛ, и она из закрытой снова стала «действующей».
+            shut = bool(every) and not own
+            comp = own[-1] if own else (every[-1] if every else first)
             name = ""
             try:
                 info = await stats_backfill.fetch_infobasket_team(tid, comp)
@@ -89,12 +94,24 @@ async def _infobasket_teams() -> List[Dict[str, Any]]:
             out.append({
                 "source": "infobasket", "team_id": str(tid),
                 "name": name or f"Команда {tid}",
-                "league": entry.get("alt_name") or "Инфобаскет",
+                "league": _comp_label(comp) or entry.get("alt_name") or "Инфобаскет",
                 "comp_id": comp, "season_id": comp, "stage_id": "", "ctx": None,
+                "closed": shut,
             })
     except Exception as e:
         log.warning(f"качалка: команды Инфобаскета — {e}")
     return out
+
+
+def _comp_label(comp: Any) -> str:
+    """Как турнир назван у лиги — чтобы в подписях стояла лига, а не команда."""
+    try:
+        import league_setup
+        entry = league_setup.comp_names().get(("infobasket", str(comp).upper())) or {}
+        return str(entry.get("title") or "")
+    except Exception as e:
+        log.warning(f"качалка: имя турнира {comp} — {e}")
+        return ""
 
 
 def _store_teams(teams: List[Dict[str, Any]]) -> int:
@@ -115,7 +132,7 @@ def _store_teams(teams: List[Dict[str, Any]]) -> int:
                 "SELECT season_id, stage_id, closed_at FROM league_teams "
                 "WHERE source = ? AND team_id = ?",
                 (t["source"], t["team_id"])).fetchone()
-            if was and str(was["closed_at"] or "") and (
+            if not t.get("closed") and was and str(was["closed_at"] or "") and (
                     str(was["season_id"] or "") != t["season_id"]
                     or str(was["stage_id"] or "") != t["stage_id"]):
                 conn.execute(
@@ -136,6 +153,13 @@ def _store_teams(teams: List[Dict[str, Any]]) -> int:
                 (t["source"], t["team_id"], t["name"], t["league"], t["comp_id"],
                  t["season_id"], t["stage_id"],
                  json.dumps(t["ctx"], ensure_ascii=False) if t.get("ctx") else "", now))
+            if t.get("closed"):
+                # Турниры команды закрыты — закрыта и она. Дату не трогаем,
+                # если пометка уже стояла.
+                conn.execute(
+                    "UPDATE league_teams SET closed_at = ? WHERE source = ? "
+                    "AND team_id = ? AND COALESCE(closed_at, '') = ''",
+                    (now, t["source"], t["team_id"]))
         conn.commit()
     return len(teams)
 

@@ -333,6 +333,78 @@ async def test_league_down(bd) -> None:
         bd._awaiting_team.pop(COACH.id, None)
 
 
+def test_closed_team_keeps_its_season() -> None:
+    """Команда, у которой закрыты все турниры, не получает чужой сезон."""
+    print("\n=== закрытая команда и новый сезон ===")
+    import asyncio as aio
+    import league_setup as ls
+    import league_sync
+    import sheets_cache
+    from enhanced_duplicate_protection import duplicate_protection
+
+    # Летняя команда из «Конфига»: оба её турнира закрыты. Новая — в НБЛ.
+    real = duplicate_protection.get_full_config
+    base = {"comp_ids": [140825, 142849], "team_ids": [36502],
+            "teams": {36502: {"alt_name": "Летняя лига",
+                              "comp_ids": [140825, 142849]}}}
+    duplicate_protection.get_full_config = (
+        lambda: duplicate_protection._with_bot_teams(dict(base)))
+    ls.close_comp("infobasket", 140825)
+    ls.close_comp("infobasket", 142849)
+    ls.add("32086", "Pull Up", [150295])
+    ls.set_comp_name("infobasket", 150295, "НБЛ. Третий дивизион", "26/27")
+
+    import stats_backfill
+    real_fetch = stats_backfill.fetch_infobasket_team
+
+    async def fake_fetch(tid, comp):
+        return {"name": "PULL UP" if str(tid) == "36502" else "Pull Up"}
+
+    stats_backfill.fetch_infobasket_team = fake_fetch
+    try:
+        cfg = duplicate_protection.get_config_ids()
+        check(cfg["comp_ids"] == [150295], f"следим только за новым турниром: {cfg['comp_ids']}")
+        check(cfg["teams"][36502]["comp_ids"] == [],
+              "у летней команды открытых турниров нет")
+        check(cfg["teams"][36502]["all_comp_ids"] == [140825, 142849],
+              "но мы помним, в каких она играла")
+
+        teams = aio.run(league_sync._infobasket_teams())
+        by_id = {t["team_id"]: t for t in teams}
+        check(by_id["36502"]["season_id"] == "142849",
+              f"сезон у неё свой, а не НБЛ: {by_id['36502']['season_id']}")
+        check(by_id["36502"]["closed"], "и она помечена как не играющая")
+        check(by_id["32086"]["season_id"] == "150295" and not by_id["32086"]["closed"],
+              "новая команда — в НБЛ и действующая")
+        check(by_id["32086"]["league"] == "НБЛ. Третий дивизион",
+              f"подписана турниром, а не названием команды: {by_id['32086']['league']}")
+
+        # В базе лежит испорченная строка: сезон НБЛ и пометка снята.
+        now = sheets_cache.now_iso()
+        with sheets_cache.get_connection() as conn:
+            conn.execute("DELETE FROM league_teams")
+            conn.execute(
+                "INSERT INTO league_teams (source, team_id, name, league, comp_id, "
+                "season_id, stage_id, ours, closed_at, fetched_at) VALUES "
+                "('infobasket', '36502', 'Команда 36502', 'Летняя лига', '150295', "
+                "'150295', '', 1, '', ?)", (now,))
+            conn.commit()
+        league_sync._store_teams(teams)
+        check(league_sync.is_closed("infobasket", "36502"),
+              "синхронизация сама вернула пометку «закрыта»")
+        mine = [t for t in league_sync.our_teams(include_closed=True)
+                if t["team_id"] == "36502"][0]
+        check(mine["season_id"] == "142849", "и свой сезон")
+        check([t["team_id"] for t in league_sync.our_teams("infobasket")] == ["32086"],
+              "действующей осталась только команда НБЛ")
+    finally:
+        duplicate_protection.get_full_config = real
+        stats_backfill.fetch_infobasket_team = real_fetch
+        ls.close_comp("infobasket", 140825, False)
+        ls.close_comp("infobasket", 142849, False)
+        ls.drop("32086")
+
+
 def main() -> int:
     print(f"База: {TMP}")
     bd = setup()
@@ -342,6 +414,7 @@ def main() -> int:
     asyncio.run(test_slpro(bd))
     asyncio.run(test_new_season_by_link(bd))
     asyncio.run(test_league_down(bd))
+    test_closed_team_keeps_its_season()
     print("\n" + "=" * 60)
     if bad:
         print(f"НЕ ПРОШЛО ({len(bad)}):")

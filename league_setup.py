@@ -144,9 +144,14 @@ def merge_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     # игры, ставить опросы и считать статистику. Лист «Конфиг» при этом цел —
     # вернуть турнир можно той же кнопкой.
     comps = {c for c in comps if str(c).upper() not in closed}
-    for tid, entry in teams.items():
-        entry["comp_ids"] = [c for c in (entry.get("comp_ids") or [])
+    for tid, entry in list(teams.items()):
+        entry = dict(entry or {})
+        # Полный список оставляем рядом: по нему видно, что команда играла, но
+        # все её турниры закрыты, — а это не то же самое, что «турнира нет».
+        entry["all_comp_ids"] = list(entry.get("comp_ids") or [])
+        entry["comp_ids"] = [c for c in entry["all_comp_ids"]
                              if str(c).upper() not in closed]
+        teams[tid] = entry
     payload = dict(payload)
     payload["comp_ids"] = sorted(comps)
     payload["team_ids"] = sorted(teams_ids)
